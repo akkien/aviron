@@ -32,6 +32,28 @@ definitions:
       id:
         type: string
     type: object
+  internal_race.createRaceRequest:
+    properties:
+      distance_meters:
+        type: integer
+      name:
+        type: string
+    type: object
+  internal_race.createRaceResponse:
+    properties:
+      created_at:
+        type: string
+      created_by:
+        type: string
+      distance_meters:
+        type: integer
+      id:
+        type: string
+      name:
+        type: string
+      status:
+        type: string
+    type: object
 info:
   contact: {}
   description: Real-time multiplayer fitness backend (Aviron-inspired). See context/project-overview.md
@@ -122,4 +144,37 @@ paths:
       summary: Health check
       tags:
       - system
+  /races:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new typing race with a name and target word count
+      parameters:
+      - description: Create race payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_race.createRaceRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_race.createRaceResponse'
+        "400":
+          description: field-keyed validation errors
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create a race
+      tags:
+      - races
 swagger: "2.0"

@@ -1,24 +1,274 @@
-# Current Feature
+# Current Feature: Create Race
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- bullet points of what success looks like -->
+- `POST /races` (authenticated) → `201` with `{id, name, distance_meters, status: "pending", created_by, created_at}`
+- `400` field-keyed errors for invalid `name` (empty/>100 chars) or `distance_meters` (not a positive integer)
+- The creator is recorded in `created_by` but not auto-joined as a participant
+- `go test ./... -race` passes for the new `internal/race` package
+- This is the first endpoint actually wrapped with `middleware.Auth` — `internal/middleware` finally gets wired into a route
 
 ## Explain
 
-<!-- bullet points explaining the feature/spec -->
+- First domain package beyond `auth` — follows the exact same layered shape (`RaceHandler`/`RaceService`/`RaceRepository`, `NewRaceHandler`/`NewRaceService`, `dtos.go`) documented in coding-standards.md's "Backend Architecture" and "Personal naming styles" sections
+- The spec (`context/features/races/create-race.md`) describes an older flat-function handler style (`CreateRaceHandler(pool) http.HandlerFunc`) written before that domain-prefixed convention was established during the auth features. Following the current standard instead of the spec's literal wording — noting the divergence here rather than silently ignoring it.
+- No new migration: `races` already has every column this feature needs (`id`, `name`, `distance_meters`, `status`, `created_by`, `created_at`) from the scaffolding feature's `000001_init_schema` migration. `prompt_text` (needed by `races/start-race`, next-but-one) isn't touched here.
+- `distance_meters` is the typing race's target word count, not a literal distance (context/project-overview.md §13) — the domain struct and DB column names are unchanged, only their meaning
+- The handler reads the caller's id via `middleware.UserIDFromContext` for `created_by` — this is the first time anything in the codebase actually calls `middleware.Auth`/`UserIDFromContext` in a real request path, closing the loop the `jwt-middleware` feature left open
 
 ## Plan
 
-<!-- implementation steps, architecture/design notes, tradeoffs -->
+### New files
+
+```text
+backend/
+  internal/
+    race/
+      race.go              # Race domain struct
+      repository.go          # RaceRepository interface
+      service.go               # RaceService, NewRaceService, CreateRace, validation
+      service_test.go
+      handler.go                 # RaceHandler, NewRaceHandler, Create
+      handler_test.go
+      helpers_test.go               # fakeRepository
+      dtos.go                        # createRaceRequest, createRaceResponse
+    postgres/
+      race_repository.go              # RaceRepository impl backed by pgx
+  internal/httpserver/route.go          # wires RaceRepository/RaceService/RaceHandler, registers POST /races behind middleware.Auth
+```
+
+### `internal/race/race.go`
+
+```go
+package race
+
+import "time"
+
+type Race struct {
+    ID             string
+    Name           string
+    DistanceMeters int
+    Status         string
+    CreatedBy      string
+    CreatedAt      time.Time
+}
+```
+
+Minimal on purpose, same pattern as `auth.User` — only the fields this feature actually returns. `StartedAt`/`EndedAt`/`PromptText` get added when `races/start-race` needs them, not preemptively.
+
+### `internal/race/repository.go`
+
+```go
+package race
+
+import "context"
+
+type RaceRepository interface {
+    CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (Race, error)
+}
+```
+
+### `internal/race/service.go`
+
+```go
+package race
+
+import (
+    "context"
+    "strings"
+)
+
+type RaceService struct {
+    repo RaceRepository
+}
+
+func NewRaceService(repo RaceRepository) *RaceService {
+    return &RaceService{repo: repo}
+}
+
+func (s *RaceService) CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (r Race, fieldErrs map[string]string, err error) {
+    if errs := validateCreateRace(name, distanceMeters); len(errs) > 0 {
+        return Race{}, errs, nil
+    }
+
+    r, err = s.repo.CreateRace(ctx, strings.TrimSpace(name), distanceMeters, createdBy)
+    if err != nil {
+        return Race{}, nil, err
+    }
+    return r, nil, nil
+}
+
+func validateCreateRace(name string, distanceMeters int) map[string]string {
+    errs := map[string]string{}
+
+    trimmed := strings.TrimSpace(name)
+    if len(trimmed) == 0 || len(name) > 100 {
+        errs["name"] = "must be 1-100 characters"
+    }
+    if distanceMeters <= 0 {
+        errs["distance_meters"] = "must be a positive integer"
+    }
+
+    return errs
+}
+```
+
+Mirrors `auth.validateRegister`'s exact quirk (checks the *trimmed* string for emptiness but the *original* string's length against the max) for consistency with existing code, not because it's necessarily the ideal validation.
+
+### `internal/race/dtos.go`
+
+```go
+package race
+
+type createRaceRequest struct {
+    Name           string `json:"name"`
+    DistanceMeters int    `json:"distance_meters"`
+}
+
+type createRaceResponse struct {
+    ID             string `json:"id"`
+    Name           string `json:"name"`
+    DistanceMeters int    `json:"distance_meters"`
+    Status         string `json:"status"`
+    CreatedBy      string `json:"created_by"`
+    CreatedAt      string `json:"created_at"`
+}
+```
+
+### `internal/race/handler.go`
+
+```go
+package race
+
+type RaceHandler struct {
+    svc *RaceService
+}
+
+func NewRaceHandler(svc *RaceService) *RaceHandler {
+    return &RaceHandler{svc: svc}
+}
+
+// Create godoc
+// @Summary Create a race
+// @Description Creates a new typing race with a name and target word count
+// @Tags races
+// @Accept json
+// @Produce json
+// @Param request body createRaceRequest true "Create race payload"
+// @Success 201 {object} createRaceResponse
+// @Failure 400 {object} map[string]interface{} "field-keyed validation errors"
+// @Failure 401 {object} map[string]string "error: unauthorized"
+// @Router /races [post]
+func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
+    userID, ok := middleware.UserIDFromContext(r.Context())
+    if !ok {
+        httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+        return
+    }
+
+    var req createRaceRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        httpx.WriteError(w, http.StatusBadRequest, "invalid_body")
+        return
+    }
+
+    created, fieldErrs, err := h.svc.CreateRace(r.Context(), req.Name, req.DistanceMeters, userID)
+    if len(fieldErrs) > 0 {
+        httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{"errors": fieldErrs})
+        return
+    }
+    if err != nil {
+        httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+        return
+    }
+
+    httpx.WriteJSON(w, http.StatusCreated, createRaceResponse{
+        ID:             created.ID,
+        Name:           created.Name,
+        DistanceMeters: created.DistanceMeters,
+        Status:         created.Status,
+        CreatedBy:      created.CreatedBy,
+        CreatedAt:      created.CreatedAt.Format(time.RFC3339),
+    })
+}
+```
+
+The `UserIDFromContext` check runs even though `middleware.Auth` will always be wrapped around this handler in `route.go` — defense in depth, and it's what makes `TestRaceHandler_Create_MissingAuth` (calling `h.Create` directly, no middleware) meaningful.
+
+### `internal/postgres/race_repository.go`
+
+```go
+package postgres
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/akkien/aviron/internal/race"
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
+type RaceRepository struct {
+    pool *pgxpool.Pool
+}
+
+func NewRaceRepository(pool *pgxpool.Pool) *RaceRepository {
+    return &RaceRepository{pool: pool}
+}
+
+func (r *RaceRepository) CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (race.Race, error) {
+    var rc race.Race
+
+    err := r.pool.QueryRow(ctx, `
+        INSERT INTO races (name, distance_meters, created_by)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, distance_meters, status, created_by, created_at
+    `, name, distanceMeters, createdBy).Scan(&rc.ID, &rc.Name, &rc.DistanceMeters, &rc.Status, &rc.CreatedBy, &rc.CreatedAt)
+
+    if err != nil {
+        return race.Race{}, fmt.Errorf("postgres: create race: %w", err)
+    }
+
+    return rc, nil
+}
+```
+
+No error translation needed here (unlike `AuthRepository.CreateUser`) — there's no unique constraint on race name to catch.
+
+### `internal/httpserver/route.go`
+
+```go
+requireAuth := middleware.Auth([]byte(cfg.JWTSecret))
+
+raceRepo := postgres.NewRaceRepository(pool)
+raceSvc := race.NewRaceService(raceRepo)
+raceHandler := race.NewRaceHandler(raceSvc)
+
+server.Handle("POST /races", requireAuth(http.HandlerFunc(raceHandler.Create)))
+```
+
+`server.Handle` (not `HandleFunc`) since wrapping with `middleware.Auth` produces an `http.Handler`, not a bare func. This is the first route in the codebase actually wrapped with auth middleware.
+
+### Tests
+
+- `helpers_test.go`: `fakeRepository` — in-memory `RaceRepository`, no DB
+- `service_test.go`: `TestRaceService_CreateRace_Success` (trims name, status defaults to `pending`, `created_by` set); `TestRaceService_CreateRace_ValidationErrors` (table-driven: empty name, whitespace-only name, zero/negative distance)
+- `handler_test.go`: mints a real signed JWT with `jwt.NewWithClaims` (same approach `internal/middleware`'s own tests use — `internal/race` doesn't depend on `internal/auth`'s `Login` flow to get a token) and drives requests through `middleware.Auth(secret)(http.HandlerFunc(h.Create))` for the realistic cases (`TestRaceHandler_Create_Created`, `_ValidationError`, `_InvalidBody`), plus `TestRaceHandler_Create_MissingAuth` calling `h.Create` directly with no middleware wrapping, to exercise the handler's own defensive check
+
+### New dependency
+
+- None — reuses `github.com/golang-jwt/jwt/v5` (test-only, for minting a token) and existing `pgx`/`httpx` patterns
+
+No divergence from context/project-overview.md; the only divergences are from the feature spec's literal handler-style wording (noted in Explain above).
 
 ## Notes
 
-<!-- constraints, edge cases -->
+- After this merges, regenerate Swagger docs (`make docs`) to pick up the new `Create` annotations
+- Next feature per context/features/phase-1-plan.md: `races/join-race`
 
 ## History
 
