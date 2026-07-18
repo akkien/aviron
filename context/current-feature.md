@@ -2,12 +2,12 @@
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-- `go build ./...` succeeds from `backend/` (module `aviron/backend`, Go 1.22)
-- `docker compose up -d postgres` starts Postgres 16 on `localhost:5432`; `go run ./cmd/server` applies pending migrations on startup
+- `go build ./...` succeeds from `backend/` (module `github.com/akkien/aviron/backend`)
+- `docker compose up -d postgres` starts Postgres 18-alpine on `localhost:5432`; `go run ./cmd/server` applies pending migrations on startup
 - `GET /healthz` returns `200 {"status":"ok"}` when `pool.Ping(ctx)` succeeds, `503 {"status":"db_unreachable"}` otherwise
 - `go test ./... -race` passes
 - `make run` starts the server, `make test` runs the suite
@@ -56,12 +56,16 @@ type Config struct {
 }
 
 func Load() Config {
+    _ = godotenv.Load() // no-op if .env is absent (e.g. in production)
+
     return Config{
         DatabaseURL: getEnv("DATABASE_URL", "postgres://aviron:aviron@localhost:5432/aviron?sslmode=disable"),
         Port:        getEnv("PORT", "8080"),
     }
 }
 ```
+
+Loads `backend/.env` via `github.com/joho/godotenv` before reading env vars, so local dev doesn't require exporting `DATABASE_URL`/`PORT` by hand. `backend/.env` is gitignored (already covered by the root `.gitignore`'s `.env` pattern); `backend/.env.example` is committed with the same keys and local-dev-safe values so the two stay in sync.
 
 ### `internal/db`
 
@@ -124,7 +128,7 @@ func main() {
 ```yaml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: aviron
       POSTGRES_PASSWORD: aviron
@@ -132,7 +136,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 volumes:
   pgdata:
 ```
@@ -149,15 +153,14 @@ test:
 
 ### Tests
 
-- `internal/httpserver/healthz_test.go`: `TestHealthz_OK` spins up `httptest.NewServer(NewServer(pool))` against a real test DB and asserts `200` + `{"status":"ok"}`
-- Stretch: `TestHealthz_DBUnreachable` against a pool pointed at an unreachable DSN, asserting `503` — only if faking a dead pool cleanly is easy with `pgxpool`; otherwise skip and note it as a gap
+- `internal/httpserver/healthz_test.go`: `TestHealthz_OK` spins up `httptest.NewServer(NewServer(pool))` against a real Postgres (from `DATABASE_URL` or the docker-compose default) and asserts `200` + `{"status":"ok"}`; it calls `t.Skip` if that Postgres isn't reachable, so `go test ./...` still works without Docker running
+- `TestHealthz_DBUnreachable` points the pool at `localhost:1` (nothing listens there, so `Ping` fails fast) and asserts `503` + `{"status":"db_unreachable"}` — the stretch case turned out easy to implement, so it's in rather than skipped
 
-No divergence from context/project-overview.md's suggested tech stack (§11) — `pgx`/`pgxpool`, Docker Compose for Phase 1, no ORM.
+Divergence from context/project-overview.md §11: using `postgres:18-alpine` instead of the suggested "PostgreSQL 16" — newer major version, smaller Alpine-based image; no schema-relevant difference for this feature. Note: the official image changed its volume convention starting with 18 — mount the volume at `/var/lib/postgresql` (not `/var/lib/postgresql/data`), or the container refuses to start, mistaking the empty mount for an unmigrated old-version data directory. Otherwise no divergence — `pgx`/`pgxpool`, Docker Compose for Phase 1, no ORM.
 
 ## Notes
 
-- Repo is not yet a git repository (`git init` needed) — required before `/feature start` can create a branch
-- Module path is decided as `aviron/backend` (short local path, not a publishable URL) since there's no remote yet; revisit if this repo gets pushed somewhere and imports need a real path
+- Module path is `github.com/akkien/aviron/backend`, matching the `origin` remote (`git@github.com:akkien/aviron.git`)
 - "Done" means: build green, tests green, `/healthz` returns 200 against local Postgres
 - Next feature per the roadmap (context/project-overview.md §12, Phase 1): auth (`POST /auth/register`, `POST /auth/login`)
 

@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: aviron
+      POSTGRES_PASSWORD: aviron
+      POSTGRES_DB: aviron
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+volumes:
+  pgdata:
