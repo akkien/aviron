@@ -42,3 +42,5 @@ Anyone authenticated can check a race's current status and who's in it. This pow
 ## Notes
 
 - `finish_rank` / `finish_time_ms` / `avg_pace_watt` are always `null` in Phase 1 responses — nothing populates them until Phase 2's race-finish logic exists
+- `distance_meters` here is the typing race's target word count, not a literal distance — see context/project-overview.md §13
+- Deliberately doesn't include `prompt_text` — that's a separate, potentially large payload fetched via `GET /races/{id}/text` (`races/start-race.md`), kept out of this otherwise-small, frequently-polled response

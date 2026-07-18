@@ -36,3 +36,4 @@ An authenticated user joins an existing race, becoming a participant. This retur
 ## Notes
 
 - Deliberately no `session_token` column on `race_participants` — stateless, matching how the main JWT already works
+- After joining, once the creator calls `POST /races/{id}/start` (`races/start-race.md`), participants fetch the shared typing-race prompt via `GET /races/{id}/text` — this endpoint doesn't need the `session_token`, only the main JWT (see context/project-overview.md §13)

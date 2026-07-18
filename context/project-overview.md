@@ -12,6 +12,8 @@ Aviron (<avironactive.com>) sells connected fitness equipment (rowers, bikes, tr
 
 That's why the JD emphasizes: goroutines/channels/context, data races & goroutine leaks, reconnection handling, PostgreSQL, and "strong plus" items like Redis/Kafka/NATS/K8s/ClickHouse.
 
+This project simulates that "workout telemetry" signal with a **typing race** rather than real fitness hardware — see §13 for the concrete mechanic. The real-time sync, reconnection, and leaderboard architecture below is unchanged either way; only the meaning of the per-tick number changes.
+
 ## 1. Goal & scope of the side project
 
 **Goal:** practice exactly the skills the JD lists, not rebuild the whole of Aviron. The focus stays on the backend; the frontend is written in React, but only to the extent needed to test the system (no need to polish UI/UX).
@@ -20,14 +22,14 @@ That's why the JD emphasizes: goroutines/channels/context, data races & goroutin
 
 - Simple auth (JWT, no need for complex OAuth)
 - Create/join a real-time "race room" over WebSocket
-- Sync race position (distance/pace) across multiple clients in a room, ticking at a fixed interval (e.g. 250ms)
+- Sync race position across multiple clients in a room, ticking at a fixed interval (e.g. 250ms) — position is driven by words typed correctly in a shared typing race (§13), not real fitness telemetry
 - Reconnect handling: a client that drops still rejoins the correct race instead of being treated as "quit" immediately
 - Persist race results + workout history in PostgreSQL
 - Basic leaderboard (all-time, per-race) queried from Postgres first, later upgraded via ClickHouse
 - Horizontal scaling: run ≥2 Go instances, use Redis pub/sub to sync room state cross-instance
 - Observability: structured logs, Prometheus metrics, optionally OpenTelemetry tracing
 - Testing: unit tests for logic, `go test -race` for concurrency, load testing with k6/ghz
-- Frontend: a small React app (Vite) — login screen, create/join race, and one view showing participants' positions updating in real time over WebSocket. Open multiple tabs/browsers to simulate multiple players.
+- Frontend: a small React app (Vite) — login screen, create/join race, and a typing-race view (type a shared prompt to move your car) showing participants' positions updating in real time over WebSocket. Real typing input doubles as the "device telemetry," so no simulated fitness device is needed. Open multiple tabs/browsers to simulate multiple players.
 - Local infra runs on Kubernetes (kind or minikube) instead of just Docker Compose, to genuinely practice the "exposure to... Kubernetes" line in the JD.
 
 **Out of scope (skip to keep the project achievable):**
@@ -64,7 +66,8 @@ CREATE TABLE users (
 CREATE TABLE races (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
-  distance_meters INT NOT NULL,          -- race target, e.g. 2000m
+  distance_meters INT NOT NULL,          -- race target; for this project's typing race, the target word count (e.g. 1000) — name kept as-is, see §13
+  prompt_text TEXT,                      -- the generated word text for this race; NULL until POST /races/{id}/start
   status TEXT NOT NULL DEFAULT 'pending', -- pending|active|finished|cancelled
   created_by UUID NOT NULL REFERENCES users(id),
   started_at TIMESTAMPTZ,
@@ -78,7 +81,7 @@ CREATE TABLE race_participants (
   user_id UUID NOT NULL REFERENCES users(id),
   finish_rank INT,
   finish_time_ms BIGINT,
-  avg_pace_watt NUMERIC,
+  avg_pace_watt NUMERIC,                 -- for the typing race: average words-per-minute — name kept as-is, see §13
   disconnected_count INT NOT NULL DEFAULT 0,
   joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (race_id, user_id)
@@ -90,9 +93,9 @@ CREATE TABLE workout_samples (
   race_id UUID NOT NULL REFERENCES races(id),
   user_id UUID NOT NULL REFERENCES users(id),
   ts TIMESTAMPTZ NOT NULL,
-  distance_m NUMERIC NOT NULL,
-  pace_watt NUMERIC,
-  stroke_rate INT
+  distance_m NUMERIC NOT NULL,           -- for the typing race: words typed correctly so far — name kept as-is, see §13
+  pace_watt NUMERIC,                     -- for the typing race: current words-per-minute
+  stroke_rate INT                        -- unused for the typing race
 );
 CREATE INDEX idx_workout_samples_race_user_ts ON workout_samples (race_id, user_id, ts);
 
@@ -164,6 +167,7 @@ Server -> Client: {"type":"race_finished","results":[...]}
 
 - `seq` is a monotonically increasing counter set by the client → the server uses it to detect **message ordering / out-of-order / duplicate** messages (caused by retries after a dropped connection). The server only applies a sample if its `seq` is greater than the last sample it received for that participant.
 - The server-side tick rate is decoupled from how often clients send data — separating "ingest rate" from "broadcast rate" for better load handling.
+- For this project's typing race (§13), the client sends one `telemetry` message per word typed correctly, not on a fixed timer — `distance_m` is the running count of correct words, `pace_watt` is current WPM. This is naturally bounded by human typing speed (roughly 0.4–2s between messages), which fits neatly into the decoupled ingest/broadcast design above without any special-casing.
 
 ### 4.3. Reconnection
 
@@ -227,6 +231,8 @@ Things worth practicing here because they connect directly to the spirit of the 
 - `POST /auth/register`, `POST /auth/login`
 - `POST /races` — create a race
 - `POST /races/{id}/join` — returns a WS session token
+- `POST /races/{id}/start` — creator starts the race: generates the shared typing-race prompt text, flips status to `active` (§13)
+- `GET /races/{id}/text` — fetch the race's already-generated prompt text (for players joining after start, or reconnecting)
 - `GET /races/{id}` — status/results
 - `GET /leaderboard?window=alltime|weekly`
 
@@ -281,3 +287,13 @@ Things worth practicing here because they connect directly to the spirit of the 
 - Move the entire stack (Postgres, Redis, Kafka, race-service, api-gateway) onto local Kubernetes (kind/minikube) — this is when multi-instance behavior actually becomes meaningful to test (HPA, rolling updates that don't drop active WebSocket connections, etc.).
 
 Work through the phases in order — don't jump straight to Phase 4. Phase 2 is what the JD values most (concurrency + real-time consistency), so spend the most time there and write plenty of tests for it. Kafka and Kubernetes only pay off once you actually have ≥2 instances that need to stay in sync — doing them earlier tends to turn into infrastructure overhead rather than Go practice.
+
+## 13. This project's race mechanic: typing race
+
+Rather than simulating real fitness-device telemetry in the browser (awkward to fake convincingly), this project's "workout" is a **typing race**: players race cars whose position is driven by how many words they type correctly against a shared prompt, generated fresh per race.
+
+- `POST /races/{id}/start` (creator-only) generates a random word string server-side and stores it on the race row (`races.prompt_text`); flips `status` to `active`. `GET /races/{id}/text` lets any participant fetch that same text — needed for players who load in after start, or reconnect mid-race.
+- The client sends one `telemetry` message (§4.2) per word typed correctly, not on a fixed timer — this is naturally bounded by human typing speed (roughly 0.4–2s between messages even for a fast typist), which is neither too chatty for the server nor too sparse for a responsive race; the room actor's decoupled 250ms broadcast tick keeps everyone else's view smooth regardless of exactly when a given player's message arrives.
+- The server never inspects what a player actually typed — it trusts the client-reported progress the same way it would trust a real rowing machine's reported distance, i.e. no server-side text verification. This keeps the trust model identical to the original fitness-telemetry design.
+- Existing schema/protocol field names are deliberately reused rather than renamed for this mechanic (`distance_meters` is the target word count, `distance_m` is words-typed-correctly, `pace_watt` is WPM, `stroke_rate` is unused) — avoids schema churn since the underlying real-time architecture doesn't care what the numbers represent.
+- Everything else in this document — the room actor pattern (§4.1), reconnection (§4.3), horizontal scaling (§5), event pipeline (§6), Kubernetes (§7), observability (§9), testing strategy (§10) — applies unchanged; only the meaning of the telemetry signal changed.
