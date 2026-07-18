@@ -189,6 +189,71 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/races/{id}/join": {
+            "post": {
+                "description": "Joins an existing race as a participant, returning a per-race session token",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "races"
+                ],
+                "summary": "Join a race",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Race ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_race.joinRaceResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "error: invalid_race_id",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "error: unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "error: race_not_found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "error: already_joined | race_not_pending",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -272,6 +337,17 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_race.joinRaceResponse": {
+            "type": "object",
+            "properties": {
+                "race_id": {
+                    "type": "string"
+                },
+                "session_token": {
                     "type": "string"
                 }
             }

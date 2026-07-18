@@ -2,6 +2,7 @@ package race_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/akkien/aviron/internal/race"
@@ -9,7 +10,7 @@ import (
 
 func TestRaceService_CreateRace_Success(t *testing.T) {
 	repo := newFakeRepository()
-	svc := race.NewRaceService(repo)
+	svc := race.NewRaceService(repo, []byte("test-secret"))
 
 	r, fieldErrs, err := svc.CreateRace(context.Background(), "  Morning Sprint  ", 1000, "user-1")
 	if err != nil {
@@ -48,7 +49,7 @@ func TestRaceService_CreateRace_ValidationErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := newFakeRepository()
-			svc := race.NewRaceService(repo)
+			svc := race.NewRaceService(repo, []byte("test-secret"))
 
 			_, fieldErrs, err := svc.CreateRace(context.Background(), tt.raceName, tt.distanceMeters, "user-1")
 			if err != nil {
@@ -58,5 +59,70 @@ func TestRaceService_CreateRace_ValidationErrors(t *testing.T) {
 				t.Errorf("fieldErrs = %v, want key %q", fieldErrs, tt.wantField)
 			}
 		})
+	}
+}
+
+func TestRaceService_JoinRace_Success(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+
+	token, err := svc.JoinRace(ctx, created.ID, "user-2")
+	if err != nil {
+		t.Fatalf("JoinRace() error = %v", err)
+	}
+	if token == "" {
+		t.Error("token is empty, want a signed JWT")
+	}
+}
+
+func TestRaceService_JoinRace_RaceNotFound(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+
+	_, err := svc.JoinRace(context.Background(), "nonexistent-race", "user-1")
+	if !errors.Is(err, race.ErrRaceNotFound) {
+		t.Errorf("err = %v, want ErrRaceNotFound", err)
+	}
+}
+
+func TestRaceService_JoinRace_AlreadyJoined(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	if _, err := svc.JoinRace(ctx, created.ID, "user-2"); err != nil {
+		t.Fatalf("first JoinRace() error = %v", err)
+	}
+
+	_, err = svc.JoinRace(ctx, created.ID, "user-2")
+	if !errors.Is(err, race.ErrAlreadyJoined) {
+		t.Errorf("err = %v, want ErrAlreadyJoined", err)
+	}
+}
+
+func TestRaceService_JoinRace_RaceNotPending(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	repo.races[0].Status = "active"
+
+	_, err = svc.JoinRace(ctx, created.ID, "user-2")
+	if !errors.Is(err, race.ErrRaceNotPending) {
+		t.Errorf("err = %v, want ErrRaceNotPending", err)
 	}
 }

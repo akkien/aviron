@@ -26,10 +26,11 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	requireAuth := middleware.Auth([]byte(cfg.JWTSecret))
 
 	raceRepo := postgres.NewRaceRepository(pool)
-	raceSvc := race.NewRaceService(raceRepo)
+	raceSvc := race.NewRaceService(raceRepo, []byte(cfg.JWTSecret))
 	raceHandler := race.NewRaceHandler(raceSvc)
 
 	server.Handle("POST /races", requireAuth(http.HandlerFunc(raceHandler.Create)))
+	server.Handle("POST /races/{id}/join", requireAuth(http.HandlerFunc(raceHandler.Join)))
 
 	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
 }

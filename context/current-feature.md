@@ -1,24 +1,239 @@
-# Current Feature
+# Current Feature: Join Race
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- bullet points of what success looks like -->
+- `POST /races/{id}/join` (authenticated) → `200` with `{race_id, session_token}`
+- `400 invalid_race_id` if `{id}` isn't a well-formed UUID
+- `404 race_not_found` if the race doesn't exist
+- `409 race_not_pending` if the race isn't `pending`; `409 already_joined` if the caller already joined
+- `session_token` is a signed HS256 JWT (`race_id`, `user_id` claims, 6h TTL, same `JWT_SECRET`) — no DB column needed
+- `go test ./... -race` passes for the extended `internal/race` package
 
 ## Explain
 
-<!-- bullet points explaining the feature/spec -->
+- Extends the existing `internal/race` package (`RaceRepository`/`RaceService`/`RaceHandler`) rather than creating a new one — same pattern as `auth/login` extending `auth`'s types instead of a separate package
+- `RaceService` gains a `jwtSecret []byte` field via `NewRaceService(repo, jwtSecret)`, mirroring `AuthService`'s exact shape — each service that signs tokens holds its own copy of the secret rather than sharing a JWT-signing helper package; not worth abstracting for two call sites
+- Three new domain sentinel errors: `ErrRaceNotFound` (translated from `pgx.ErrNoRows` in `GetRace`, same convention as `auth.ErrUserNotFound`), `ErrAlreadyJoined` (translated from a `race_participants` unique-violation, same convention as `auth.ErrEmailTaken`), and `ErrRaceNotPending` (a service-level business-rule check, not a repository translation — nothing in Postgres itself rejects this)
+- `{id}` UUID-format validation happens in the **handler**, not the service — it's a malformed-request concern (plain `{"error": code}`) like `Register`'s JSON-decode failure, not a field-keyed validation error like `name`/`distance_meters`. Validated with a small regex, not a `github.com/google/uuid` dependency — consistent with this project's existing choice to keep ids as plain `string` everywhere (noted in the `jwt-middleware` feature)
+- No new migration: `race_participants` already has every column this feature needs (`race_id`, `user_id`, plus defaults for the rest) from the scaffolding migration
 
 ## Plan
 
-<!-- implementation steps, architecture/design notes, tradeoffs -->
+### New/changed files
+
+```text
+backend/
+  internal/
+    race/
+      race.go              # + ErrRaceNotFound, ErrAlreadyJoined, ErrRaceNotPending
+      repository.go          # + GetRace, AddParticipant in the RaceRepository interface
+      service.go               # + jwtSecret field, NewRaceService gains a param, + JoinRace method
+      service_test.go           # existing NewRaceService(repo) calls updated; + JoinRace tests
+      handler.go                 # + Join handler, isValidUUID helper
+      handler_test.go             # existing newTestHandler() updated; + Join tests
+      helpers_test.go               # fakeRepository gains GetRace, AddParticipant, participants map
+      dtos.go                        # + joinRaceResponse
+    postgres/
+      race_repository.go              # + GetRace, AddParticipant (reuses the existing uniqueViolation const from auth_repository.go)
+    httpserver/
+      route.go                          # + POST /races/{id}/join route, NewRaceService call gains cfg.JWTSecret
+```
+
+### `internal/race/race.go`
+
+```go
+var ErrRaceNotFound = errors.New("race: not found")
+var ErrAlreadyJoined = errors.New("race: already joined")
+var ErrRaceNotPending = errors.New("race: not pending")
+```
+
+### `internal/race/repository.go`
+
+```go
+type RaceRepository interface {
+    CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (Race, error)
+    GetRace(ctx context.Context, raceID string) (Race, error)
+    AddParticipant(ctx context.Context, raceID, userID string) error
+}
+```
+
+### `internal/race/service.go`
+
+```go
+type RaceService struct {
+    repo      RaceRepository
+    jwtSecret []byte
+}
+
+func NewRaceService(repo RaceRepository, jwtSecret []byte) *RaceService {
+    return &RaceService{repo: repo, jwtSecret: jwtSecret}
+}
+
+func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sessionToken string, err error) {
+    r, err := s.repo.GetRace(ctx, raceID)
+    if err != nil {
+        return "", err // ErrRaceNotFound passes through as-is; handler checks errors.Is
+    }
+
+    if r.Status != "pending" {
+        return "", ErrRaceNotPending
+    }
+
+    if err := s.repo.AddParticipant(ctx, raceID, userID); err != nil {
+        return "", err // ErrAlreadyJoined passes through as-is
+    }
+
+    claims := jwt.MapClaims{
+        "race_id": raceID,
+        "user_id": userID,
+        "exp":     time.Now().Add(6 * time.Hour).Unix(),
+    }
+    signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtSecret)
+    if err != nil {
+        return "", fmt.Errorf("race: sign session token: %w", err)
+    }
+
+    return signed, nil
+}
+```
+
+`CreateRace` is unchanged except that it's now a method on a `RaceService` that also holds `jwtSecret` — same shape as `Register` unaffected by `Login` adding that field to `AuthService`. No `fieldErrs` return here (unlike `CreateRace`) since the only input validation — UUID format — already happened in the handler before this is called.
+
+### `internal/race/dtos.go`
+
+```go
+type joinRaceResponse struct {
+    RaceID       string `json:"race_id"`
+    SessionToken string `json:"session_token"`
+}
+```
+
+### `internal/race/handler.go`
+
+```go
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func isValidUUID(s string) bool {
+    return uuidPattern.MatchString(s)
+}
+
+// Join godoc
+// @Summary Join a race
+// @Description Joins an existing race as a participant, returning a per-race session token
+// @Tags races
+// @Produce json
+// @Param id path string true "Race ID"
+// @Success 200 {object} joinRaceResponse
+// @Failure 400 {object} map[string]string "error: invalid_race_id"
+// @Failure 401 {object} map[string]string "error: unauthorized"
+// @Failure 404 {object} map[string]string "error: race_not_found"
+// @Failure 409 {object} map[string]string "error: already_joined | race_not_pending"
+// @Router /races/{id}/join [post]
+func (h *RaceHandler) Join(w http.ResponseWriter, r *http.Request) {
+    userID, ok := middleware.UserIDFromContext(r.Context())
+    if !ok {
+        httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+        return
+    }
+
+    raceID := r.PathValue("id")
+    if !isValidUUID(raceID) {
+        httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
+        return
+    }
+
+    sessionToken, err := h.svc.JoinRace(r.Context(), raceID, userID)
+    switch {
+    case errors.Is(err, ErrRaceNotFound):
+        httpx.WriteError(w, http.StatusNotFound, "race_not_found")
+        return
+    case errors.Is(err, ErrRaceNotPending):
+        httpx.WriteError(w, http.StatusConflict, "race_not_pending")
+        return
+    case errors.Is(err, ErrAlreadyJoined):
+        httpx.WriteError(w, http.StatusConflict, "already_joined")
+        return
+    case err != nil:
+        httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+        return
+    }
+
+    httpx.WriteJSON(w, http.StatusOK, joinRaceResponse{
+        RaceID:       raceID,
+        SessionToken: sessionToken,
+    })
+}
+```
+
+### `internal/postgres/race_repository.go`
+
+```go
+func (r *RaceRepository) GetRace(ctx context.Context, raceID string) (race.Race, error) {
+    var rc race.Race
+
+    err := r.pool.QueryRow(ctx, `
+        SELECT id, name, distance_meters, status, created_by, created_at
+        FROM races
+        WHERE id = $1
+    `, raceID).Scan(&rc.ID, &rc.Name, &rc.DistanceMeters, &rc.Status, &rc.CreatedBy, &rc.CreatedAt)
+
+    if err != nil {
+        if errors.Is(err, pgx.ErrNoRows) {
+            return race.Race{}, race.ErrRaceNotFound
+        }
+        return race.Race{}, fmt.Errorf("postgres: get race: %w", err)
+    }
+    return rc, nil
+}
+
+func (r *RaceRepository) AddParticipant(ctx context.Context, raceID, userID string) error {
+    _, err := r.pool.Exec(ctx, `
+        INSERT INTO race_participants (race_id, user_id)
+        VALUES ($1, $2)
+    `, raceID, userID)
+
+    if err != nil {
+        var pgErr *pgconn.PgError
+        if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+            return race.ErrAlreadyJoined
+        }
+        return fmt.Errorf("postgres: add participant: %w", err)
+    }
+    return nil
+}
+```
+
+`uniqueViolation` is the existing package-level const already defined in `auth_repository.go` (same `package postgres`) — reused as-is, not redefined.
+
+### `internal/httpserver/route.go`
+
+```go
+raceSvc := race.NewRaceService(raceRepo, []byte(cfg.JWTSecret))
+...
+server.Handle("POST /races", requireAuth(http.HandlerFunc(raceHandler.Create)))
+server.Handle("POST /races/{id}/join", requireAuth(http.HandlerFunc(raceHandler.Join)))
+```
+
+### Tests
+
+- `helpers_test.go`: `fakeRepository` gains a `participants map[string]bool` field, `GetRace` (linear scan, returns `ErrRaceNotFound`), and `AddParticipant` (keyed by `raceID+":"+userID`, returns `ErrAlreadyJoined` on repeat)
+- `service_test.go`: update every `race.NewRaceService(repo)` call to `race.NewRaceService(repo, []byte("test-secret"))`; add `TestRaceService_JoinRace_Success`, `TestRaceService_JoinRace_RaceNotFound`, `TestRaceService_JoinRace_AlreadyJoined`, `TestRaceService_JoinRace_RaceNotPending` (mutates the fake's race status directly — same-package test files can reach unexported fields)
+- `handler_test.go`: same constructor update; add `TestRaceHandler_Join_OK`, `TestRaceHandler_Join_InvalidRaceID`, `TestRaceHandler_Join_NotFound`, `TestRaceHandler_Join_AlreadyJoined`, `TestRaceHandler_Join_NotPending`, `TestRaceHandler_Join_MissingAuth`
+
+### New dependency
+
+- None
+
+No divergence from context/project-overview.md.
 
 ## Notes
 
-<!-- constraints, edge cases -->
+- After this merges, regenerate Swagger docs (`make docs`)
+- Next feature per context/features/phase-1-plan.md: `races/start-race`
 
 ## History
 

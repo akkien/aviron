@@ -16,3 +16,8 @@ type createRaceResponse struct {
 	CreatedBy      string `json:"created_by"`
 	CreatedAt      string `json:"created_at"`
 }
+
+type joinRaceResponse struct {
+	RaceID       string `json:"race_id"`
+	SessionToken string `json:"session_token"`
+}

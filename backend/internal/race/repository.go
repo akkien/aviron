@@ -7,4 +7,6 @@ import "context"
 // implementation — the interface only grows methods a service actually calls.
 type RaceRepository interface {
 	CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (Race, error)
+	GetRace(ctx context.Context, raceID string) (Race, error)
+	AddParticipant(ctx context.Context, raceID, userID string) error
 }

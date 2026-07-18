@@ -2,15 +2,20 @@ package race
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type RaceService struct {
-	repo RaceRepository
+	repo      RaceRepository
+	jwtSecret []byte
 }
 
-func NewRaceService(repo RaceRepository) *RaceService {
-	return &RaceService{repo: repo}
+func NewRaceService(repo RaceRepository, jwtSecret []byte) *RaceService {
+	return &RaceService{repo: repo, jwtSecret: jwtSecret}
 }
 
 // CreateRace validates and creates a new race. A non-empty fieldErrs return
@@ -26,6 +31,36 @@ func (s *RaceService) CreateRace(ctx context.Context, name string, distanceMeter
 		return Race{}, nil, err
 	}
 	return r, nil, nil
+}
+
+// JoinRace adds userID as a participant of raceID and returns a signed
+// per-race session token. ErrRaceNotFound, ErrRaceNotPending, and
+// ErrAlreadyJoined pass through as-is for the handler to map to responses.
+func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sessionToken string, err error) {
+	r, err := s.repo.GetRace(ctx, raceID)
+	if err != nil {
+		return "", err
+	}
+
+	if r.Status != "pending" {
+		return "", ErrRaceNotPending
+	}
+
+	if err := s.repo.AddParticipant(ctx, raceID, userID); err != nil {
+		return "", err
+	}
+
+	claims := jwt.MapClaims{
+		"race_id": raceID,
+		"user_id": userID,
+		"exp":     time.Now().Add(6 * time.Hour).Unix(),
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtSecret)
+	if err != nil {
+		return "", fmt.Errorf("race: sign session token: %w", err)
+	}
+
+	return signed, nil
 }
 
 func validateCreateRace(name string, distanceMeters int) map[string]string {
