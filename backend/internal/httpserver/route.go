@@ -7,6 +7,7 @@ import (
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool) {
@@ -18,4 +19,6 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	authHandler := auth.NewHandler(authSvc)
 
 	server.HandleFunc("POST /auth/register", authHandler.Register)
+
+	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
 }

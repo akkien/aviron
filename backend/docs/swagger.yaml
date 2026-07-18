@@ -1,0 +1,83 @@
+basePath: /
+definitions:
+  internal_auth.registerRequest:
+    properties:
+      display_name:
+        type: string
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  internal_auth.registerResponse:
+    properties:
+      display_name:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: Real-time multiplayer fitness backend (Aviron-inspired). See context/project-overview.md
+    for the full design.
+  title: Aviron Backend API
+  version: "1.0"
+paths:
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new user account with an email, password, and display
+        name
+      parameters:
+      - description: Registration payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_auth.registerRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_auth.registerResponse'
+        "400":
+          description: field-keyed validation errors
+          schema:
+            additionalProperties: true
+            type: object
+        "409":
+          description: 'error: email_taken'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Register a new user
+      tags:
+      - auth
+  /healthz:
+    get:
+      description: Pings the database connection pool and reports service health
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'status: ok'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: 'status: db_unreachable'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Health check
+      tags:
+      - system
+swagger: "2.0"

@@ -9,6 +9,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// NewHealthzHandler godoc
+// @Summary Health check
+// @Description Pings the database connection pool and reports service health
+// @Tags system
+// @Produce json
+// @Success 200 {object} map[string]string "status: ok"
+// @Failure 503 {object} map[string]string "status: db_unreachable"
+// @Router /healthz [get]
 func NewHealthzHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
