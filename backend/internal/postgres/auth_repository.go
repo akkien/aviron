@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/akkien/aviron/internal/auth"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -35,6 +36,25 @@ func (r *AuthRepository) CreateUser(ctx context.Context, email, displayName, pas
 			return auth.User{}, auth.ErrEmailTaken
 		}
 		return auth.User{}, fmt.Errorf("postgres: create user: %w", err)
+	}
+
+	return u, nil
+}
+
+func (r *AuthRepository) GetUserByEmail(ctx context.Context, email string) (auth.User, error) {
+	var u auth.User
+
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, email, display_name, password_hash, created_at
+		FROM users
+		WHERE email = $1
+	`, email).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.CreatedAt)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return auth.User{}, auth.ErrUserNotFound
+		}
+		return auth.User{}, fmt.Errorf("postgres: get user by email: %w", err)
 	}
 
 	return u, nil

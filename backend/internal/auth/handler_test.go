@@ -10,10 +10,10 @@ import (
 	"github.com/akkien/aviron/internal/auth"
 )
 
-func newTestHandler() *auth.Handler {
+func newTestHandler() *auth.AuthHandler {
 	repo := newFakeRepository()
-	svc := auth.NewService(repo)
-	return auth.NewHandler(svc)
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+	return auth.NewAuthHandler(svc)
 }
 
 func TestHandler_Register_Created(t *testing.T) {
@@ -60,8 +60,8 @@ func TestHandler_Register_ValidationError(t *testing.T) {
 
 func TestHandler_Register_DuplicateEmail(t *testing.T) {
 	repo := newFakeRepository()
-	svc := auth.NewService(repo)
-	h := auth.NewHandler(svc)
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+	h := auth.NewAuthHandler(svc)
 
 	body := `{"email":"alice@example.com","password":"supersecret","display_name":"Alice"}`
 
@@ -84,6 +84,79 @@ func TestHandler_Register_InvalidBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	h.Register(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandler_Login_OK(t *testing.T) {
+	repo := newFakeRepository()
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+	h := auth.NewAuthHandler(svc)
+
+	registerReq := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewBufferString(
+		`{"email":"alice@example.com","password":"supersecret","display_name":"Alice"}`))
+	h.Register(httptest.NewRecorder(), registerReq)
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(
+		`{"email":"alice@example.com","password":"supersecret"}`))
+	rec := httptest.NewRecorder()
+	h.Login(rec, loginReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp["token"] == "" || resp["token"] == nil {
+		t.Errorf("token = %v, want a non-empty JWT", resp["token"])
+	}
+	if resp["expires_at"] == "" || resp["expires_at"] == nil {
+		t.Errorf("expires_at = %v, want a non-empty timestamp", resp["expires_at"])
+	}
+}
+
+func TestHandler_Login_Unauthorized(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"wrong password", `{"email":"alice@example.com","password":"wrongpassword"}`},
+		{"unknown email", `{"email":"nobody@example.com","password":"supersecret"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			svc := auth.NewAuthService(repo, []byte("test-secret"))
+			h := auth.NewAuthHandler(svc)
+
+			registerReq := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewBufferString(
+				`{"email":"alice@example.com","password":"supersecret","display_name":"Alice"}`))
+			h.Register(httptest.NewRecorder(), registerReq)
+
+			loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(tt.body))
+			rec := httptest.NewRecorder()
+			h.Login(rec, loginReq)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandler_Login_InvalidBody(t *testing.T) {
+	h := newTestHandler()
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString("not json"))
+	rec := httptest.NewRecorder()
+
+	h.Login(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())

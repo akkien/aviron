@@ -4,28 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/akkien/aviron/internal/httpx"
 )
 
-type Handler struct {
-	svc *Service
+type AuthHandler struct {
+	svc *AuthService
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
-}
-
-type registerRequest struct {
-	Email       string `json:"email"`
-	Password    string `json:"password"`
-	DisplayName string `json:"display_name"`
-}
-
-type registerResponse struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
+func NewAuthHandler(svc *AuthService) *AuthHandler {
+	return &AuthHandler{svc: svc}
 }
 
 // Register godoc
@@ -39,7 +28,7 @@ type registerResponse struct {
 // @Failure 400 {object} map[string]interface{} "field-keyed validation errors"
 // @Failure 409 {object} map[string]string "error: email_taken"
 // @Router /auth/register [post]
-func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_body")
@@ -64,5 +53,38 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		ID:          user.ID,
 		Email:       user.Email,
 		DisplayName: user.DisplayName,
+	})
+}
+
+// Login godoc
+// @Summary Log in
+// @Description Exchanges email and password for a JWT
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param request body loginRequest true "Login payload"
+// @Success 200 {object} loginResponse
+// @Failure 401 {object} map[string]string "error: invalid_credentials"
+// @Router /auth/login [post]
+func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+
+	token, expiresAt, err := h.svc.Login(r.Context(), req.Email, req.Password)
+	if errors.Is(err, ErrInvalidCredentials) {
+		httpx.WriteError(w, http.StatusUnauthorized, "invalid_credentials")
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, loginResponse{
+		Token:     token,
+		ExpiresAt: expiresAt.Format(time.RFC3339),
 	})
 }

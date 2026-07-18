@@ -9,8 +9,8 @@ import (
 	"github.com/akkien/aviron/internal/auth"
 )
 
-// fakeRepository is an in-memory auth.Repository used by both service_test.go
-// and handler_test.go, so neither needs a real Postgres connection.
+// fakeRepository is an in-memory auth.AuthRepository used by both
+// service_test.go and handler_test.go, so neither needs a real Postgres connection.
 type fakeRepository struct {
 	mu               sync.Mutex
 	users            map[string]auth.User
@@ -31,11 +31,23 @@ func (f *fakeRepository) CreateUser(ctx context.Context, email, displayName, pas
 
 	f.lastPasswordHash = passwordHash
 	u := auth.User{
-		ID:          fmt.Sprintf("user-%d", len(f.users)+1),
-		Email:       email,
-		DisplayName: displayName,
-		CreatedAt:   time.Now(),
+		ID:           fmt.Sprintf("user-%d", len(f.users)+1),
+		Email:        email,
+		DisplayName:  displayName,
+		PasswordHash: passwordHash,
+		CreatedAt:    time.Now(),
 	}
 	f.users[email] = u
+	return u, nil
+}
+
+func (f *fakeRepository) GetUserByEmail(ctx context.Context, email string) (auth.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	u, ok := f.users[email]
+	if !ok {
+		return auth.User{}, auth.ErrUserNotFound
+	}
 	return u, nil
 }

@@ -15,10 +15,11 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	server.HandleFunc("GET /healthz", healthzHandler)
 
 	authRepo := postgres.NewAuthRepository(pool)
-	authSvc := auth.NewService(authRepo)
-	authHandler := auth.NewHandler(authSvc)
+	authSvc := auth.NewAuthService(authRepo, []byte(cfg.JWTSecret))
+	authHandler := auth.NewAuthHandler(authSvc)
 
 	server.HandleFunc("POST /auth/register", authHandler.Register)
+	server.HandleFunc("POST /auth/login", authHandler.Login)
 
 	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
 }

@@ -1,5 +1,19 @@
 basePath: /
 definitions:
+  internal_auth.loginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  internal_auth.loginResponse:
+    properties:
+      expires_at:
+        type: string
+      token:
+        type: string
+    type: object
   internal_auth.registerRequest:
     properties:
       display_name:
@@ -25,6 +39,34 @@ info:
   title: Aviron Backend API
   version: "1.0"
 paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Exchanges email and password for a JWT
+      parameters:
+      - description: Login payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_auth.loginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_auth.loginResponse'
+        "401":
+          description: 'error: invalid_credentials'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Log in
+      tags:
+      - auth
   /auth/register:
     post:
       consumes:

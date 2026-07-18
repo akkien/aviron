@@ -1,3 +1,5 @@
+.PHONY: run test docs
+
 run:
 	go run ./cmd/server
 

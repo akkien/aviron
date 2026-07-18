@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/akkien/aviron/internal/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -11,7 +12,7 @@ import (
 
 func TestService_Register_Success(t *testing.T) {
 	repo := newFakeRepository()
-	svc := auth.NewService(repo)
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
 
 	user, fieldErrs, err := svc.Register(context.Background(), "Alice@Example.com", "supersecret", "Alice")
 	if err != nil {
@@ -47,7 +48,7 @@ func TestService_Register_ValidationErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := newFakeRepository()
-			svc := auth.NewService(repo)
+			svc := auth.NewAuthService(repo, []byte("test-secret"))
 
 			_, fieldErrs, err := svc.Register(context.Background(), tt.email, tt.password, tt.displayName)
 			if err != nil {
@@ -62,7 +63,7 @@ func TestService_Register_ValidationErrors(t *testing.T) {
 
 func TestService_Register_EmailTaken(t *testing.T) {
 	repo := newFakeRepository()
-	svc := auth.NewService(repo)
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
 	if _, _, err := svc.Register(ctx, "alice@example.com", "supersecret", "Alice"); err != nil {
@@ -75,5 +76,61 @@ func TestService_Register_EmailTaken(t *testing.T) {
 	}
 	if !errors.Is(err, auth.ErrEmailTaken) {
 		t.Errorf("err = %v, want ErrEmailTaken", err)
+	}
+}
+
+func TestService_Login_Success(t *testing.T) {
+	repo := newFakeRepository()
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	if _, _, err := svc.Register(ctx, "alice@example.com", "supersecret", "Alice"); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	token, expiresAt, err := svc.Login(ctx, "Alice@Example.com", "supersecret")
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if token == "" {
+		t.Error("token is empty, want a signed JWT")
+	}
+	if wantMin, wantMax := time.Now().Add(23*time.Hour), time.Now().Add(25*time.Hour); expiresAt.Before(wantMin) || expiresAt.After(wantMax) {
+		t.Errorf("expiresAt = %v, want ~24h from now", expiresAt)
+	}
+}
+
+func TestService_Login_WrongPassword(t *testing.T) {
+	repo := newFakeRepository()
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	if _, _, err := svc.Register(ctx, "alice@example.com", "supersecret", "Alice"); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	_, _, err := svc.Login(ctx, "alice@example.com", "wrongpassword")
+	if !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Errorf("err = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestService_Login_UnknownEmail(t *testing.T) {
+	repo := newFakeRepository()
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+
+	_, _, err := svc.Login(context.Background(), "nobody@example.com", "supersecret")
+	if !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Errorf("err = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestService_Login_EmptyFields(t *testing.T) {
+	repo := newFakeRepository()
+	svc := auth.NewAuthService(repo, []byte("test-secret"))
+
+	_, _, err := svc.Login(context.Background(), "", "")
+	if !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Errorf("err = %v, want ErrInvalidCredentials", err)
 	}
 }

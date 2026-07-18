@@ -9,6 +9,7 @@ import (
 type Config struct {
 	DatabaseURL string
 	Port        string
+	JWTSecret   string
 }
 
 func Load() *Config {
@@ -19,6 +20,7 @@ func Load() *Config {
 	return &Config{
 		DatabaseURL: getEnv("DATABASE_URL", "postgres://aviron:aviron@localhost:5432/aviron?sslmode=disable"),
 		Port:        getEnv("PORT", "8080"),
+		JWTSecret:   getEnv("JWT_SECRET", "dev-only-secret-change-me"),
 	}
 }
 
