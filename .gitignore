@@ -5,3 +5,7 @@ node_modules/
 dist/
 
 build/
+
+.mcp.json
+
+backend/server

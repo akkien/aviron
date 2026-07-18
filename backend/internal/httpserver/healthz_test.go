@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/akkien/aviron/backend/internal/httpserver"
+	"github.com/akkien/aviron/internal/config"
+	"github.com/akkien/aviron/internal/httpserver"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,7 +31,9 @@ func TestHealthz_OK(t *testing.T) {
 		t.Skipf("skipping: no reachable Postgres at %s (%v) — run `docker compose up -d postgres`", dsn, err)
 	}
 
-	srv := newTestServer(t, httpserver.NewServer(pool))
+	mux := httpserver.NewServer()
+	httpserver.RegisterRoutes(mux, config.Config{}, pool)
+	srv := newTestServer(t, mux)
 	defer srv.Close()
 
 	resp, body := getJSON(t, srv.URL+"/healthz")
@@ -55,7 +58,9 @@ func TestHealthz_DBUnreachable(t *testing.T) {
 	}
 	defer pool.Close()
 
-	srv := newTestServer(t, httpserver.NewServer(pool))
+	mux := httpserver.NewServer()
+	httpserver.RegisterRoutes(mux, config.Config{}, pool)
+	srv := newTestServer(t, mux)
 	defer srv.Close()
 
 	resp, body := getJSON(t, srv.URL+"/healthz")

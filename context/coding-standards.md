@@ -10,6 +10,24 @@ For new code, follow style at <https://go.dev/doc/effective_go>
 
 The name of constructor function: should be in format `New<StructName>`, do not name it only `New()`. For example: `NewBlock`, `NewTxPool`
 
+### Backend Architecture
+
+Every REST feature in `backend/` follows the same three domain layers, one package per feature area (e.g. `internal/auth`, `internal/race`):
+
+- **Handler** (`internal/<domain>/handler.go`) — decodes the request, calls the service, encodes the response. No validation or business logic here.
+- **Service** (`internal/<domain>/service.go`) — validation, orchestration, the actual business logic. Depends on the `Repository` interface, never on a concrete DB driver.
+- **Repository** (`internal/<domain>/repository.go`) — defines the `Repository` **interface** consumed by the service. Interfaces live next to their consumer (idiomatic Go), not their implementer.
+
+Concrete repository implementations live in `internal/postgres/` (e.g. `internal/postgres/auth_repository.go`), one file per domain. A Postgres-specific repository is responsible for translating driver errors (e.g. a unique-violation `pgconn.PgError`) into domain sentinel errors defined in the domain package (e.g. `auth.ErrEmailTaken`) — nothing above the repository layer should ever import `pgx` or know the backing store is Postgres.
+
+**Composition and routing** both live in `internal/httpserver/route.go`'s `RegisterRoutes(mux *http.ServeMux, cfg config.Config, pool *pgxpool.Pool)` — for each domain it constructs the `repository → service → handler` chain and registers the resulting handler(s) directly on the mux, which is mutated in place (no return value needed). `internal/httpserver/server.go`'s `NewServer() *http.ServeMux` only builds the empty mux and has no dependencies.
+
+`internal/app.go` (package `internal`, imported in `main.go` under the alias `app "github.com/akkien/aviron/internal"`) is the process entrypoint: it opens the DB pool, runs migrations, builds the mux via `httpserver.NewServer()`, wires routes via `httpserver.RegisterRoutes(...)`, and serves. `cmd/server/main.go` itself only loads config and calls `app.Run(cfg)`.
+
+Shared HTTP response helpers (`WriteJSON`, `WriteError`) live in `internal/httpx`, so handlers across domains don't duplicate response-writing boilerplate.
+
+The primary payoff of the `Repository` interface is testability — service-layer tests run against a fake in-memory repository instead of requiring real Postgres — not database portability; this project is committed to Postgres per context/project-overview.md §11.
+
 ## Markdown
 
 Update on .md files must follow rules at <https://github.com/DavidAnson/markdownlint/tree/v0.40.0/doc>
