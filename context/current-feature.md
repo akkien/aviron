@@ -1,24 +1,145 @@
-# Current Feature
+# Current Feature: JWT Auth Middleware
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- bullet points of what success looks like -->
+- `Auth(jwtSecret []byte) func(http.Handler) http.Handler` wraps a handler so it only runs for requests with a valid, unexpired, correctly-signed `Authorization: Bearer <token>` header
+- Missing, malformed, or invalid/expired tokens get `401 {"error":"unauthorized"}` and the wrapped handler never runs
+- On success, the wrapped handler can read the authenticated user id back out via `UserIDFromContext(ctx) (string, bool)`
+- `go test ./... -race` passes for the new package, including tests covering valid/missing/malformed/wrong-signature/expired tokens
 
 ## Explain
 
-<!-- bullet points explaining the feature/spec -->
+- Pure middleware, no DB access — verifying a JWT never needs a database round-trip, unlike `Login`
+- Verifies tokens using the exact `jwt.MapClaims`/HS256 shape `auth.AuthService.Login` already signs, so the two features close the loop with each other, without this package importing `internal/auth` at all — it only needs `jwtSecret []byte` and generic JWT claims, no domain types
+- The spec's suggested `UserIDFromContext(ctx) (uuid.UUID, bool)` uses `uuid.UUID`; this codebase has treated ids as plain `string` everywhere so far (`auth.User.ID`, `registerResponse.ID`, etc. — populated directly from Postgres's UUID column via pgx's stdlib string scanning, no `github.com/google/uuid` dependency anywhere). Diverging from the spec to return `(string, bool)` instead, for consistency, rather than adding a UUID dependency for one function.
+- **Moved mid-feature, per explicit request:** originally implemented as `internal/auth/middleware.go` (`auth.RequireAuth`); relocated to its own `internal/middleware` package (`middleware.Auth`) since the logic has zero dependency on `internal/auth`'s types — a JWT-verifying middleware is a cross-cutting concern, not part of the auth domain's handler/service/repository layering. File renamed `auth.go`/`auth_test.go` within that package (the name describes what the file does — verifies an *auth* token — not the package it lives in).
+- Since the test package no longer shares a directory with `internal/auth`, it can't reuse `helpers_test.go`'s `newFakeRepository()` to mint a real login token; the valid-token test now signs a JWT directly with `jwt.NewWithClaims(...)` instead of going through `AuthService.Login` — this is actually more correct, since the middleware's contract is "verify this JWT shape," not "integrate with the auth package."
+- **Not wired into any route in this feature** — there's nothing to protect yet; `/races/*` doesn't exist until `races/create-race` (next-but-one). `internal/httpserver/route.go` is unchanged. The next feature that adds a protected endpoint calls `middleware.Auth(jwtSecret)(handler)` around it.
 
 ## Plan
 
-<!-- implementation steps, architecture/design notes, tradeoffs -->
+### New files
+
+```text
+backend/
+  internal/
+    middleware/
+      auth.go               # Auth, UserIDFromContext, unexported context key
+      auth_test.go
+```
+
+### `internal/middleware/auth.go`
+
+```go
+package middleware
+
+import (
+    "context"
+    "net/http"
+    "strings"
+    "time"
+
+    "github.com/golang-jwt/jwt/v5"
+
+    "github.com/akkien/aviron/internal/httpx"
+)
+
+type contextKey int
+
+const userIDContextKey contextKey = iota
+
+// Auth wraps a handler so it only runs for requests carrying a valid,
+// unexpired JWT signed with jwtSecret. On success, the authenticated user id
+// is attached to the request context (read it back with UserIDFromContext).
+func Auth(jwtSecret []byte) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            const prefix = "Bearer "
+            authHeader := r.Header.Get("Authorization")
+            if !strings.HasPrefix(authHeader, prefix) {
+                httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+
+            tokenString := strings.TrimPrefix(authHeader, prefix)
+            if tokenString == "" {
+                httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+
+            token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+                if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+                    return nil, jwt.ErrTokenSignatureInvalid
+                }
+                return jwtSecret, nil
+            })
+            // jwt.Parse's default validator already rejects an expired token
+            // (it parses into jwt.MapClaims, which implements
+            // GetExpirationTime(), so err would already be non-nil here) —
+            // but check explicitly too, so the expiry guarantee is visible
+            // here rather than resting on an implicit library default.
+            if err != nil || !token.Valid {
+                httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+
+            claims, ok := token.Claims.(jwt.MapClaims)
+            if !ok {
+                httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+
+            expiresAt, err := claims.GetExpirationTime()
+            if err != nil || expiresAt == nil || expiresAt.Before(time.Now()) {
+                httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+
+            userID, ok := claims["sub"].(string)
+            if !ok || userID == "" {
+                httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+
+            ctx := context.WithValue(r.Context(), userIDContextKey, userID)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+
+// UserIDFromContext reads the user id Auth attached to ctx.
+func UserIDFromContext(ctx context.Context) (string, bool) {
+    id, ok := ctx.Value(userIDContextKey).(string)
+    return id, ok
+}
+```
+
+Uses an unexported `contextKey` type (not a bare `string`) so this package's context value can never collide with a key set by another package — standard Go idiom for context keys. The explicit `GetExpirationTime()`/`Before(time.Now())` check is technically redundant with `jwt.Parse`'s default validator (which already rejects an expired token via `err`), but it makes the expiry guarantee visible in this function instead of resting on an implicit library default — added after review flagged that the earlier draft looked like it might be missing an expiry check.
+
+### Tests (`auth_test.go`)
+
+- A small `signToken(t, secret, exp)` helper mints a JWT directly with `jwt.NewWithClaims(...)` — used by every test below, since this package has no dependency on `internal/auth` to go through a real `Login` flow
+- `TestAuth_ValidToken` — valid token, wraps a dummy handler that echoes `UserIDFromContext` back in the response body, drives the request through `Auth`, asserts `200` and the correct id echoed
+- `TestAuth_MissingHeader` — no `Authorization` header → `401`
+- `TestAuth_MalformedHeader` — header without the `Bearer` prefix, and `Bearer` with an empty token → `401` (table-driven)
+- `TestAuth_InvalidSignature` — a token signed with a different secret → `401`
+- `TestAuth_ExpiredToken` — a token minted with `exp` in the past → `401`
+- Every `401` case also asserts the wrapped handler was never invoked (a sentinel bool flipped inside it, checked after the request)
+
+### New dependency
+
+- None — reuses `github.com/golang-jwt/jwt/v5`, already added for Login
+
+No divergence from context/project-overview.md; divergences are from the feature spec itself (`uuid.UUID` → `string`, and the package location — both explained in Explain above).
 
 ## Notes
 
-<!-- constraints, edge cases -->
+- Applying this to real routes happens in `races/create-race` (next-but-one): a protected route becomes `server.Handle("POST /races", middleware.Auth(jwtSecret)(http.HandlerFunc(raceHandler.Create)))` — Go 1.22's `http.ServeMux` has no middleware chaining, so each protected route is wrapped individually (or via a small local helper if that gets repetitive across several routes)
+- Next feature per context/features/phase-1-plan.md: `races/create-race`
 
 ## History
 

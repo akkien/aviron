@@ -29,6 +29,8 @@ Concrete repository implementations live in `internal/postgres/` (e.g. `internal
 
 Shared HTTP response helpers (`WriteJSON`, `WriteError`) live in `internal/httpx`, so handlers across domains don't duplicate response-writing boilerplate.
 
+Cross-cutting HTTP middleware that doesn't depend on any single domain's types gets its own top-level package (e.g. `internal/middleware`), not nested inside the domain package it happens to relate to. `internal/middleware/auth.go`'s `Auth(jwtSecret []byte) func(http.Handler) http.Handler` verifies the JWT shape `auth.AuthService.Login` signs, but never imports `internal/auth` — it only needs the raw secret and generic JWT claims. If a middleware ever does need a domain's types, that's a signal it isn't actually cross-cutting and belongs in that domain package instead.
+
 The primary payoff of the `<Domain>Repository` interface is testability — service-layer tests run against a fake in-memory repository instead of requiring real Postgres — not database portability; this project is committed to Postgres per context/project-overview.md §11.
 
 ## Markdown
