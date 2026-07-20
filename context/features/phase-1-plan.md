@@ -16,9 +16,9 @@ Phase 1 (context/project-overview.md §12) delivers the REST + Postgres foundati
    2. `races/join-race.md` — `POST /races/{id}/join`, session token
    3. `races/start-race.md` — `POST /races/{id}/start` + `GET /races/{id}/text` (generates the shared typing-race prompt)
    4. `races/race-status.md` — `GET /races/{id}`
-4. **Frontend Client** (folder: `frontend-client/`) — split into two
-   1. `frontend-client/login-page.md`
-   2. `frontend-client/create-join-race-page.md`
+4. **Frontend Client** (folder: `frontend/`) — split into two
+   1. `frontend/login-page.md`
+   2. `frontend/create-join-race-page.md`
 
 ## Dependency order
 

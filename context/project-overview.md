@@ -29,7 +29,7 @@ This project simulates that "workout telemetry" signal with a **typing race** ra
 - Horizontal scaling: run ≥2 Go instances, use Redis pub/sub to sync room state cross-instance
 - Observability: structured logs, Prometheus metrics, optionally OpenTelemetry tracing
 - Testing: unit tests for logic, `go test -race` for concurrency, load testing with k6/ghz
-- Frontend: a small React app (Vite) — login screen, create/join race, and a typing-race view (type a shared prompt to move your car) showing participants' positions updating in real time over WebSocket. Real typing input doubles as the "device telemetry," so no simulated fitness device is needed. Open multiple tabs/browsers to simulate multiple players.
+- Frontend: a small React app (Vite), styled with Tailwind CSS and shadcn/ui components (speeds up building consistent forms/buttons without hand-rolled CSS — still no polish investment, per the scope note above) — login screen, create/join race, and a typing-race view (type a shared prompt to move your car) showing participants' positions updating in real time over WebSocket. Real typing input doubles as the "device telemetry," so no simulated fitness device is needed. Open multiple tabs/browsers to simulate multiple players.
 - Local infra runs on Kubernetes (kind or minikube) instead of just Docker Compose, to genuinely practice the "exposure to... Kubernetes" line in the JD.
 
 **Out of scope (skip to keep the project achievable):**
@@ -262,14 +262,14 @@ Things worth practicing here because they connect directly to the spirit of the 
 - Kafka (using `segmentio/kafka-go` or `confluent-kafka-go`); run locally via the Strimzi operator or the Bitnami Kafka Helm chart on K8s — avoid manually managing Zookeeper/brokers yourself
 - ClickHouse (final phase, optional)
 - Local Kubernetes (kind or minikube) for the whole stack (Postgres, Redis, Kafka, race-service, api-gateway); Docker Compose is only a temporary stand-in for Phase 1 while the code doesn't yet need multiple instances
-- Frontend: React (Vite), using the browser's native WebSocket API directly (no need for a heavy real-time library yet); open multiple tabs/browsers to simulate multiple players.
+- Frontend: React (Vite), styled with Tailwind CSS (v4, CSS-based `@theme` config — see context/coding-standards.md) and shadcn/ui for form/button primitives, using the browser's native WebSocket API directly (no need for a heavy real-time library yet); open multiple tabs/browsers to simulate multiple players.
 
 ## 12. Phased roadmap (mapped directly to the JD)
 
 ### Phase 1 — Foundation (JD: "write reliable Go", "REST APIs", basic PostgreSQL)
 
 - Auth, create/join a race over REST, basic Postgres schema, a simple race flow (single instance, no Redis needed yet).
-- Minimal React app (login, create/join race via REST) — run Postgres via `docker compose`, no K8s needed at this phase.
+- Minimal React app (login, create/join race via REST), scaffolded with Tailwind CSS + shadcn/ui — run Postgres via `docker compose`, no K8s needed at this phase.
 
 ### Phase 2 — Real-time core (JD: goroutines/channels/context, reconnection, concurrency pitfalls)
 

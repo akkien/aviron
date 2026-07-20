@@ -36,5 +36,5 @@ After logging in, the user lands here to create a race, join one, start it, and 
 ## Notes
 
 - Open multiple browser tabs logged in as different users to manually verify join/participant-list behavior, per the project's testing approach (context/project-overview.md §1)
-- No styling investment beyond making the sections legibly separate and the car lanes recognizable — this is a test harness, not a product
+- Use shadcn/ui's `Card`/`Input`/`Button` for the create/join/start forms and Tailwind utility classes (flex/grid) to separate sections and lay out the car lanes — still no styling investment beyond that: no custom design system, animation, or theming past shadcn's defaults, this is a test harness, not a product
 - See context/project-overview.md §13 for the full typing-race mechanic (why per-word telemetry, why the server doesn't verify typed text, why field names are reused rather than renamed)

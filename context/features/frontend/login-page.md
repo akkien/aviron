@@ -28,5 +28,6 @@ The first screen of the React test client: a plain login form that calls the bac
 
 ## Notes
 
-- No component library — a single `LoginPage.tsx` with controlled inputs is enough
+- First frontend feature to touch the project, so this is also where Tailwind CSS + shadcn/ui get scaffolded: `npx shadcn init` (Vite preset) sets up Tailwind v4 (CSS-based `@theme` config, no `tailwind.config.ts` — see context/coding-standards.md) and the shadcn CLI/component registry
+- Build the form from shadcn's `Input`, `Label`, and `Button` primitives instead of hand-rolled `<input>`/`<button>` elements — still a single `LoginPage.tsx` with controlled inputs, just faster and more consistent than custom CSS; not a polish investment
 - Base API URL comes from a Vite env var (`VITE_API_URL`), not hardcoded
