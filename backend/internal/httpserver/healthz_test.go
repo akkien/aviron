@@ -9,6 +9,7 @@ import (
 
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/httpserver"
+	"github.com/akkien/aviron/internal/room"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,7 +33,7 @@ func TestHealthz_OK(t *testing.T) {
 	}
 
 	mux := httpserver.NewServer()
-	httpserver.RegisterRoutes(mux, config.Config{}, pool)
+	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, room.NewRegistry())
 	srv := newTestServer(t, mux)
 	defer srv.Close()
 
@@ -59,7 +60,7 @@ func TestHealthz_DBUnreachable(t *testing.T) {
 	defer pool.Close()
 
 	mux := httpserver.NewServer()
-	httpserver.RegisterRoutes(mux, config.Config{}, pool)
+	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, room.NewRegistry())
 	srv := newTestServer(t, mux)
 	defer srv.Close()
 

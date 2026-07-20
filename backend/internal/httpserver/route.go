@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/akkien/aviron/internal/auth"
@@ -8,11 +9,12 @@ import (
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/postgres"
 	"github.com/akkien/aviron/internal/race"
+	"github.com/akkien/aviron/internal/room"
 	"github.com/jackc/pgx/v5/pgxpool"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
-func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool) {
+func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry) {
 	healthzHandler := NewHealthzHandler(pool)
 	server.HandleFunc("GET /healthz", healthzHandler)
 
@@ -27,7 +29,7 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 
 	raceRepo := postgres.NewRaceRepository(pool)
 	raceSvc := race.NewRaceService(raceRepo, []byte(cfg.JWTSecret))
-	raceHandler := race.NewRaceHandler(raceSvc)
+	raceHandler := race.NewRaceHandler(raceSvc, registry, ctx)
 
 	server.Handle("POST /races", requireAuth(http.HandlerFunc(raceHandler.Create)))
 	server.Handle("POST /races/{id}/join", requireAuth(http.HandlerFunc(raceHandler.Join)))

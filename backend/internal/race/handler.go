@@ -1,6 +1,7 @@
 package race
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/akkien/aviron/internal/httpx"
 	"github.com/akkien/aviron/internal/middleware"
+	"github.com/akkien/aviron/internal/room"
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -18,11 +20,16 @@ func isValidUUID(s string) bool {
 }
 
 type RaceHandler struct {
-	svc *RaceService
+	svc      *RaceService
+	registry *room.Registry
+	// ctx is the process's root context, used (not r.Context()) when spawning
+	// a room actor so it keeps running after the triggering HTTP request
+	// returns and its own context is cancelled.
+	ctx context.Context
 }
 
-func NewRaceHandler(svc *RaceService) *RaceHandler {
-	return &RaceHandler{svc: svc}
+func NewRaceHandler(svc *RaceService, registry *room.Registry, ctx context.Context) *RaceHandler {
+	return &RaceHandler{svc: svc, registry: registry, ctx: ctx}
 }
 
 // Create godoc
@@ -169,6 +176,8 @@ func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
 	if started.StartedAt != nil {
 		startedAt = started.StartedAt.Format(time.RFC3339)
 	}
+
+	h.registry.Spawn(h.ctx, raceID, promptText, started.DistanceMeters)
 
 	httpx.WriteJSON(w, http.StatusOK, startRaceResponse{
 		ID:         started.ID,

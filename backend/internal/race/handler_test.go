@@ -2,6 +2,7 @@ package race_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/race"
+	"github.com/akkien/aviron/internal/room"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -31,7 +33,7 @@ func signTestToken(t *testing.T, secret []byte, userID string) string {
 func newTestHandler() *race.RaceHandler {
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, []byte("test-secret"))
-	return race.NewRaceHandler(svc)
+	return race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
 }
 
 func TestRaceHandler_Create_Created(t *testing.T) {
@@ -254,7 +256,7 @@ func TestRaceHandler_Join_NotPending(t *testing.T) {
 	secret := []byte("test-secret")
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, secret)
-	h := race.NewRaceHandler(svc)
+	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
 
 	raceID := createTestRace(t, secret, h)
 	repo.races[0].Status = "active"

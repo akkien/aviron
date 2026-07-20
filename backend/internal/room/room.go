@@ -23,7 +23,7 @@ type RoomActor struct {
 	distanceMeters int
 	tickCount      int64
 	inbox          chan RoomEvent
-	broadcast      chan<- []byte
+	broadcast      chan []byte
 	ctx            context.Context
 	cancel         context.CancelFunc
 }
@@ -32,7 +32,7 @@ type RoomActor struct {
 // generated promptText/distanceMeters from the race row. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int, broadcast chan<- []byte) *RoomActor {
+func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int, broadcast chan []byte) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	return &RoomActor{
 		id:             id,
@@ -44,6 +44,14 @@ func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int
 		ctx:            actorCtx,
 		cancel:         cancel,
 	}
+}
+
+// Broadcast returns the channel this actor sends race_state snapshots on.
+// The room registry creates the underlying channel at Spawn time; the
+// WebSocket fan-out (websocket/ws-endpoint.md, not yet built) reads from it
+// to relay messages to every connection attached to this room.
+func (r *RoomActor) Broadcast() <-chan []byte {
+	return r.broadcast
 }
 
 // Run is the room actor's single-writer loop: participants is only ever
