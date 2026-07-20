@@ -79,7 +79,7 @@ func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} map[string]string "error: invalid_race_id"
 // @Failure 401 {object} map[string]string "error: unauthorized"
 // @Failure 404 {object} map[string]string "error: race_not_found"
-// @Failure 409 {object} map[string]string "error: already_joined | race_not_pending"
+// @Failure 409 {object} map[string]string "error: already_joined | race_not_pending | race_full"
 // @Router /races/{id}/join [post]
 func (h *RaceHandler) Join(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
@@ -104,6 +104,9 @@ func (h *RaceHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, ErrAlreadyJoined):
 		httpx.WriteError(w, http.StatusConflict, "already_joined")
+		return
+	case errors.Is(err, ErrRaceFull):
+		httpx.WriteError(w, http.StatusConflict, "race_full")
 		return
 	case err != nil:
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")

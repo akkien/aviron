@@ -71,6 +71,19 @@ func (r *RaceRepository) AddParticipant(ctx context.Context, raceID, userID stri
 	return nil
 }
 
+func (r *RaceRepository) CountParticipants(ctx context.Context, raceID string) (int, error) {
+	var count int
+	err := r.pool.QueryRow(ctx, `
+		SELECT count(*) FROM race_participants WHERE race_id = $1
+	`, raceID).Scan(&count)
+
+	if err != nil {
+		return 0, fmt.Errorf("postgres: count participants: %w", err)
+	}
+
+	return count, nil
+}
+
 func (r *RaceRepository) StartRace(ctx context.Context, raceID, promptText string) (race.Race, error) {
 	var rc race.Race
 

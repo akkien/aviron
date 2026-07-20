@@ -34,8 +34,9 @@ func (s *RaceService) CreateRace(ctx context.Context, name string, distanceMeter
 }
 
 // JoinRace adds userID as a participant of raceID and returns a signed
-// per-race session token. ErrRaceNotFound, ErrRaceNotPending, and
-// ErrAlreadyJoined pass through as-is for the handler to map to responses.
+// per-race session token. ErrRaceNotFound, ErrRaceNotPending, ErrRaceFull,
+// and ErrAlreadyJoined pass through as-is for the handler to map to
+// responses.
 func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sessionToken string, err error) {
 	r, err := s.repo.GetRace(ctx, raceID)
 	if err != nil {
@@ -44,6 +45,14 @@ func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sess
 
 	if r.Status != "pending" {
 		return "", ErrRaceNotPending
+	}
+
+	count, err := s.repo.CountParticipants(ctx, raceID)
+	if err != nil {
+		return "", err
+	}
+	if count >= MaxParticipants {
+		return "", ErrRaceFull
 	}
 
 	if err := s.repo.AddParticipant(ctx, raceID, userID); err != nil {

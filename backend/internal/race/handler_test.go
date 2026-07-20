@@ -3,6 +3,7 @@ package race_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -217,6 +218,33 @@ func TestRaceHandler_Join_AlreadyJoined(t *testing.T) {
 	}
 
 	rec := join()
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Join_RaceFull(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+
+	join := func(userID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/races/"+raceID+"/join", nil)
+		req.SetPathValue("id", raceID)
+		req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, userID))
+		rec := httptest.NewRecorder()
+		middleware.Auth(secret)(http.HandlerFunc(h.Join)).ServeHTTP(rec, req)
+		return rec
+	}
+
+	for i := 0; i < race.MaxParticipants; i++ {
+		userID := fmt.Sprintf("user-%d", i+2)
+		if rec := join(userID); rec.Code != http.StatusOK {
+			t.Fatalf("join(%s) status = %d, want %d, body = %s", userID, rec.Code, http.StatusOK, rec.Body.String())
+		}
+	}
+
+	rec := join("one-too-many")
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}

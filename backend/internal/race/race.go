@@ -27,8 +27,15 @@ type RaceDetail struct {
 	Participants []Participant
 }
 
+// MaxParticipants caps how many players can join a single race — the room
+// actor (Phase 2) holds every participant's state in memory and broadcasts
+// a snapshot including all of them on every tick, so this also bounds the
+// per-tick broadcast payload size.
+const MaxParticipants = 10
+
 var ErrRaceNotFound = errors.New("race: not found")
 var ErrAlreadyJoined = errors.New("race: already joined")
 var ErrRaceNotPending = errors.New("race: not pending")
 var ErrNotCreator = errors.New("race: caller is not the creator")
 var ErrPromptNotReady = errors.New("race: prompt text not ready")
+var ErrRaceFull = errors.New("race: full")

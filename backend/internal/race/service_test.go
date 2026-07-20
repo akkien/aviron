@@ -3,6 +3,7 @@ package race_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -108,6 +109,28 @@ func TestRaceService_JoinRace_AlreadyJoined(t *testing.T) {
 	_, err = svc.JoinRace(ctx, created.ID, "user-2")
 	if !errors.Is(err, race.ErrAlreadyJoined) {
 		t.Errorf("err = %v, want ErrAlreadyJoined", err)
+	}
+}
+
+func TestRaceService_JoinRace_RaceFull(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	for i := 0; i < race.MaxParticipants; i++ {
+		userID := fmt.Sprintf("user-%d", i+2)
+		if _, err := svc.JoinRace(ctx, created.ID, userID); err != nil {
+			t.Fatalf("JoinRace(%s) error = %v", userID, err)
+		}
+	}
+
+	_, err = svc.JoinRace(ctx, created.ID, "one-too-many")
+	if !errors.Is(err, race.ErrRaceFull) {
+		t.Errorf("err = %v, want ErrRaceFull", err)
 	}
 }
 
