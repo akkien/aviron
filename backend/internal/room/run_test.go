@@ -21,7 +21,7 @@ func TestRoomActor_Run_BroadcastsOnTick(t *testing.T) {
 
 	select {
 	case body := <-broadcast:
-		var msg raceStateMessage
+		var msg RaceStateMessage
 		if err := json.Unmarshal(body, &msg); err != nil {
 			t.Fatalf("unmarshal broadcast: %v", err)
 		}

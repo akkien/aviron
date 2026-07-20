@@ -97,16 +97,21 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 	}
 }
 
-type participantSnapshot struct {
+// ParticipantStateJSON and RaceStateMessage are exported (rather than kept
+// package-private) so websocket/protocol.md's internal/ws package can reuse
+// them for its outbound race_state encoding instead of redeclaring an
+// identical shape — internal/ws already depends on this package for
+// RoomEvent, so this keeps that dependency one-directional.
+type ParticipantStateJSON struct {
 	UserID    string  `json:"user_id"`
 	DistanceM float64 `json:"distance_m"`
 	Rank      int     `json:"rank"`
 }
 
-type raceStateMessage struct {
-	Type         string                `json:"type"`
-	Tick         int64                 `json:"tick"`
-	Participants []participantSnapshot `json:"participants"`
+type RaceStateMessage struct {
+	Type         string                 `json:"type"`
+	Tick         int64                  `json:"tick"`
+	Participants []ParticipantStateJSON `json:"participants"`
 }
 
 func (r *RoomActor) broadcastSnapshot() {
@@ -121,9 +126,9 @@ func (r *RoomActor) broadcastSnapshot() {
 	})
 
 	r.tickCount++
-	msg := raceStateMessage{Type: "race_state", Tick: r.tickCount}
+	msg := RaceStateMessage{Type: "race_state", Tick: r.tickCount}
 	for i, p := range ranked {
-		msg.Participants = append(msg.Participants, participantSnapshot{
+		msg.Participants = append(msg.Participants, ParticipantStateJSON{
 			UserID:    p.UserID,
 			DistanceM: float64(p.WordsCorrect),
 			Rank:      i + 1,
