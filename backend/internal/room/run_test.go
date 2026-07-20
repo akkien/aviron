@@ -9,6 +9,59 @@ import (
 	"time"
 )
 
+func TestRoomActor_Send_DeliversToInbox(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast)
+	go r.Run()
+
+	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	select {
+	case <-broadcast:
+	case <-time.After(time.Second):
+		t.Fatal("no broadcast received within 1s after Send — event was not applied")
+	}
+}
+
+func TestRoomActor_Send_DoesNotBlockAfterContextCancelled(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast)
+	go r.Run()
+	cancel()
+	time.Sleep(50 * time.Millisecond) // let Run() actually exit before Send
+
+	done := make(chan struct{})
+	go func() {
+		r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Send() blocked after context cancellation — would leak the calling goroutine")
+	}
+}
+
+func TestRoomActor_Context_DoneAfterCancel(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast)
+	cancel()
+
+	select {
+	case <-r.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("Context().Done() not closed after cancel")
+	}
+}
+
 func TestRoomActor_Run_BroadcastsOnTick(t *testing.T) {
 	broadcast := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())

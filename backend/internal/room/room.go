@@ -48,10 +48,31 @@ func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int
 
 // Broadcast returns the channel this actor sends race_state snapshots on.
 // The room registry creates the underlying channel at Spawn time; the
-// WebSocket fan-out (websocket/ws-endpoint.md, not yet built) reads from it
-// to relay messages to every connection attached to this room.
+// WebSocket fan-out (websocket/ws-endpoint.md) reads from it to relay
+// messages to every connection attached to this room.
 func (r *RoomActor) Broadcast() <-chan []byte {
 	return r.broadcast
+}
+
+// Context returns this actor's context, cancelled when the room closes
+// (race finished, or the registry removes it). websocket/ws-endpoint.md
+// derives each connection's own context from this one, so a connection is
+// cut loose the moment its room goes away.
+func (r *RoomActor) Context() context.Context {
+	return r.ctx
+}
+
+// Send enqueues ev onto the actor's inbox for its single-writer Run loop to
+// apply. It's the only way code outside this package may feed the actor an
+// event — callers (e.g. websocket/ws-endpoint.md's reader goroutine) never
+// touch participants directly. The select against ctx.Done() matters: once
+// Run has returned, nothing drains inbox anymore, so a plain unguarded send
+// here would block forever and leak the calling goroutine.
+func (r *RoomActor) Send(ev RoomEvent) {
+	select {
+	case r.inbox <- ev:
+	case <-r.ctx.Done():
+	}
 }
 
 // Run is the room actor's single-writer loop: participants is only ever
@@ -80,6 +101,11 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 			DisplayName: e.DisplayName,
 			ConnectedAt: time.Now(),
 		}
+		// Broadcast immediately rather than waiting for the next tick (up to
+		// 250ms away) — websocket/protocol.md's join_race message is meant to
+		// get the newly-attached client a snapshot right away, not leave it
+		// looking at nothing until the ticker fires.
+		r.broadcastSnapshot()
 	case TelemetryReceived:
 		p, ok := r.participants[e.UserID]
 		if !ok || e.Seq <= p.LastSeq {
