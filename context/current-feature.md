@@ -6,19 +6,19 @@ Not Started
 
 ## Goals
 
-<!-- bullet points of what success looks like -->
+<!-- What does success look like for this feature? -->
 
 ## Explain
 
-<!-- bullet points explaining the feature/spec -->
+<!-- Explanation of the feature/spec, populated by `load` -->
 
 ## Plan
 
-<!-- implementation steps, architecture/design notes, tradeoffs -->
+<!-- Detailed implementation plan, architecture notes, tradeoffs -->
 
 ## Notes
 
-<!-- constraints, edge cases -->
+<!-- Additional context, constraints, or details from spec -->
 
 ## History
 
@@ -29,3 +29,4 @@ Not Started
 - **JWT Auth Middleware** (2026-07-18) — `internal/middleware.Auth(jwtSecret)`, verifying the JWT `Login` issues (HS256, `sub`/`exp` claims, explicit expiry check alongside the library's implicit one) and exposing the caller's user id via `UserIDFromContext`. Moved mid-feature from `internal/auth/middleware.go` (`auth.RequireAuth`) into its own top-level `internal/middleware` package (`middleware.Auth`), since the logic has zero dependency on `internal/auth`'s domain types — documented as a standing convention in coding-standards.md ("cross-cutting middleware gets its own top-level package"). Verified: `go build`/`go vet`/`gofmt -l .` clean, and all `TestAuth_*` tests pass (closing the verification gap the previous feature left open, at least for this package). Not wired into any route yet — nothing to protect until `races/create-race`. Also backfilled concise `docs/feature-log.md` entries for User Registration and Login & JWT Issuance, which hadn't been documented there yet. Next feature per context/features/phase-1-plan.md: `races/create-race`.
 - **Create Race** (2026-07-18) — `POST /races` (authenticated), the first domain package beyond `auth` (`internal/race`: `RaceHandler`/`RaceService`/`RaceRepository`, `NewRaceHandler`/`NewRaceService`, `dtos.go`), following the layered convention exactly — deliberately diverging from the feature spec's older flat-function handler wording, which predates that convention. No new migration needed: `races` already had every column this feature uses from the scaffolding migration. This is the first route actually wrapped with `middleware.Auth`, closing the loop the JWT Auth Middleware feature left open. Verified: `go build`/`go vet`/`gofmt -l .` clean, and the *entire* test suite passed (`go test ./... -race`), including `internal/auth` — this also closes the verification gap the Login & JWT Issuance feature had left open. Manual curl/DB verification deferred until Phase 1 is fully done, per explicit request. Next feature per context/features/phase-1-plan.md: `races/join-race`.
 - **Join Race** (2026-07-18) — `POST /races/{id}/join`, extending `internal/race` (not a new package) with `GetRace`/`AddParticipant`, three new sentinel errors (`ErrRaceNotFound`, `ErrAlreadyJoined`, `ErrRaceNotPending`), and a signed HS256 session token (`race_id`/`user_id` claims, 6h TTL) mirroring `AuthService`'s JWT-signing pattern — `RaceService` now also holds a `jwtSecret`. `{id}` UUID validation happens in the handler via a small regex, not a UUID library, consistent with this project's plain-`string`-ids convention. No new migration needed. The test suite itself caught a real bug: the fake repository's generated ids (`race-1`) failed the handler's own UUID-format check, exactly as it should have — fixed the fixture to generate UUID-shaped ids. Also formalized two workflow conventions learned this session directly into the `/feature` skill files: `start.md` now states verification (build/vet/gofmt/test) happens once and isn't repeated at `complete`, and housekeeping like `make docs` doesn't get its own tracked `TodoWrite` item. Verified with `go build`/`go vet`/`gofmt -l .`/`go test ./...` (no `-race` this run, per explicit request). Next feature per context/features/phase-1-plan.md: `races/start-race`.
+- **Start Race, Prompt Text & Race Status** (2026-07-20) — Bundled two specs (`races/start-race.md`, `races/race-status.md`) into one feature since both extend `internal/race` and share rationale. Added `POST /races/{id}/start` (creator-only, generates prompt text via `gofakeit`'s `Word()` called `distance_meters` times for exact word-count control, flips status to `active`), `GET /races/{id}/text` (fetch the generated prompt, `409` if not ready), and `GET /races/{id}` (race + participants via two queries: race row, then `race_participants JOIN users`). New migration `000002_add_prompt_text` (`races.prompt_text` was only ever in the schema doc, not the real migration). Two new sentinel errors (`ErrNotCreator`, `ErrPromptNotReady`), deliberately not collapsed into the existing `ErrRaceNotPending` despite both being `409`s, since `ErrPromptNotReady` means the opposite condition. Diverged from `start-race.md`'s original "hardcoded word list" suggestion in favor of `gofakeit` — same no-network-dependency guarantee, better variety; confirmed via `go doc` that `gofakeit` v7's `Paragraph`/`Sentence` are deprecated no-ops, so looped `Word()` instead. Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` passed, Swagger docs regenerated. Design questions raised during review (not yet actioned): whether `CreateRace` should auto-add the creator as a participant (currently it doesn't — creator must call `join` like anyone else to get a `session_token`/race slot), and whether a minimum-participant guard should gate `start` (currently `start` is lobby-style: creator decides timing, no participant-count check). Next feature per context/features/phase-1-plan.md: `frontend-client/login-page`.
