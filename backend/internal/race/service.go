@@ -63,6 +63,32 @@ func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sess
 	return signed, nil
 }
 
+// StartRace generates the shared prompt text and flips raceID from pending
+// to active. Only the race's creator may call this.
+func (s *RaceService) StartRace(ctx context.Context, raceID, callerID string) (Race, error) {
+	r, err := s.repo.GetRace(ctx, raceID)
+	if err != nil {
+		return Race{}, err
+	}
+	if r.CreatedBy != callerID {
+		return Race{}, ErrNotCreator
+	}
+	if r.Status != "pending" {
+		return Race{}, ErrRaceNotPending
+	}
+
+	promptText := generatePromptText(r.DistanceMeters)
+	return s.repo.StartRace(ctx, raceID, promptText)
+}
+
+func (s *RaceService) GetRaceText(ctx context.Context, raceID string) (string, error) {
+	return s.repo.GetRaceText(ctx, raceID)
+}
+
+func (s *RaceService) GetRaceDetail(ctx context.Context, raceID string) (RaceDetail, error) {
+	return s.repo.GetRaceWithParticipants(ctx, raceID)
+}
+
 func validateCreateRace(name string, distanceMeters int) map[string]string {
 	errs := map[string]string{}
 

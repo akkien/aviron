@@ -259,3 +259,221 @@ func TestRaceHandler_Join_MissingAuth(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
 	}
 }
+
+func startRace(t *testing.T, secret []byte, h *race.RaceHandler, raceID, callerToken string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPost, "/races/"+raceID+"/start", nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+callerToken)
+	rec := httptest.NewRecorder()
+	middleware.Auth(secret)(http.HandlerFunc(h.Start)).ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRaceHandler_Start_OK(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+	creatorToken := signTestToken(t, secret, "creator")
+
+	rec := startRace(t, secret, h, raceID, creatorToken)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp["status"] != "active" {
+		t.Errorf("status = %v, want %q", resp["status"], "active")
+	}
+	if resp["prompt_text"] == "" || resp["prompt_text"] == nil {
+		t.Errorf("prompt_text = %v, want a non-empty string", resp["prompt_text"])
+	}
+	if resp["started_at"] == "" || resp["started_at"] == nil {
+		t.Errorf("started_at = %v, want a non-empty timestamp", resp["started_at"])
+	}
+}
+
+func TestRaceHandler_Start_Forbidden(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+	notCreatorToken := signTestToken(t, secret, "someone-else")
+
+	rec := startRace(t, secret, h, raceID, notCreatorToken)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Start_NotFound(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	token := signTestToken(t, secret, "creator")
+
+	missingID := "00000000-0000-0000-0000-000000000000"
+	rec := startRace(t, secret, h, missingID, token)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Start_NotPending(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+	creatorToken := signTestToken(t, secret, "creator")
+
+	if rec := startRace(t, secret, h, raceID, creatorToken); rec.Code != http.StatusOK {
+		t.Fatalf("first start status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec := startRace(t, secret, h, raceID, creatorToken)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Start_InvalidRaceID(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	token := signTestToken(t, secret, "creator")
+
+	rec := startRace(t, secret, h, "not-a-uuid", token)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Start_MissingAuth(t *testing.T) {
+	h := newTestHandler()
+
+	req := httptest.NewRequest(http.MethodPost, "/races/some-id/start", nil)
+	req.SetPathValue("id", "some-id")
+	rec := httptest.NewRecorder()
+
+	h.Start(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Text_OK(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+	creatorToken := signTestToken(t, secret, "creator")
+
+	if rec := startRace(t, secret, h, raceID, creatorToken); rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID+"/text", nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+creatorToken)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Text)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp["prompt_text"] == "" || resp["prompt_text"] == nil {
+		t.Errorf("prompt_text = %v, want a non-empty string", resp["prompt_text"])
+	}
+}
+
+func TestRaceHandler_Text_NotReady(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+	token := signTestToken(t, secret, "creator")
+
+	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID+"/text", nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Text)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Text_NotFound(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	token := signTestToken(t, secret, "creator")
+
+	missingID := "00000000-0000-0000-0000-000000000000"
+	req := httptest.NewRequest(http.MethodGet, "/races/"+missingID+"/text", nil)
+	req.SetPathValue("id", missingID)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Text)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestRaceHandler_Status_OK(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID, nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-1"))
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Status)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp["name"] != "Morning Sprint" {
+		t.Errorf("name = %v, want %q", resp["name"], "Morning Sprint")
+	}
+	if _, ok := resp["participants"]; !ok {
+		t.Errorf("participants key missing from response: %v", resp)
+	}
+}
+
+func TestRaceHandler_Status_NotFound(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	token := signTestToken(t, secret, "user-1")
+
+	missingID := "00000000-0000-0000-0000-000000000000"
+	req := httptest.NewRequest(http.MethodGet, "/races/"+missingID, nil)
+	req.SetPathValue("id", missingID)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Status)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}

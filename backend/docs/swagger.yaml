@@ -54,11 +54,53 @@ definitions:
       status:
         type: string
     type: object
+  internal_race.getRaceTextResponse:
+    properties:
+      prompt_text:
+        type: string
+    type: object
   internal_race.joinRaceResponse:
     properties:
       race_id:
         type: string
       session_token:
+        type: string
+    type: object
+  internal_race.participantResponse:
+    properties:
+      display_name:
+        type: string
+      joined_at:
+        type: string
+      user_id:
+        type: string
+    type: object
+  internal_race.raceStatusResponse:
+    properties:
+      created_by:
+        type: string
+      distance_meters:
+        type: integer
+      id:
+        type: string
+      name:
+        type: string
+      participants:
+        items:
+          $ref: '#/definitions/internal_race.participantResponse'
+        type: array
+      status:
+        type: string
+    type: object
+  internal_race.startRaceResponse:
+    properties:
+      id:
+        type: string
+      prompt_text:
+        type: string
+      started_at:
+        type: string
+      status:
         type: string
     type: object
 info:
@@ -184,6 +226,43 @@ paths:
       summary: Create a race
       tags:
       - races
+  /races/{id}:
+    get:
+      description: Returns a race's current status and participant list
+      parameters:
+      - description: Race ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_race.raceStatusResponse'
+        "400":
+          description: 'error: invalid_race_id'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: 'error: race_not_found'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get race status
+      tags:
+      - races
   /races/{id}/join:
     post:
       description: Joins an existing race as a participant, returning a per-race session
@@ -226,6 +305,99 @@ paths:
               type: string
             type: object
       summary: Join a race
+      tags:
+      - races
+  /races/{id}/start:
+    post:
+      description: 'Creator starts the race: generates the shared prompt text and
+        flips status to active'
+      parameters:
+      - description: Race ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_race.startRaceResponse'
+        "400":
+          description: 'error: invalid_race_id'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: 'error: forbidden'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: 'error: race_not_found'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: 'error: race_not_pending'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Start a race
+      tags:
+      - races
+  /races/{id}/text:
+    get:
+      description: Fetches the race's already-generated prompt text
+      parameters:
+      - description: Race ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_race.getRaceTextResponse'
+        "400":
+          description: 'error: invalid_race_id'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: 'error: race_not_found'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: 'error: prompt_not_ready'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get race prompt text
       tags:
       - races
 swagger: "2.0"

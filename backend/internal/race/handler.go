@@ -115,3 +115,156 @@ func (h *RaceHandler) Join(w http.ResponseWriter, r *http.Request) {
 		SessionToken: sessionToken,
 	})
 }
+
+// Start godoc
+// @Summary Start a race
+// @Description Creator starts the race: generates the shared prompt text and flips status to active
+// @Tags races
+// @Produce json
+// @Param id path string true "Race ID"
+// @Success 200 {object} startRaceResponse
+// @Failure 400 {object} map[string]string "error: invalid_race_id"
+// @Failure 401 {object} map[string]string "error: unauthorized"
+// @Failure 403 {object} map[string]string "error: forbidden"
+// @Failure 404 {object} map[string]string "error: race_not_found"
+// @Failure 409 {object} map[string]string "error: race_not_pending"
+// @Router /races/{id}/start [post]
+func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	raceID := r.PathValue("id")
+	if !isValidUUID(raceID) {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
+		return
+	}
+
+	started, err := h.svc.StartRace(r.Context(), raceID, userID)
+	switch {
+	case errors.Is(err, ErrRaceNotFound):
+		httpx.WriteError(w, http.StatusNotFound, "race_not_found")
+		return
+	case errors.Is(err, ErrNotCreator):
+		httpx.WriteError(w, http.StatusForbidden, "forbidden")
+		return
+	case errors.Is(err, ErrRaceNotPending):
+		httpx.WriteError(w, http.StatusConflict, "race_not_pending")
+		return
+	case err != nil:
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	promptText := ""
+	if started.PromptText != nil {
+		promptText = *started.PromptText
+	}
+	startedAt := ""
+	if started.StartedAt != nil {
+		startedAt = started.StartedAt.Format(time.RFC3339)
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, startRaceResponse{
+		ID:         started.ID,
+		Status:     started.Status,
+		StartedAt:  startedAt,
+		PromptText: promptText,
+	})
+}
+
+// Text godoc
+// @Summary Get race prompt text
+// @Description Fetches the race's already-generated prompt text
+// @Tags races
+// @Produce json
+// @Param id path string true "Race ID"
+// @Success 200 {object} getRaceTextResponse
+// @Failure 400 {object} map[string]string "error: invalid_race_id"
+// @Failure 401 {object} map[string]string "error: unauthorized"
+// @Failure 404 {object} map[string]string "error: race_not_found"
+// @Failure 409 {object} map[string]string "error: prompt_not_ready"
+// @Router /races/{id}/text [get]
+func (h *RaceHandler) Text(w http.ResponseWriter, r *http.Request) {
+	_, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	raceID := r.PathValue("id")
+	if !isValidUUID(raceID) {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
+		return
+	}
+
+	promptText, err := h.svc.GetRaceText(r.Context(), raceID)
+	switch {
+	case errors.Is(err, ErrRaceNotFound):
+		httpx.WriteError(w, http.StatusNotFound, "race_not_found")
+		return
+	case errors.Is(err, ErrPromptNotReady):
+		httpx.WriteError(w, http.StatusConflict, "prompt_not_ready")
+		return
+	case err != nil:
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, getRaceTextResponse{PromptText: promptText})
+}
+
+// Status godoc
+// @Summary Get race status
+// @Description Returns a race's current status and participant list
+// @Tags races
+// @Produce json
+// @Param id path string true "Race ID"
+// @Success 200 {object} raceStatusResponse
+// @Failure 400 {object} map[string]string "error: invalid_race_id"
+// @Failure 401 {object} map[string]string "error: unauthorized"
+// @Failure 404 {object} map[string]string "error: race_not_found"
+// @Router /races/{id} [get]
+func (h *RaceHandler) Status(w http.ResponseWriter, r *http.Request) {
+	_, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	raceID := r.PathValue("id")
+	if !isValidUUID(raceID) {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
+		return
+	}
+
+	detail, err := h.svc.GetRaceDetail(r.Context(), raceID)
+	switch {
+	case errors.Is(err, ErrRaceNotFound):
+		httpx.WriteError(w, http.StatusNotFound, "race_not_found")
+		return
+	case err != nil:
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	participants := make([]participantResponse, len(detail.Participants))
+	for i, p := range detail.Participants {
+		participants[i] = participantResponse{
+			UserID:      p.UserID,
+			DisplayName: p.DisplayName,
+			JoinedAt:    p.JoinedAt.Format(time.RFC3339),
+		}
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, raceStatusResponse{
+		ID:             detail.ID,
+		Name:           detail.Name,
+		DistanceMeters: detail.DistanceMeters,
+		Status:         detail.Status,
+		CreatedBy:      detail.CreatedBy,
+		Participants:   participants,
+	})
+}

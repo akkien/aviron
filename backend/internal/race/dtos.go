@@ -21,3 +21,29 @@ type joinRaceResponse struct {
 	RaceID       string `json:"race_id"`
 	SessionToken string `json:"session_token"`
 }
+
+type startRaceResponse struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	StartedAt  string `json:"started_at"`
+	PromptText string `json:"prompt_text"`
+}
+
+type getRaceTextResponse struct {
+	PromptText string `json:"prompt_text"`
+}
+
+type participantResponse struct {
+	UserID      string `json:"user_id"`
+	DisplayName string `json:"display_name"`
+	JoinedAt    string `json:"joined_at"`
+}
+
+type raceStatusResponse struct {
+	ID             string                `json:"id"`
+	Name           string                `json:"name"`
+	DistanceMeters int                   `json:"distance_meters"`
+	Status         string                `json:"status"`
+	CreatedBy      string                `json:"created_by"`
+	Participants   []participantResponse `json:"participants"`
+}

@@ -9,12 +9,21 @@ import (
 	"github.com/akkien/aviron/internal/race"
 )
 
+// participantRecord tracks a join, including which race it belongs to and
+// when it happened, so fakeRepository can both detect duplicate joins and
+// reconstruct a race's participant list.
+type participantRecord struct {
+	raceID   string
+	userID   string
+	joinedAt time.Time
+}
+
 // fakeRepository is an in-memory race.RaceRepository used by both
 // service_test.go and handler_test.go, so neither needs a real Postgres connection.
 type fakeRepository struct {
 	mu           sync.Mutex
 	races        []race.Race
-	participants map[string]bool
+	participants []participantRecord
 }
 
 func newFakeRepository() *fakeRepository {
@@ -55,14 +64,74 @@ func (f *fakeRepository) AddParticipant(ctx context.Context, raceID, userID stri
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.participants == nil {
-		f.participants = make(map[string]bool)
+	for _, p := range f.participants {
+		if p.raceID == raceID && p.userID == userID {
+			return race.ErrAlreadyJoined
+		}
+	}
+	f.participants = append(f.participants, participantRecord{
+		raceID:   raceID,
+		userID:   userID,
+		joinedAt: time.Now(),
+	})
+	return nil
+}
+
+func (f *fakeRepository) StartRace(ctx context.Context, raceID, promptText string) (race.Race, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := range f.races {
+		if f.races[i].ID == raceID {
+			now := time.Now()
+			f.races[i].Status = "active"
+			f.races[i].StartedAt = &now
+			f.races[i].PromptText = &promptText
+			return f.races[i], nil
+		}
+	}
+	return race.Race{}, race.ErrRaceNotFound
+}
+
+func (f *fakeRepository) GetRaceText(ctx context.Context, raceID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, r := range f.races {
+		if r.ID == raceID {
+			if r.PromptText == nil {
+				return "", race.ErrPromptNotReady
+			}
+			return *r.PromptText, nil
+		}
+	}
+	return "", race.ErrRaceNotFound
+}
+
+func (f *fakeRepository) GetRaceWithParticipants(ctx context.Context, raceID string) (race.RaceDetail, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var found *race.Race
+	for i := range f.races {
+		if f.races[i].ID == raceID {
+			found = &f.races[i]
+			break
+		}
+	}
+	if found == nil {
+		return race.RaceDetail{}, race.ErrRaceNotFound
 	}
 
-	key := raceID + ":" + userID
-	if f.participants[key] {
-		return race.ErrAlreadyJoined
+	detail := race.RaceDetail{Race: *found}
+	for _, p := range f.participants {
+		if p.raceID == raceID {
+			detail.Participants = append(detail.Participants, race.Participant{
+				UserID:      p.userID,
+				DisplayName: p.userID, // fake stand-in; no real user records in this fake
+				JoinedAt:    p.joinedAt,
+			})
+		}
 	}
-	f.participants[key] = true
-	return nil
+	return detail, nil
 }
