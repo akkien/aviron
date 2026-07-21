@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 
 import { LoginPage } from "@/pages/LoginPage"
 import { RacesPage } from "@/pages/RacesPage"
+import { RaceDetailPage } from "@/pages/RaceDetailPage"
 
 function App() {
   return (
@@ -9,6 +10,7 @@ function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/races" element={<RacesPage />} />
+        <Route path="/races/:raceId" element={<RaceDetailPage />} />
         <Route path="/" element={<Navigate to="/races" replace />} />
       </Routes>
     </BrowserRouter>

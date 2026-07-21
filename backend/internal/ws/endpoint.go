@@ -96,7 +96,20 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID, displayName string) {
 	hub := h.hubs.getOrCreate(raceID, actor)
 
-	connCtx, cancel := context.WithCancel(actor.Context())
+	// Deliberately NOT context.WithCancel(actor.Context()): that would fire
+	// the instant the room's context is cancelled — at essentially the same
+	// moment hub.closed does, with no ordering between the two, since both
+	// are direct observers of the same cancellation. hub.closed is only
+	// guaranteed to close *after* hub.run has fully drained and forwarded
+	// every pending broadcast (including the room's final
+	// race_state/race_finished) into every registered connCh; a connCtx
+	// racing that signal independently could still win and tear this
+	// connection down before writeLoop ever reads what hub just forwarded —
+	// the same lost-final-message bug this was meant to fix, just one layer
+	// up. Cancellation here is purely for this connection's own reasons
+	// (read/write error); room-wide winding-down reaches it exclusively
+	// through hub.closed, passed into writeLoop below.
+	connCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	connCh := make(chan []byte, connBufferSize)
@@ -113,7 +126,7 @@ func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		writeLoop(connCtx, conn, connCh)
+		writeLoop(connCtx, hub.closed, conn, connCh)
 	}()
 	wg.Wait()
 
@@ -159,19 +172,44 @@ func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, d
 }
 
 // writeLoop owns connCh, this connection's slice of the room's fan-out (see
-// hub) — draining it and writing frames out until ctx is done.
-func writeLoop(ctx context.Context, conn wsConn, connCh <-chan []byte) {
+// hub) — draining it and writing frames out until ctx is done or hubClosed
+// fires.
+func writeLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, connCh <-chan []byte) {
 	for {
 		select {
 		case msg := <-connCh:
-			writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
-			err := conn.Write(writeCtx, websocket.MessageText, msg)
-			cancel()
-			if err != nil {
+			if !writeMsg(ctx, conn, msg) {
 				return
+			}
+		case <-hubClosed:
+			// hub.run only closes hub.closed after fully draining and
+			// forwarding every pending broadcast — including the room's
+			// final race_state/race_finished — into every registered
+			// connCh, so anything still meant for this connection is
+			// already sitting in connCh's buffer by now. ctx isn't tied to
+			// the room's own context (see serveConn), so it's still valid
+			// here: drain deterministically instead of leaving this select
+			// to race hubClosed against connCh the same way hub.run's own
+			// broadcast/done select used to.
+			for {
+				select {
+				case msg := <-connCh:
+					if !writeMsg(ctx, conn, msg) {
+						return
+					}
+				default:
+					return
+				}
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func writeMsg(ctx context.Context, conn wsConn, msg []byte) bool {
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	err := conn.Write(writeCtx, websocket.MessageText, msg)
+	cancel()
+	return err == nil
 }

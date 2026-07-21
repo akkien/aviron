@@ -387,6 +387,16 @@ func (r *RoomActor) buildParticipantResult(p *ParticipantState) ParticipantResul
 // duration of the Postgres write, which is fine: a finishing race has
 // nothing left to process concurrently anyway.
 func (r *RoomActor) finishRace(results []ParticipantResult) {
+	// The telemetry that just triggered this finish (e.g. the last
+	// participant reaching distanceMeters) is only reflected in
+	// r.participants' in-memory state so far — the next periodic
+	// broadcastSnapshot tick (up to 250ms away) never gets a chance to run,
+	// since finishing happens synchronously inside the same applyEvent call.
+	// Without this, a client's own vehicle would visually freeze wherever
+	// the last tick left it and jump straight to the results screen,
+	// instead of ever being seen reaching the finish line.
+	r.broadcastSnapshot()
+
 	if err := r.finisher.FinishRace(r.ctx, r.id, r.distanceMeters, results); err != nil {
 		// No retry: this is a side project's accepted gap, not a production
 		// resilience story. Logged and left running rather than torn down,

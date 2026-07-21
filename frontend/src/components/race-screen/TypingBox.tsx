@@ -113,8 +113,27 @@ export function TypingBox({ promptText, distanceMeters, sendTelemetry }: TypingB
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value
     const word = words[wordIndex] ?? ""
-    if (word.startsWith(val)) {
-      setInput(val)
+    if (!word.startsWith(val)) return
+
+    setInput(val)
+
+    // The last word has no next word to wait for, so there's nothing to
+    // justify requiring a trailing Space press there (every other word
+    // still waits for Space — see handleKeyDown) — finish the instant
+    // it's fully typed instead.
+    if (wordIndex === words.length - 1 && val === word) {
+      const newIndex = wordIndex + 1
+      setWordIndex(newIndex)
+      setInput("")
+      setError(false)
+
+      const wordsCompleted = Math.min(newIndex, distanceMeters)
+      if (startedAtRef.current === null) startedAtRef.current = Date.now()
+      const elapsedMinutes = (Date.now() - startedAtRef.current) / 60000
+      const paceWatt = elapsedMinutes > 0 ? Math.round(wordsCompleted / elapsedMinutes) : 0
+
+      seqRef.current += 1
+      sendTelemetry(seqRef.current, wordsCompleted, paceWatt)
     }
   }
 
