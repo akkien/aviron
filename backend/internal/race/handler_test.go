@@ -187,7 +187,7 @@ func TestRaceHandler_Join_NotFound(t *testing.T) {
 	h := newTestHandler()
 	token := signTestToken(t, secret, "user-1")
 
-	missingID := "00000000-0000-0000-0000-000000000000"
+	missingID := "999999999999"
 	req := httptest.NewRequest(http.MethodPost, "/races/"+missingID+"/join", nil)
 	req.SetPathValue("id", missingID)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -347,7 +347,7 @@ func TestRaceHandler_Leave_NotFound(t *testing.T) {
 	h := newTestHandler()
 	token := signTestToken(t, secret, "user-1")
 
-	missingID := "00000000-0000-0000-0000-000000000000"
+	missingID := "999999999999"
 	req := httptest.NewRequest(http.MethodPost, "/races/"+missingID+"/leave", nil)
 	req.SetPathValue("id", missingID)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -482,7 +482,7 @@ func TestRaceHandler_Start_NotFound(t *testing.T) {
 	h := newTestHandler()
 	token := signTestToken(t, secret, "creator")
 
-	missingID := "00000000-0000-0000-0000-000000000000"
+	missingID := "999999999999"
 	rec := startRace(t, secret, h, missingID, token)
 
 	if rec.Code != http.StatusNotFound {
@@ -585,7 +585,7 @@ func TestRaceHandler_Text_NotFound(t *testing.T) {
 	h := newTestHandler()
 	token := signTestToken(t, secret, "creator")
 
-	missingID := "00000000-0000-0000-0000-000000000000"
+	missingID := "999999999999"
 	req := httptest.NewRequest(http.MethodGet, "/races/"+missingID+"/text", nil)
 	req.SetPathValue("id", missingID)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -631,7 +631,7 @@ func TestRaceHandler_Status_NotFound(t *testing.T) {
 	h := newTestHandler()
 	token := signTestToken(t, secret, "user-1")
 
-	missingID := "00000000-0000-0000-0000-000000000000"
+	missingID := "999999999999"
 	req := httptest.NewRequest(http.MethodGet, "/races/"+missingID, nil)
 	req.SetPathValue("id", missingID)
 	req.Header.Set("Authorization", "Bearer "+token)

@@ -13,10 +13,13 @@ import (
 	"github.com/akkien/aviron/internal/room"
 )
 
-var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+// raceIDPattern matches GenerateRaceID's shape (id.go): 12 base58 characters
+// (no 0/O/I/l, to match the same alphabet a race id is actually generated
+// from).
+var raceIDPattern = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{12}$`)
 
-func isValidUUID(s string) bool {
-	return uuidPattern.MatchString(s)
+func isValidRaceID(s string) bool {
+	return raceIDPattern.MatchString(s)
 }
 
 type RaceHandler struct {
@@ -96,7 +99,7 @@ func (h *RaceHandler) Join(w http.ResponseWriter, r *http.Request) {
 	}
 
 	raceID := r.PathValue("id")
-	if !isValidUUID(raceID) {
+	if !isValidRaceID(raceID) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
 		return
 	}
@@ -146,7 +149,7 @@ func (h *RaceHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	raceID := r.PathValue("id")
-	if !isValidUUID(raceID) {
+	if !isValidRaceID(raceID) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
 		return
 	}
@@ -191,7 +194,7 @@ func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
 	}
 
 	raceID := r.PathValue("id")
-	if !isValidUUID(raceID) {
+	if !isValidRaceID(raceID) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
 		return
 	}
@@ -251,7 +254,7 @@ func (h *RaceHandler) Text(w http.ResponseWriter, r *http.Request) {
 	}
 
 	raceID := r.PathValue("id")
-	if !isValidUUID(raceID) {
+	if !isValidRaceID(raceID) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
 		return
 	}
@@ -291,7 +294,7 @@ func (h *RaceHandler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	raceID := r.PathValue("id")
-	if !isValidUUID(raceID) {
+	if !isValidRaceID(raceID) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
 		return
 	}

@@ -20,20 +20,39 @@ func NewRaceRepository(pool *pgxpool.Pool) *RaceRepository {
 	return &RaceRepository{pool: pool}
 }
 
+// maxCreateRaceAttempts bounds retries when a freshly generated race id
+// collides with an existing row (race.GenerateRaceID's 12-character base58
+// space makes this vanishingly unlikely, but the id is no longer guaranteed
+// unique by Postgres's own gen_random_uuid() default, so the retry is what
+// actually keeps that guarantee true end to end).
+const maxCreateRaceAttempts = 5
+
 func (r *RaceRepository) CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (race.Race, error) {
 	var rc race.Race
 
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO races (name, distance_meters, created_by)
-		VALUES ($1, $2, $3)
-		RETURNING id, name, distance_meters, status, created_by, created_at
-	`, name, distanceMeters, createdBy).Scan(&rc.ID, &rc.Name, &rc.DistanceMeters, &rc.Status, &rc.CreatedBy, &rc.CreatedAt)
+	for attempt := 0; attempt < maxCreateRaceAttempts; attempt++ {
+		id, err := race.GenerateRaceID()
+		if err != nil {
+			return race.Race{}, fmt.Errorf("postgres: create race: %w", err)
+		}
 
-	if err != nil {
+		err = r.pool.QueryRow(ctx, `
+			INSERT INTO races (id, name, distance_meters, created_by)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, name, distance_meters, status, created_by, created_at
+		`, id, name, distanceMeters, createdBy).Scan(&rc.ID, &rc.Name, &rc.DistanceMeters, &rc.Status, &rc.CreatedBy, &rc.CreatedAt)
+		if err == nil {
+			return rc, nil
+		}
+
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+			continue // id collision — retry with a freshly generated one
+		}
 		return race.Race{}, fmt.Errorf("postgres: create race: %w", err)
 	}
 
-	return rc, nil
+	return race.Race{}, fmt.Errorf("postgres: create race: exhausted %d attempts generating a unique id", maxCreateRaceAttempts)
 }
 
 func (r *RaceRepository) GetRace(ctx context.Context, raceID string) (race.Race, error) {

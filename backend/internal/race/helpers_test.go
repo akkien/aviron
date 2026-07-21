@@ -40,14 +40,24 @@ func newFakeRepository() *fakeRepository {
 	return &fakeRepository{}
 }
 
+// fakeRaceID returns a 12-character base58-shaped id for the nth race,
+// matching what race.GenerateRaceID actually produces (and what
+// isValidRaceID actually accepts) — a fixed "race" prefix plus an 8-digit
+// counter, left-padded with '1' rather than '0' since base58 excludes '0'.
+func fakeRaceID(n int) string {
+	digits := fmt.Sprintf("%d", n)
+	for len(digits) < 8 {
+		digits = "1" + digits
+	}
+	return "race" + digits
+}
+
 func (f *fakeRepository) CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (race.Race, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	r := race.Race{
-		// UUID-shaped so it satisfies the handler's isValidUUID check, the
-		// same way a real Postgres-generated id would.
-		ID:             fmt.Sprintf("00000000-0000-0000-0000-%012d", len(f.races)+1),
+		ID:             fakeRaceID(len(f.races) + 1),
 		Name:           name,
 		DistanceMeters: distanceMeters,
 		Status:         "pending",
