@@ -118,6 +118,44 @@ func TestIntegration_RejectsRaceIDMismatch(t *testing.T) {
 	}
 }
 
+func TestIntegration_RejectsReconnectAfterGracePeriodExpired(t *testing.T) {
+	secret := []byte("test-secret")
+	server, registry := newIntegrationTestServer(t, secret)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	actor := registry.Spawn(ctx, "race-1", "some prompt text", 5)
+
+	// Simulate user-1 having joined, disconnected, and had their grace
+	// period expire — without waiting the real 30s: reconnection/grace-period.md's
+	// ParticipantLeft is exported specifically so this is reachable from
+	// here, the same as a real expiry would apply it.
+	actor.Send(room.ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	actor.Send(room.ParticipantDisconnected{UserID: "user-1"})
+	actor.Send(room.ParticipantLeft{UserID: "user-1"})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !actor.IsEvicted("user-1") {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !actor.IsEvicted("user-1") {
+		t.Fatal("setup failed: user-1 was not evicted")
+	}
+
+	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
+	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	_, resp, err := websocket.Dial(dialCtx, url, nil)
+	if err == nil {
+		t.Fatal("Dial() error = nil, want the handshake to be rejected for an evicted user")
+	}
+	if resp != nil && resp.StatusCode == 101 {
+		t.Errorf("handshake was upgraded (status 101), want a rejection")
+	}
+}
+
 func TestIntegration_RejectsUnknownRace(t *testing.T) {
 	secret := []byte("test-secret")
 	server, _ := newIntegrationTestServer(t, secret)

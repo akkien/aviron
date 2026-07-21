@@ -7,18 +7,33 @@ import (
 	"time"
 )
 
+// gracePeriodDuration is how long a disconnected participant's state is
+// kept before they're removed for good (reconnection/grace-period.md). A
+// var, not a const, so tests can shorten it instead of sleeping the real
+// 30s — see TestRoomActor_Run_GracePeriodExpiry_RemovesParticipant.
+var gracePeriodDuration = 30 * time.Second
+
 type ParticipantState struct {
-	UserID         string
-	DisplayName    string
-	WordsCorrect   int
-	LastSeq        int
-	ConnectedAt    time.Time
-	DisconnectedAt *time.Time
+	UserID            string
+	DisplayName       string
+	WordsCorrect      int
+	LastSeq           int
+	ConnectedAt       time.Time
+	DisconnectedAt    *time.Time
+	DisconnectedCount int
+	// graceTimer fires ParticipantLeft if this participant doesn't reconnect
+	// in time. Stopped and cleared on reconnect so a stale expiry can never
+	// remove someone who's since reattached.
+	graceTimer *time.Timer
 }
 
 type RoomActor struct {
-	id             string
-	participants   map[string]*ParticipantState
+	id           string
+	participants map[string]*ParticipantState
+	// evicted tracks user_ids removed via grace-period expiry, so a
+	// too-late reconnect attempt can be rejected by websocket/ws-endpoint.md
+	// instead of silently rejoining as a fresh participant.
+	evicted        map[string]struct{}
 	promptText     string
 	distanceMeters int
 	tickCount      int64
@@ -37,6 +52,7 @@ func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int
 	return &RoomActor{
 		id:             id,
 		participants:   make(map[string]*ParticipantState),
+		evicted:        make(map[string]struct{}),
 		promptText:     promptText,
 		distanceMeters: distanceMeters,
 		inbox:          make(chan RoomEvent, 64), // generous buffer: a burst of telemetry must not block reader goroutines
@@ -75,6 +91,40 @@ func (r *RoomActor) Send(ev RoomEvent) {
 	}
 }
 
+// evictionQuery is a RoomEvent only so it can travel through inbox — unlike
+// every other event, it doesn't mutate room state; applyEvent just answers
+// it over Reply. Reply is expected to be buffered (size 1) so applyEvent's
+// send can never block the single-writer loop on a caller that stopped
+// listening.
+type evictionQuery struct {
+	UserID string
+	Reply  chan<- bool
+}
+
+func (evictionQuery) isRoomEvent() {}
+
+// IsEvicted reports whether userID's grace period already expired in this
+// room. websocket/ws-endpoint.md calls this during the WS handshake, before
+// upgrading a reconnect attempt, so a too-late reconnect gets rejected
+// instead of silently rejoining as a fresh participant. This is the actor's
+// first synchronous query rather than a fire-and-forget event — still
+// answered from inside applyEvent, the only code allowed to read this
+// state, via a reply channel rather than a direct field read.
+func (r *RoomActor) IsEvicted(userID string) bool {
+	reply := make(chan bool, 1)
+	select {
+	case r.inbox <- evictionQuery{UserID: userID, Reply: reply}:
+	case <-r.ctx.Done():
+		return false // room's gone; there's nothing left to be evicted from
+	}
+	select {
+	case evicted := <-reply:
+		return evicted
+	case <-r.ctx.Done():
+		return false
+	}
+}
+
 // Run is the room actor's single-writer loop: participants is only ever
 // read or mutated from inside this goroutine. Every other goroutine must
 // send a RoomEvent on r.inbox instead of touching RoomActor fields directly.
@@ -96,15 +146,35 @@ func (r *RoomActor) Run() {
 func (r *RoomActor) applyEvent(ev RoomEvent) {
 	switch e := ev.(type) {
 	case ParticipantJoined:
-		r.participants[e.UserID] = &ParticipantState{
-			UserID:      e.UserID,
-			DisplayName: e.DisplayName,
-			ConnectedAt: time.Now(),
+		if existing, ok := r.participants[e.UserID]; ok {
+			// Already known — whether reconnecting after a disconnect or
+			// just a duplicate join_race from an already-connected client
+			// (e.g. two tabs, a client retry) — reuse existing progress
+			// (WordsCorrect/LastSeq) instead of resetting it like a fresh
+			// join would.
+			if existing.DisconnectedAt != nil {
+				// Reconnect within the grace period specifically: cancel the
+				// pending expiry timer so it can't remove them now they're
+				// back, and clear the disconnected marker.
+				if existing.graceTimer != nil {
+					existing.graceTimer.Stop()
+					existing.graceTimer = nil
+				}
+				existing.DisconnectedAt = nil
+			}
+		} else {
+			r.participants[e.UserID] = &ParticipantState{
+				UserID:      e.UserID,
+				DisplayName: e.DisplayName,
+				ConnectedAt: time.Now(),
+			}
 		}
 		// Broadcast immediately rather than waiting for the next tick (up to
 		// 250ms away) — websocket/protocol.md's join_race message is meant to
 		// get the newly-attached client a snapshot right away, not leave it
-		// looking at nothing until the ticker fires.
+		// looking at nothing until the ticker fires. Also doubles as the
+		// reconnecting client's own resync, since it's already registered
+		// with the room's broadcast fan-out by the time this event applies.
 		r.broadcastSnapshot()
 	case TelemetryReceived:
 		p, ok := r.participants[e.UserID]
@@ -114,11 +184,39 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		p.WordsCorrect = e.WordsCorrect
 		p.LastSeq = e.Seq
 	case ParticipantDisconnected:
-		// DisconnectedAt is set here so grace-period.md's timer logic has
-		// something to act on; the timer itself belongs to that feature.
-		if p, ok := r.participants[e.UserID]; ok {
-			now := time.Now()
-			p.DisconnectedAt = &now
+		p, ok := r.participants[e.UserID]
+		if !ok {
+			return
+		}
+		now := time.Now()
+		p.DisconnectedAt = &now
+		p.DisconnectedCount++
+		// Each disconnect (re)starts the grace-period timer — stop any
+		// earlier one first (reconnected, then dropped again) so only one
+		// is ever pending per participant.
+		if p.graceTimer != nil {
+			p.graceTimer.Stop()
+		}
+		userID := e.UserID
+		p.graceTimer = time.AfterFunc(gracePeriodDuration, func() {
+			r.Send(ParticipantLeft{UserID: userID})
+		})
+	case ParticipantLeft:
+		// Guard against a reconnect and an already-fired timer racing each
+		// other: only honor this if the participant is still the one who
+		// disconnected (DisconnectedAt != nil). If they reconnected in the
+		// gap between the timer firing and this event being applied, the
+		// ParticipantJoined case above already cleared DisconnectedAt and
+		// stopped the timer — this stale event must not remove them anyway.
+		if p, ok := r.participants[e.UserID]; ok && p.DisconnectedAt != nil {
+			delete(r.participants, e.UserID)
+			r.evicted[e.UserID] = struct{}{}
+		}
+	case evictionQuery:
+		_, evicted := r.evicted[e.UserID]
+		select {
+		case e.Reply <- evicted:
+		default:
 		}
 	}
 }

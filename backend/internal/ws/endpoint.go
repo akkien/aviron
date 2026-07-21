@@ -66,6 +66,14 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A user_id whose grace period already expired (reconnection/grace-period.md)
+	// is rejected the same way an invalid token is — not silently let back
+	// in as a fresh participant.
+	if actor.IsEvicted(userID) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{h.allowedOrigin},
 	})

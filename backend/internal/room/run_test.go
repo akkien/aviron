@@ -9,6 +9,102 @@ import (
 	"time"
 )
 
+// withShortGracePeriod temporarily shortens gracePeriodDuration so tests
+// don't have to wait a real 30s, restoring it afterward.
+func withShortGracePeriod(t *testing.T, d time.Duration) {
+	t.Helper()
+	original := gracePeriodDuration
+	gracePeriodDuration = d
+	t.Cleanup(func() { gracePeriodDuration = original })
+}
+
+func TestRoomActor_Run_GracePeriodExpiry_RemovesAndEvictsParticipant(t *testing.T) {
+	withShortGracePeriod(t, 50*time.Millisecond)
+
+	broadcast := make(chan []byte, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast)
+	go r.Run()
+
+	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	<-broadcast // drain the immediate join snapshot
+
+	r.Send(ParticipantDisconnected{UserID: "user-1"})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.IsEvicted("user-1") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("user-1 was not evicted after the grace period expired")
+}
+
+func TestRoomActor_Run_ReconnectWithinGracePeriod_CancelsTimer(t *testing.T) {
+	withShortGracePeriod(t, 100*time.Millisecond)
+
+	broadcast := make(chan []byte, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast)
+	go r.Run()
+
+	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	<-broadcast
+
+	r.Send(ParticipantDisconnected{UserID: "user-1"})
+
+	// Reconnect well before the (shortened) grace period would expire.
+	time.Sleep(20 * time.Millisecond)
+	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	// Give the original timer time to have fired if it hadn't been cancelled.
+	time.Sleep(150 * time.Millisecond)
+
+	if r.IsEvicted("user-1") {
+		t.Error("user-1 was evicted despite reconnecting within the grace period")
+	}
+}
+
+func TestRoomActor_IsEvicted_UnknownUser(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast)
+	go r.Run()
+
+	if r.IsEvicted("never-joined") {
+		t.Error("IsEvicted(never-joined) = true, want false")
+	}
+}
+
+func TestRoomActor_IsEvicted_DoesNotBlockAfterContextCancelled(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast)
+	go r.Run()
+	cancel()
+	time.Sleep(50 * time.Millisecond) // let Run() actually exit first
+
+	done := make(chan struct{})
+	go func() {
+		r.IsEvicted("user-1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("IsEvicted() blocked after context cancellation — would leak the calling goroutine")
+	}
+}
+
 func TestRoomActor_Send_DeliversToInbox(t *testing.T) {
 	broadcast := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -15,7 +15,7 @@ This spec covers the actor itself as a pure state machine — applying events an
 
 ### Events
 
-- `RoomEvent` is a small sum type (interface or tagged struct) with at least three variants: `ParticipantJoined{UserID, DisplayName}`, `TelemetryReceived{UserID, Seq, WordsCorrect}`, `ParticipantDisconnected{UserID}` — reconnection's `ParticipantReconnected` variant is added in `reconnection/grace-period.md`, not here
+- `RoomEvent` is a small sum type (interface or tagged struct) with at least three variants: `ParticipantJoined{UserID, DisplayName}`, `TelemetryReceived{UserID, Seq, WordsCorrect}`, `ParticipantDisconnected{UserID}` — reconnection's `ParticipantLeft` variant is added in `reconnection/grace-period.md`, not here (that spec decided against a distinct `ParticipantReconnected` variant — a reconnect reuses `ParticipantJoined`, told apart from a fresh join by existing participant state)
 - `applyEvent(RoomEvent)` is a pure-ish method on `RoomActor`: given the current `participants` map and an event, produce the next map. Kept as a small, dependency-free function specifically so it's unit-testable without a running goroutine (mirrors how `internal/race/prompt.go`'s `generatePromptText` was kept pure and separate from the handler in Phase 1)
 - A `TelemetryReceived` event is only applied if `Seq > participants[UserID].LastSeq` — anything else (retried/duplicate/out-of-order after a reconnect) is silently dropped, per §4.2's ordering rule
 
