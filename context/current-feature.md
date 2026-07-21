@@ -1,24 +1,52 @@
-# Current Feature
+# Current Feature: UI Revamp — Race Screen
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- Replace the current stacked `RaceStatusView` + `TypingView` cards with one immersive full-height 30/70 layout (left sidebar, right animated track) once a race exists — matching the mockup's `TypingRace.dc.html`.
+- The new race screen **takes over from the Dashboard state entirely** rather than being embedded inside it — `RacesPage.tsx` must show either the Dashboard (header/stats/create-join grid) or the race screen, never both stacked as it does today.
+- Left sidebar content depends on race status: pending (player list + cosmetic vehicle picker + Start/Leave) vs active (condensed leaderboard + strict typing box + Quit).
+- Right track panel present whenever a race exists (any status): one lane per participant, dynamically sized to however many actually joined (2–10, `MaxParticipants`), vehicle emoji positioned by progress, smooth CSS transition.
+- **New real interaction logic** (the one non-styling change): the typing box must gate advancement on correctness, word by word — no longer "any whitespace-separated token counts." Still zero backend/wire-protocol changes; the server still never inspects typed text.
+- Restyle the four existing non-mockup states (reconnecting/evicted/leaving/finished) into the new sidebar, consistent with the new visual language.
+- No changes to `useRaceSocket.ts`'s internal logic or any WebSocket/REST wire shape.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **`RacesPage.tsx` today stacks rather than swaps.** Read the actual current file: it unconditionally renders `AppHeader`/`StatCards`/the create-join grid, then *appends* `RaceStatusView` below once `raceId` is set, then `TypingView` below that once `status === "active"` — all three can be visible at once. The spec's "takes over from the Dashboard state entirely rather than being embedded inside it" line is a real structural requirement for `RacesPage.tsx`, not just a new-components list — it isn't spelled out as its own numbered requirement in `race-screen.md`, but it's necessarily implied. Flagging this now so it isn't silently missed during `start`.
+- **The spec's "existing Leave button" claim doesn't match the shipped code.** Grepped the whole frontend for `leave`: the only caller of `POST /races/{id}/leave` anywhere is... none. `leaveRace()` lives in `useRaceSocket`/`TypingView`, but it sends the WebSocket `leave_race` message and only works once a WS connection is open — which today only happens once a race is `active` (`TypingView` is the only thing that calls `useRaceSocket`, and `RacesPage` only mounts `TypingView` once `status === "active"`). There is no frontend code path today that can leave a still-`pending` race. The backend endpoint is real (`internal/race/handler.go`'s `Leave`, returns `leaveRaceResponse{race_id}` per `dtos.go`) — but wiring it into the sidebar's pre-race Leave button is genuinely new frontend work (a new `LeaveRaceResponse` type + a real `apiFetch` call), not a restyle of something that already exists.
+- **`TypingView.tsx`'s `countCompletedWords` is not strict.** It counts any whitespace-separated token as "done" once followed by a space, with zero comparison against `promptText`. The spec's word-correctness gate is a genuine rewrite of this function's replacement, not a diff-coloring pass on top of working logic.
+- **Pulled the actual mockup source** (`TypingRace.dc.html`, via `DesignSync`) rather than relying only on the spec's prose description, to ground the Plan in the real reference implementation: `onInputChange` diffs typed chars against the target word per-keystroke (mismatch sets an error flag but doesn't block further typing); `onKeyDown`'s Space handler only advances the word index if `typed === word`, otherwise sets the error flag and the cursor stays put; the typing box itself is a visually-hidden real `<input ref>` (`opacity:0; pointer-events:none`) layered under a styled fake render of done/current/pending words plus a blinking CSS-animated caret — confirms the spec's "hidden input trick... implementation detail to resolve in `start`" is this exact pattern, not an open question. Also confirms `VEHICLES` is exactly 4 entries (car 🏎️/bike 🏍️/rocket 🚀/van 🚐) and the leaderboard/track markup shapes (rank, colored dot with a ring, name, mini progress bar, percentage).
+- `lib/colors.ts`'s `laneColor(index)` already has 18 colors, comfortably covering `MaxParticipants = 10` (`internal/race/race.go`) — no changes needed, just consistent indexing (same participant ordering) between the sidebar list and the track, exactly as the spec requires.
+- `useRaceSocket(raceId, sessionToken)` already no-ops when either arg is `null` (`if (!raceId || !sessionToken) return`) — this is the mechanism that keeps a pre-active race from attempting a WS handshake against a room that hasn't been spawned yet (`Registry.Spawn` only runs from `POST /races/{id}/start`, per `room-registry.md`). Moving the hook call up from `TypingView` to a new top-level `RaceScreen` component (so the sidebar leaderboard and the track panel can share one `raceState`) must preserve this gating by passing `null` for `sessionToken` whenever `status !== "active"`, not calling the hook unconditionally.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`lib/vehicles.ts`** (new): `VEHICLES` (4 entries: car/bike/rocket/van, id+label+emoji, matching the mockup's array exactly) and `vehicleForUser(userId: string): Vehicle` — a deterministic string hash of `userId` mod 4, so every viewer renders the same opponent icon without any server sync (vehicles stay purely cosmetic per `phase-2.5-plan.md`'s scope decision).
+2. **`types/race.ts`**: add `LeaveRaceResponse { race_id: string }`, mirroring the backend's `leaveRaceResponse` DTO — new, since nothing calls this endpoint from the frontend today (see Explain).
+3. **`components/race-screen/RaceTrack.tsx`** (new): the right panel, rendered whenever `raceId` is set regardless of status. One lane per participant (ordered/colored via the existing `laneColor(index)`, same ordering the sidebar list uses), vehicle emoji positioned via `left: {percent}%` with a CSS transition on change. Progress: `raceState?.participants` (today's `distance_m / distanceMeters` math from `TypingView`) once active, `0%` for everyone pre-race. Vehicle per lane: the local player's own picker override when `user_id === currentUserId`, else `vehicleForUser(user_id)`.
+4. **`components/race-screen/TypingBox.tsx`** (new): replaces `TypingView`'s plain `<textarea>` diff entirely. A visually-hidden real `<input>` (ref-focused on click-anywhere, matching the mockup's `focusInput`) drives a styled fake render: done words green (permanent), current word char-by-char diffed (correct-so-far vs. mismatch styling), pending words muted gray, blinking caret. `onChange` diffs against `promptText`'s current word and sets an error flag on mismatch without blocking further keystrokes; only Space attempts to advance, and only succeeds on an exact match — otherwise the error flag shows and the cursor stays on the same word. Only a successful advance increments the word count and calls `sendTelemetry` (still one message per correctly-completed word — same wire cadence as today, per the spec's Data section: zero protocol changes).
+5. **`components/race-screen/RaceScreenSidebar.tsx`** (new): dispatches on state, absorbing existing logic rather than duplicating it —
+   - *Pending*: participant list + color swatch (from today's `RaceStatusView`, restyled), vehicle picker (new), Start Race button (creator-only, reuses `RaceStatusView.handleStart`'s existing `POST /races/{id}/start` call verbatim), **new** Leave button (`POST /races/{id}/leave` via the new `LeaveRaceResponse` type — see Explain), Race ID + Copy row (from `RaceStatusView`, unchanged).
+   - *Active*: condensed leaderboard (ranked from `raceState.participants`, restyled per the mockup's leaderboard block), `TypingBox`, Quit Race button (today's `leaveRace()` from `useRaceSocket`, unchanged).
+   - *Reconnecting / Evicted / Leaving / Finished*: today's plain-text states from `TypingView`, restyled into sidebar blocks — no mockup exists for these (spec is explicit), just consistent restyling.
+6. **`components/race-screen/RaceScreen.tsx`** (new): the full-height 30/70 shell (layout only) — race name header + status pill, `RaceScreenSidebar` (left, ~30%/min 340px), `RaceTrack` (right, ~70%, always rendered). Owns `useRaceSocket(raceId, status === "active" ? sessionToken : null)`, centralizing the hook one level up from where `TypingView` owns it today so both the sidebar and the track share one `raceState` — must preserve the existing `null`-gating behavior (see Explain) so a pending race never attempts a WS handshake.
+7. **`RacesPage.tsx`**: restructure so the Dashboard state and `RaceScreen` are mutually exclusive — `raceId === null` renders `AppHeader`/`StatCards`/create-join grid (today's dashboard.md layout, unchanged); `raceId !== null` renders `RaceScreen` only, nothing stacked below or above it.
+8. **Delete** `RaceStatusView.tsx` and `TypingView.tsx` once their logic is fully absorbed into the new `race-screen/` components (the spec replaces them, not supplements them).
+9. Verify: `yarn build`/`yarn lint` clean. No backend changes, so no Go verification.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on `theme.md` (done) for fonts/tokens.
+- Independent of `dashboard.md` (done) — shares only the theme layer, confirmed by reading both specs' Notes sections.
+- Depends on `frontend-realtime/websocket-client.md` and `frontend-realtime/reconnect-ui.md` (both done) — restyles their output; `useRaceSocket`'s internal logic is unchanged, only *where* it's called from moves (from `TypingView` up to `RaceScreen`).
+- Depends on `leave-race/leave-race.md` (done, backend-side) for the pre-start Leave button — but per Explain, this is the *first* time the frontend actually calls `POST /races/{id}/leave`, not a restyle of existing wiring.
+- No backend changes.
+- Full spec: `context/features/phase2.5/ui-revamp/race-screen.md`.
+- Unrelated to this feature: the `user-stats/user-stats.md` build-order question flagged in the previous two features' History entries is still open — `race-screen.md` doesn't depend on it either way.
 
 ## History
 

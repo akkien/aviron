@@ -239,7 +239,9 @@ func TestRaceHandler_Join_RaceFull(t *testing.T) {
 		return rec
 	}
 
-	for i := 0; i < race.MaxParticipants; i++ {
+	// createTestRace's creator already occupies one slot (auto-joined by
+	// CreateRace), so only MaxParticipants-1 more joins fit before full.
+	for i := 0; i < race.MaxParticipants-1; i++ {
 		userID := fmt.Sprintf("user-%d", i+2)
 		if rec := join(userID); rec.Code != http.StatusOK {
 			t.Fatalf("join(%s) status = %d, want %d, body = %s", userID, rec.Code, http.StatusOK, rec.Body.String())

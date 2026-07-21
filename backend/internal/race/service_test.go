@@ -15,7 +15,7 @@ func TestRaceService_CreateRace_Success(t *testing.T) {
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 
-	r, fieldErrs, err := svc.CreateRace(context.Background(), "  Morning Sprint  ", 1000, "user-1")
+	r, _, fieldErrs, err := svc.CreateRace(context.Background(), "  Morning Sprint  ", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -54,7 +54,7 @@ func TestRaceService_CreateRace_ValidationErrors(t *testing.T) {
 			repo := newFakeRepository()
 			svc := race.NewRaceService(repo, []byte("test-secret"))
 
-			_, fieldErrs, err := svc.CreateRace(context.Background(), tt.raceName, tt.distanceMeters, "user-1")
+			_, _, fieldErrs, err := svc.CreateRace(context.Background(), tt.raceName, tt.distanceMeters, "user-1")
 			if err != nil {
 				t.Fatalf("CreateRace() error = %v, want nil", err)
 			}
@@ -70,7 +70,7 @@ func TestRaceService_JoinRace_Success(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -99,7 +99,7 @@ func TestRaceService_JoinRace_AlreadyJoined(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -118,11 +118,13 @@ func TestRaceService_JoinRace_RaceFull(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
-	for i := 0; i < race.MaxParticipants; i++ {
+	// The creator already occupies one slot (auto-joined by CreateRace), so
+	// only MaxParticipants-1 more joins fit before the race is full.
+	for i := 0; i < race.MaxParticipants-1; i++ {
 		userID := fmt.Sprintf("user-%d", i+2)
 		if _, err := svc.JoinRace(ctx, created.ID, userID); err != nil {
 			t.Fatalf("JoinRace(%s) error = %v", userID, err)
@@ -140,7 +142,7 @@ func TestRaceService_JoinRace_RaceNotPending(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -157,7 +159,7 @@ func TestRaceService_LeaveRace_Success(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -195,7 +197,7 @@ func TestRaceService_LeaveRace_NotParticipant(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -211,7 +213,7 @@ func TestRaceService_LeaveRace_RaceNotPending(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -231,7 +233,7 @@ func TestRaceService_StartRace_Success(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -259,7 +261,7 @@ func TestRaceService_StartRace_NotCreator(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -285,7 +287,7 @@ func TestRaceService_StartRace_NotPending(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -304,7 +306,7 @@ func TestRaceService_GetRaceText_Success(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -326,7 +328,7 @@ func TestRaceService_GetRaceText_NotReady(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -352,7 +354,7 @@ func TestRaceService_GetRaceDetail_Success(t *testing.T) {
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
 
-	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 5, "user-1")
 	if err != nil {
 		t.Fatalf("CreateRace() error = %v", err)
 	}
@@ -367,11 +369,12 @@ func TestRaceService_GetRaceDetail_Success(t *testing.T) {
 	if detail.Name != "Morning Sprint" {
 		t.Errorf("Name = %q, want %q", detail.Name, "Morning Sprint")
 	}
-	if len(detail.Participants) != 1 {
-		t.Fatalf("Participants = %d, want 1", len(detail.Participants))
+	// user-1 (the creator, auto-joined by CreateRace) + user-2.
+	if len(detail.Participants) != 2 {
+		t.Fatalf("Participants = %d, want 2", len(detail.Participants))
 	}
-	if detail.Participants[0].UserID != "user-2" {
-		t.Errorf("Participants[0].UserID = %q, want %q", detail.Participants[0].UserID, "user-2")
+	if detail.Participants[1].UserID != "user-2" {
+		t.Errorf("Participants[1].UserID = %q, want %q", detail.Participants[1].UserID, "user-2")
 	}
 }
 

@@ -22,17 +22,30 @@ func NewRaceService(repo RaceRepository, jwtSecret []byte) *RaceService {
 
 // CreateRace validates and creates a new race. A non-empty fieldErrs return
 // means validation failed and err is always nil in that case; err is only
-// set for downstream repository failures.
-func (s *RaceService) CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (r Race, fieldErrs map[string]string, err error) {
+// set for downstream repository failures. The creator is auto-added as a
+// participant (and gets a session token back, same as JoinRace) — a race
+// with zero participants until its creator separately calls Join was a
+// pre-existing gap flagged back in the Start Race feature, now fixed here.
+func (s *RaceService) CreateRace(ctx context.Context, name string, distanceMeters int, createdBy string) (r Race, sessionToken string, fieldErrs map[string]string, err error) {
 	if errs := validateCreateRace(name, distanceMeters); len(errs) > 0 {
-		return Race{}, errs, nil
+		return Race{}, "", errs, nil
 	}
 
 	r, err = s.repo.CreateRace(ctx, strings.TrimSpace(name), distanceMeters, createdBy)
 	if err != nil {
-		return Race{}, nil, err
+		return Race{}, "", nil, err
 	}
-	return r, nil, nil
+
+	if err = s.repo.AddParticipant(ctx, r.ID, createdBy); err != nil {
+		return Race{}, "", nil, err
+	}
+
+	sessionToken, err = s.signSessionToken(r.ID, createdBy)
+	if err != nil {
+		return Race{}, "", nil, err
+	}
+
+	return r, sessionToken, nil, nil
 }
 
 // JoinRace adds userID as a participant of raceID and returns a signed
@@ -61,6 +74,12 @@ func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sess
 		return "", err
 	}
 
+	return s.signSessionToken(raceID, userID)
+}
+
+// signSessionToken signs the per-race WS handshake credential shared by
+// CreateRace (creator auto-join) and JoinRace.
+func (s *RaceService) signSessionToken(raceID, userID string) (string, error) {
 	claims := jwt.MapClaims{
 		"race_id": raceID,
 		"user_id": userID,
@@ -70,7 +89,6 @@ func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sess
 	if err != nil {
 		return "", fmt.Errorf("race: sign session token: %w", err)
 	}
-
 	return signed, nil
 }
 

@@ -51,6 +51,11 @@ definitions:
         type: string
       name:
         type: string
+      session_token:
+        description: |-
+          SessionToken is the creator's own WS handshake credential — the
+          creator is auto-added as a participant by CreateRace, same as JoinRace.
+        type: string
       status:
         type: string
     type: object

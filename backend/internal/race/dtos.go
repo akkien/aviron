@@ -15,6 +15,9 @@ type createRaceResponse struct {
 	Status         string `json:"status"`
 	CreatedBy      string `json:"created_by"`
 	CreatedAt      string `json:"created_at"`
+	// SessionToken is the creator's own WS handshake credential — the
+	// creator is auto-added as a participant by CreateRace, same as JoinRace.
+	SessionToken string `json:"session_token"`
 }
 
 type joinRaceResponse struct {
