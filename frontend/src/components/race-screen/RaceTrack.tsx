@@ -3,7 +3,6 @@ import { vehicleForUser, VEHICLES } from "@/lib/vehicles"
 import type { Participant, RaceStateMessage } from "@/types/race"
 
 interface RaceTrackProps {
-  raceName: string
   status: string
   participants: Participant[]
   raceState: RaceStateMessage | null
@@ -25,7 +24,6 @@ function statusLabel(status: string, playerCount: number): string {
 // exactly (race-screen.md) so the two panels never disagree about which
 // color belongs to which player.
 export function RaceTrack({
-  raceName,
   status,
   participants,
   raceState,
@@ -44,10 +42,7 @@ export function RaceTrack({
 
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden rounded-2xl bg-gradient-to-b from-sky-200 via-amber-100 to-lime-100 p-6">
-      <div className="mb-4 flex min-h-[34px] items-center justify-between gap-4">
-        <span className="truncate font-heading text-xl font-bold text-foreground">
-          🏆 {raceName}
-        </span>
+      <div className="mb-4 flex min-h-[34px] items-center justify-center gap-4">
         <span className="shrink-0 whitespace-nowrap rounded-full bg-card/80 px-3.5 py-1.5 font-mono text-sm font-bold text-primary">
           {statusLabel(status, participants.length)}
         </span>
@@ -83,16 +78,26 @@ export function RaceTrack({
                 style={{ width: `${percent}%`, backgroundColor: color, opacity: 0.35 }}
               />
               {/* Only the vehicle span is the thing being vertically
-                  centered (top-1/2 -translate-y-1/2) — it must align with
-                  the lane band's own center above. The name label used to
-                  sit above it in the same flex column, so the *stack's*
-                  midpoint (not the vehicle's) landed on the lane center,
-                  visibly pushing the vehicle below the band. The label is
-                  now positioned absolutely off the vehicle instead, so it
-                  no longer affects what's being centered. */}
+                  centered — it must align with the lane band's own center
+                  above. The name label used to sit above it in the same
+                  flex column, so the *stack's* midpoint (not the vehicle's)
+                  landed on the lane center, visibly pushing the vehicle
+                  below the band. The label is now positioned absolutely off
+                  the vehicle instead, so it no longer affects what's being
+                  centered.
+
+                  `left: {percent}%` alone positions this wrapper's own LEFT
+                  edge at that offset — at 100% that puts the entire vehicle
+                  body past the lane's right edge, invisible behind
+                  overflow-hidden the instant it "finishes." translateX
+                  blends from 0 (left edge anchored, same as before) to
+                  -100% of the wrapper's own width (right edge anchored) as
+                  percent grows, so the vehicle eases into staying fully
+                  inside the lane by the time it reaches the finish line,
+                  instead of snapping out of view. */}
               <div
-                className="absolute top-1/2 z-[5] -translate-y-1/2 transition-[left] duration-500 ease-out"
-                style={{ left: `${percent}%` }}
+                className="absolute top-1/2 z-[5] transition-all duration-500 ease-out"
+                style={{ left: `${percent}%`, transform: `translate(-${percent}%, -50%)` }}
               >
                 <span
                   className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-bold text-white shadow"

@@ -13,6 +13,16 @@ import type {
 import { Button } from "@/components/ui/button"
 import { TypingBox } from "@/components/race-screen/TypingBox"
 
+// Medal colors for the top 3 leaderboard ranks — separate from laneColor,
+// which is the per-player identity color and stays untouched here; this is
+// purely about the rank number itself.
+function rankTextColor(rank: number): string {
+  if (rank === 1) return "text-yellow-500"
+  if (rank === 2) return "text-gray-400"
+  if (rank === 3) return "text-amber-700"
+  return "text-muted-foreground"
+}
+
 interface RaceScreenSidebarProps {
   raceId: string
   raceDetail: RaceStatusResponse | null
@@ -233,7 +243,8 @@ export function RaceScreenSidebar({
                   className="flex justify-between gap-4 rounded-lg border-2 bg-card px-3 py-2"
                 >
                   <span className="font-medium">
-                    #{r.finish_rank ?? "—"} {p?.display_name ?? r.user_id}
+                    <span className={rankTextColor(r.finish_rank ?? 0)}>#{r.finish_rank ?? "—"}</span>{" "}
+                    {p?.display_name ?? r.user_id}
                   </span>
                   <span className="text-muted-foreground">
                     {r.finish_time_ms === null ? "DNF" : `${(r.finish_time_ms / 1000).toFixed(1)}s`}
@@ -283,7 +294,7 @@ export function RaceScreenSidebar({
           const color = laneColor(raceDetail.participants.findIndex((rp) => rp.user_id === p.user_id))
           return (
             <div key={p.user_id} className="flex items-center gap-2.5">
-              <span className="w-4 font-heading text-xs font-bold text-muted-foreground">
+              <span className={`w-4 font-heading text-xs font-bold ${rankTextColor(i + 1)}`}>
                 {i + 1}
               </span>
               <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: color }} />

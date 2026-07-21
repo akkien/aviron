@@ -92,7 +92,6 @@ export function RaceScreen({
       <div className="w-[70%]">
         {raceDetail && (
           <RaceTrack
-            raceName={raceDetail.name}
             status={raceDetail.status}
             participants={raceDetail.participants}
             raceState={raceState}
