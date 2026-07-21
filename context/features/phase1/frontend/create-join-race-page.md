@@ -13,6 +13,7 @@ After logging in, the user lands here to create a race, join one, start it, and 
 - "Join race" form: race id input, calls `POST /races/{id}/join`
 - "Start race" button (shown only to the race's creator): calls `POST /races/{id}/start`, stores the returned `prompt_text`
 - Below all three: a race status view — given a race id, calls `GET /races/{id}` and lists name, status, target word count, and participants (`display_name` + joined time)
+- **Addendum, `phase2/leave-race/leave-race.md`**: while a race is still `pending`, the status view shows a "Leave" button next to the participant list (visible to any participant, not just the creator — see that spec's accepted edge case about the creator leaving their own race). Calls `POST /races/{id}/leave`, then re-fetches `GET /races/{id}` to refresh the participant list. Once the race is `active`, this button is gone — leaving mid-race is `frontend-realtime/websocket-client.md`'s "Leaving Mid-Race" section instead, a different endpoint entirely (WS `leave_race`, not this REST call).
 
 ### Typing View (once the race is `active`)
 
@@ -30,7 +31,7 @@ After logging in, the user lands here to create a race, join one, start it, and 
 
 ## Data
 
-- Plain `fetch` calls to `/races`, `/races/{id}/join`, `/races/{id}/start`, `/races/{id}/text`, `/races/{id}`, attaching `Authorization: Bearer <token>` from the stored login JWT
+- Plain `fetch` calls to `/races`, `/races/{id}/join`, `/races/{id}/start`, `/races/{id}/text`, `/races/{id}`, `/races/{id}/leave`, attaching `Authorization: Bearer <token>` from the stored login JWT
 - Per-word progress (§13: one update per completed word) has nowhere to send to yet in Phase 1 — there's no WebSocket endpoint until Phase 2 (context/project-overview.md §4.2). Track words-correct-so-far in local component state only, and render the local car from that; don't build a REST substitute for the real-time send, it becomes real once the Phase 2 WebSocket client lands.
 
 ## Notes
@@ -38,3 +39,4 @@ After logging in, the user lands here to create a race, join one, start it, and 
 - Open multiple browser tabs logged in as different users to manually verify join/participant-list behavior, per the project's testing approach (context/project-overview.md §1)
 - Use shadcn/ui's `Card`/`Input`/`Button` for the create/join/start forms and Tailwind utility classes (flex/grid) to separate sections and lay out the car lanes — still no styling investment beyond that: no custom design system, animation, or theming past shadcn's defaults, this is a test harness, not a product
 - See context/project-overview.md §13 for the full typing-race mechanic (why per-word telemetry, why the server doesn't verify typed text, why field names are reused rather than renamed)
+- The Leave button addendum above was added after this page originally shipped (per Phase 1's own history entry) — a small increment on top of already-built code, following the same pattern as "Cap Race Participants at 10" did for `join-race.md`, not a full spec rewrite.

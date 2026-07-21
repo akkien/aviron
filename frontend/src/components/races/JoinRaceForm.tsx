@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/card"
 
 interface JoinRaceFormProps {
-  onJoined: (raceId: string) => void
+  onJoined: (raceId: string, sessionToken: string) => void
 }
 
 export function JoinRaceForm({ onJoined }: JoinRaceFormProps) {
@@ -29,10 +29,10 @@ export function JoinRaceForm({ onJoined }: JoinRaceFormProps) {
     setError(null)
     setSubmitting(true)
     try {
-      await apiFetch<JoinRaceResponse>(`/races/${raceId}/join`, {
+      const res = await apiFetch<JoinRaceResponse>(`/races/${raceId}/join`, {
         method: "POST",
       })
-      onJoined(raceId)
+      onJoined(raceId, res.session_token)
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to join race")
     } finally {

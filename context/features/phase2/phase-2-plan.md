@@ -29,7 +29,7 @@ Phase 2 (context/project-overview.md §12) turns the REST-only typing race from 
 - Reconnection depends on the WebSocket Endpoint already working — there's nothing to reconnect to otherwise.
 - Race Completion depends on the room actor already ingesting real telemetry over WebSocket, since "is this race done" is a question about live progress, not REST-only state.
 - Leave Race depends on Race Completion (it changes that feature's rank-assignment rule) and Reconnection (it reuses the `evicted`/`IsEvicted` mechanism for quitters).
-- Both Frontend Realtime features depend on the entire backend half of Phase 2 being done — Leave Race included, if `reconnect-ui.md` wants a "leave race" affordance.
+- Both Frontend Realtime features depend on the entire backend half of Phase 2 being done — Leave Race included: `websocket-client.md` now specs the mid-race "Quit Race" affordance directly (it's the same WS connection), and `phase1/frontend/create-join-race-page.md` picked up a small addendum for the pre-start "Leave" button.
 - Recommended build order: Room Actor (2 features) → WebSocket (2 features) → Reconnection (1 feature) → Race Completion (1 feature) → Leave Race (1 feature) → Frontend Realtime (2 features).
 
 ## Explicitly out of scope for Phase 2

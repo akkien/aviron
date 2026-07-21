@@ -14,6 +14,11 @@ export function RacesPage() {
   const [raceId, setRaceId] = useState<string | null>(null)
   const [raceDetail, setRaceDetail] = useState<RaceStatusResponse | null>(null)
   const [promptText, setPromptText] = useState<string | null>(null)
+  // sessionToken is the WS handshake's credential (websocket-client.md) —
+  // only set once the local player actually joins; the race's creator has
+  // none until/unless they separately call Join too (a pre-existing Phase 1
+  // gap: creating a race doesn't auto-add the creator as a participant).
+  const [sessionToken, setSessionToken] = useState<string | null>(null)
 
   useEffect(() => {
     if (!isAuthenticated()) navigate("/login")
@@ -31,11 +36,13 @@ export function RacesPage() {
 
   function handleCreated(id: string) {
     setPromptText(null)
+    setSessionToken(null)
     setRaceId(id)
   }
 
-  function handleJoined(id: string) {
+  function handleJoined(id: string, token: string) {
     setPromptText(null)
+    setSessionToken(token)
     setRaceId(id)
   }
 
@@ -60,9 +67,9 @@ export function RacesPage() {
       {raceId && raceDetail?.status === "active" && (
         <TypingView
           raceId={raceId}
+          sessionToken={sessionToken}
           distanceMeters={raceDetail.distance_meters}
           participants={raceDetail.participants}
-          currentUserId={getUserID()}
           promptText={promptText}
           onPromptTextFetched={setPromptText}
         />

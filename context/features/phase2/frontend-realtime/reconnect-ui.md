@@ -19,7 +19,7 @@ The client-side half of `reconnection/grace-period.md`: when the WebSocket drops
 
 ### Grace Period Expiry
 
-- If every retry attempt fails (grace period on the server side has lapsed, or the server explicitly refuses the reattach), show that the player has left the race — matching what the other participants would already see per `reconnection/grace-period.md`'s `ParticipantLeft` broadcast
+- If every retry attempt fails (grace period on the server side has lapsed, or the server explicitly refuses the reattach), show that the player has left the race — matching what the other participants would already see once the room actor evicts them (`reconnection/grace-period.md`'s `ParticipantEvicted` event, renamed from `ParticipantLeft` by `leave-race/leave-race.md` — that name now belongs to a different event, an intentional mid-race quit, not grace-period expiry)
 
 ## Validation
 
