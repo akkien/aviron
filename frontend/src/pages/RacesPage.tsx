@@ -4,9 +4,12 @@ import { useNavigate } from "react-router-dom"
 import { apiFetch } from "@/lib/api"
 import { getUserID, isAuthenticated } from "@/lib/auth"
 import type { RaceStatusResponse } from "@/types/race"
+import { AppHeader } from "@/components/layout/AppHeader"
 import { CreateRaceForm } from "@/components/races/CreateRaceForm"
 import { JoinRaceForm } from "@/components/races/JoinRaceForm"
+import { OpenRacesList } from "@/components/races/OpenRacesList"
 import { RaceStatusView } from "@/components/races/RaceStatusView"
+import { StatCards } from "@/components/races/StatCards"
 import { TypingView } from "@/components/races/TypingView"
 
 export function RacesPage() {
@@ -47,11 +50,15 @@ export function RacesPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
-      <h1 className="text-2xl font-semibold">Races</h1>
-      <div className="grid gap-6 sm:grid-cols-2">
-        <CreateRaceForm onCreated={handleCreated} />
-        <JoinRaceForm onJoined={handleJoined} />
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 p-6">
+      <AppHeader />
+      <StatCards />
+      <div className="grid gap-6 lg:grid-cols-2">
+        <div className="flex flex-col gap-6">
+          <CreateRaceForm onCreated={handleCreated} />
+          <JoinRaceForm onJoined={handleJoined} />
+        </div>
+        <OpenRacesList />
       </div>
 
       {raceId && (

@@ -34,3 +34,25 @@ export function getUserID(): string | null {
     return null
   }
 }
+
+// getEmail decodes the `email` claim from the stored JWT's payload, the same
+// way getUserID decodes `sub` — no signature verification, since this is
+// only for display purposes.
+export function getEmail(): string | null {
+  const token = getToken()
+  if (!token) return null
+
+  const payload = token.split(".")[1]
+  if (!payload) return null
+
+  try {
+    const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")))
+    return typeof decoded.email === "string" ? decoded.email : null
+  } catch {
+    return null
+  }
+}
+
+export function logout(): void {
+  clearToken()
+}
