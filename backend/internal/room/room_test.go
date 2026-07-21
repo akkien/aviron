@@ -1,15 +1,53 @@
 package room
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+// noopFinisher satisfies RaceFinisher without touching Postgres, for tests
+// that don't care about race-completion/finish-race.md's persistence step.
+type noopFinisher struct{}
+
+func (noopFinisher) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []ParticipantResult) error {
+	return nil
+}
+
+// spyFinisher records every FinishRace call, for tests that assert exactly
+// what the room actor handed off to be persisted.
+type spyFinisher struct {
+	calls []finishCall
+}
+
+type finishCall struct {
+	raceID         string
+	distanceMeters int
+	results        []ParticipantResult
+}
+
+func (s *spyFinisher) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []ParticipantResult) error {
+	s.calls = append(s.calls, finishCall{raceID: raceID, distanceMeters: distanceMeters, results: results})
+	return nil
+}
 
 // newTestActor builds a RoomActor with no running goroutine — applyEvent is
 // exercised directly, exactly the "pure-ish, no goroutine needed" testing
-// approach room-actor-core.md calls for.
+// approach room-actor-core.md calls for. distanceMeters defaults high enough
+// that ordinary TelemetryReceived test values (single-digit to low hundreds
+// WordsCorrect) never accidentally trigger a finish — tests that actually
+// want to exercise finishing set r.distanceMeters explicitly. ctx/cancel are
+// real (not nil) so finishRace's r.cancel() call is safe even without Run()
+// ever having started.
 func newTestActor() *RoomActor {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &RoomActor{
-		id:           "race-1",
-		participants: make(map[string]*ParticipantState),
-		evicted:      make(map[string]struct{}),
+		id:             "race-1",
+		participants:   make(map[string]*ParticipantState),
+		evicted:        make(map[string]struct{}),
+		distanceMeters: 1_000_000,
+		finisher:       noopFinisher{},
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 

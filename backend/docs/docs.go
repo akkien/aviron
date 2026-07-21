@@ -300,7 +300,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "error: already_joined | race_not_pending",
+                        "description": "error: already_joined | race_not_pending | race_full",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {

@@ -30,17 +30,40 @@ func NewRegistry() *Registry {
 // already-generated promptText/distanceMeters, registers it, and starts its
 // Run loop. ctx should outlive the caller (e.g. the process's root context),
 // not a per-request context, since the room actor must keep running after
-// the request that triggered the spawn has returned.
-func (reg *Registry) Spawn(ctx context.Context, raceID, promptText string, distanceMeters int) *RoomActor {
+// the request that triggered the spawn has returned. finisher persists
+// results once the race completes (race-completion/finish-race.md) —
+// typically the concrete *race.RaceService, passed in by the caller
+// (RaceHandler.Start already holds it) rather than threaded through this
+// Registry's own construction, to avoid reordering how internal/app.go
+// wires the composition root.
+func (reg *Registry) Spawn(ctx context.Context, raceID, promptText string, distanceMeters int, finisher RaceFinisher) *RoomActor {
 	broadcast := make(chan []byte, broadcastBufferSize)
-	actor := NewRoomActor(ctx, raceID, promptText, distanceMeters, broadcast)
+	actor := NewRoomActor(ctx, raceID, promptText, distanceMeters, broadcast, finisher)
 
 	reg.mu.Lock()
 	reg.rooms[raceID] = actor
 	reg.mu.Unlock()
 
 	go actor.Run()
+	go reg.cleanupWhenDone(raceID, actor)
 	return actor
+}
+
+// cleanupWhenDone removes raceID's entry once actor's context is done,
+// regardless of why — an explicit Remove call, or (race-completion/finish-race.md)
+// the actor cancelling itself once a race finishes or a room is abandoned.
+// Without this, a self-cancelled actor would leave a stale *RoomActor
+// pointing at a dead goroutine in the map forever, since Remove was
+// previously the only path that ever deleted an entry. Mirrors
+// internal/ws's hubRegistry, which already uses the same
+// watch-context-then-self-cleanup shape for its own map.
+func (reg *Registry) cleanupWhenDone(raceID string, actor *RoomActor) {
+	<-actor.Context().Done()
+	reg.mu.Lock()
+	if reg.rooms[raceID] == actor {
+		delete(reg.rooms, raceID)
+	}
+	reg.mu.Unlock()
 }
 
 // Get returns the RoomActor currently running raceID, if any.

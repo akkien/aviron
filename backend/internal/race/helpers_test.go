@@ -7,7 +7,16 @@ import (
 	"time"
 
 	"github.com/akkien/aviron/internal/race"
+	"github.com/akkien/aviron/internal/room"
 )
+
+// finishRaceCall records one FinishRace invocation, so tests can assert what
+// the service actually delegated to the repository.
+type finishRaceCall struct {
+	raceID         string
+	distanceMeters int
+	results        []room.ParticipantResult
+}
 
 // participantRecord tracks a join, including which race it belongs to and
 // when it happened, so fakeRepository can both detect duplicate joins and
@@ -24,6 +33,7 @@ type fakeRepository struct {
 	mu           sync.Mutex
 	races        []race.Race
 	participants []participantRecord
+	finishCalls  []finishRaceCall
 }
 
 func newFakeRepository() *fakeRepository {
@@ -147,4 +157,12 @@ func (f *fakeRepository) GetRaceWithParticipants(ctx context.Context, raceID str
 		}
 	}
 	return detail, nil
+}
+
+func (f *fakeRepository) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []room.ParticipantResult) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.finishCalls = append(f.finishCalls, finishRaceCall{raceID: raceID, distanceMeters: distanceMeters, results: results})
+	return nil
 }

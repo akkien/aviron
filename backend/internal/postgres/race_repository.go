@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/akkien/aviron/internal/race"
+	"github.com/akkien/aviron/internal/room"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -157,4 +158,60 @@ func (r *RaceRepository) GetRaceWithParticipants(ctx context.Context, raceID str
 	}
 
 	return detail, nil
+}
+
+// FinishRace commits races/race_participants/leaderboard_alltime together —
+// the first multi-statement transaction in this repository; every other
+// method here is a single statement. All three writes succeed or none do,
+// since a race left "finished" with incomplete participant/leaderboard rows
+// would be a real data-integrity bug (race-completion/finish-race.md).
+func (r *RaceRepository) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []room.ParticipantResult) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: finish race: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once Commit succeeds
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE races SET status = 'finished', ended_at = now() WHERE id = $1
+	`, raceID); err != nil {
+		return fmt.Errorf("postgres: finish race: update race: %w", err)
+	}
+
+	for _, res := range results {
+		if _, err := tx.Exec(ctx, `
+			UPDATE race_participants
+			SET finish_rank = $1, finish_time_ms = $2, avg_pace_watt = $3, disconnected_count = $4
+			WHERE race_id = $5 AND user_id = $6
+		`, res.FinishRank, res.FinishTimeMs, res.AvgPaceWatt, res.DisconnectedCount, raceID, res.UserID); err != nil {
+			return fmt.Errorf("postgres: finish race: update participant %s: %w", res.UserID, err)
+		}
+
+		// best_2000m_ms is a holdover name from the original fitness-telemetry
+		// schema (project-overview.md §13) — this project has no fixed-distance
+		// race type, so it's treated simply as "best finish time recorded so
+		// far": kept as-is if this race's result is NULL (didn't finish) or
+		// worse than the existing value, taken fresh if there's no prior value.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO leaderboard_alltime (user_id, best_2000m_ms, total_races, total_distance_m, updated_at)
+			VALUES ($1, $2, 1, $3, now())
+			ON CONFLICT (user_id) DO UPDATE SET
+				best_2000m_ms = CASE
+					WHEN EXCLUDED.best_2000m_ms IS NULL THEN leaderboard_alltime.best_2000m_ms
+					WHEN leaderboard_alltime.best_2000m_ms IS NULL THEN EXCLUDED.best_2000m_ms
+					WHEN EXCLUDED.best_2000m_ms < leaderboard_alltime.best_2000m_ms THEN EXCLUDED.best_2000m_ms
+					ELSE leaderboard_alltime.best_2000m_ms
+				END,
+				total_races = leaderboard_alltime.total_races + 1,
+				total_distance_m = leaderboard_alltime.total_distance_m + EXCLUDED.total_distance_m,
+				updated_at = now()
+		`, res.UserID, res.FinishTimeMs, distanceMeters); err != nil {
+			return fmt.Errorf("postgres: finish race: upsert leaderboard for %s: %w", res.UserID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: finish race: commit: %w", err)
+	}
+	return nil
 }

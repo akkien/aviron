@@ -1,7 +1,6 @@
 package ws
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/akkien/aviron/internal/room"
@@ -112,31 +111,5 @@ func TestClientMessage_ToRoomEvent_UnknownType(t *testing.T) {
 	_, err := m.toRoomEvent("user-1", "Alice")
 	if err == nil {
 		t.Fatal("toRoomEvent() error = nil, want an error for an unknown type")
-	}
-}
-
-func TestEncodeRaceFinishedMessage(t *testing.T) {
-	results := []RaceResultJSON{
-		{UserID: "user-1", FinishRank: 1, FinishTimeMs: 45000, AvgPaceWatt: 62.5},
-		{UserID: "user-2", FinishRank: 2, FinishTimeMs: 51000, AvgPaceWatt: 55.1},
-	}
-
-	body, err := encodeRaceFinishedMessage(results)
-	if err != nil {
-		t.Fatalf("encodeRaceFinishedMessage() error = %v", err)
-	}
-
-	var msg RaceFinishedMessage
-	if err := json.Unmarshal(body, &msg); err != nil {
-		t.Fatalf("unmarshal encoded message: %v", err)
-	}
-	if msg.Type != "race_finished" {
-		t.Errorf("Type = %q, want %q", msg.Type, "race_finished")
-	}
-	if len(msg.Results) != 2 {
-		t.Fatalf("Results = %d, want 2", len(msg.Results))
-	}
-	if msg.Results[0].UserID != "user-1" || msg.Results[0].FinishRank != 1 {
-		t.Errorf("Results[0] = %+v, want user-1 rank 1", msg.Results[0])
 	}
 }

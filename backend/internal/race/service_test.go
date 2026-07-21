@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/akkien/aviron/internal/race"
+	"github.com/akkien/aviron/internal/room"
 )
 
 func TestRaceService_CreateRace_Success(t *testing.T) {
@@ -307,5 +308,34 @@ func TestRaceService_GetRaceDetail_NotFound(t *testing.T) {
 	_, err := svc.GetRaceDetail(context.Background(), "nonexistent-race")
 	if !errors.Is(err, race.ErrRaceNotFound) {
 		t.Errorf("err = %v, want ErrRaceNotFound", err)
+	}
+}
+
+func TestRaceService_FinishRace_DelegatesToRepository(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+
+	rank := 1
+	finishTimeMs := int64(45000)
+	results := []room.ParticipantResult{
+		{UserID: "user-1", FinishRank: &rank, FinishTimeMs: &finishTimeMs, DisconnectedCount: 0},
+	}
+
+	if err := svc.FinishRace(context.Background(), "race-1", 1000, results); err != nil {
+		t.Fatalf("FinishRace() error = %v", err)
+	}
+
+	if len(repo.finishCalls) != 1 {
+		t.Fatalf("finishCalls = %d, want 1", len(repo.finishCalls))
+	}
+	call := repo.finishCalls[0]
+	if call.raceID != "race-1" {
+		t.Errorf("raceID = %q, want %q", call.raceID, "race-1")
+	}
+	if call.distanceMeters != 1000 {
+		t.Errorf("distanceMeters = %d, want 1000", call.distanceMeters)
+	}
+	if len(call.results) != 1 || call.results[0].UserID != "user-1" {
+		t.Errorf("results = %+v, want the one user-1 result passed in", call.results)
 	}
 }

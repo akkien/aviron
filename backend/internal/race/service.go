@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/akkien/aviron/internal/room"
 )
 
 type RaceService struct {
@@ -96,6 +98,17 @@ func (s *RaceService) GetRaceText(ctx context.Context, raceID string) (string, e
 
 func (s *RaceService) GetRaceDetail(ctx context.Context, raceID string) (RaceDetail, error) {
 	return s.repo.GetRaceWithParticipants(ctx, raceID)
+}
+
+// FinishRace persists a race's final results. Exists specifically to
+// satisfy room.RaceFinisher (structurally — no import of internal/race from
+// internal/room is needed, avoiding the cycle that a direct room -> race
+// call would create) so the room actor can call it once a race completes
+// (race-completion/finish-race.md). A thin delegate, not orchestration: the
+// actual multi-statement transaction lives in the repository, per this
+// project's Service-depends-on-Repository-interface convention.
+func (s *RaceService) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []room.ParticipantResult) error {
+	return s.repo.FinishRace(ctx, raceID, distanceMeters, results)
 }
 
 func validateCreateRace(name string, distanceMeters int) map[string]string {

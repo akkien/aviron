@@ -17,7 +17,7 @@ func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8))
+	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8), fakeFinisher{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -66,7 +66,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8))
+	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8), fakeFinisher{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -104,7 +104,7 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8))
+	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8), fakeFinisher{})
 	go actor.Run()
 
 	conn := newFakeConn()

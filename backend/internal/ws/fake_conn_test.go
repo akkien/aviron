@@ -5,7 +5,18 @@ import (
 	"errors"
 
 	"github.com/coder/websocket"
+
+	"github.com/akkien/aviron/internal/room"
 )
+
+// fakeFinisher satisfies room.RaceFinisher without touching Postgres — this
+// package's tests exercise connection plumbing, not
+// race-completion/finish-race.md's persistence step.
+type fakeFinisher struct{}
+
+func (fakeFinisher) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []room.ParticipantResult) error {
+	return nil
+}
 
 // fakeConn is a wsConn test double: Read returns pre-queued results (or
 // blocks on ctx like a real connection would once queued reads run out),

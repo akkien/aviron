@@ -177,7 +177,7 @@ func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
 		startedAt = started.StartedAt.Format(time.RFC3339)
 	}
 
-	h.registry.Spawn(h.ctx, raceID, promptText, started.DistanceMeters)
+	h.registry.Spawn(h.ctx, raceID, promptText, started.DistanceMeters, h.svc)
 
 	httpx.WriteJSON(w, http.StatusOK, startRaceResponse{
 		ID:         started.ID,

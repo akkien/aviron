@@ -61,27 +61,8 @@ func (m ClientMessage) toRoomEvent(userID, displayName string) (room.RoomEvent, 
 	}
 }
 
-// RaceFinishedMessage is the outbound envelope sent once when a race
-// completes. Results mirrors race-completion/finish-race.md's persisted
-// race_participants row per player.
-type RaceFinishedMessage struct {
-	Type    string           `json:"type"`
-	Results []RaceResultJSON `json:"results"`
-}
-
-type RaceResultJSON struct {
-	UserID       string  `json:"user_id"`
-	FinishRank   int     `json:"finish_rank"`
-	FinishTimeMs int64   `json:"finish_time_ms"`
-	AvgPaceWatt  float64 `json:"avg_pace_watt"`
-}
-
-// encodeRaceFinishedMessage encodes the final results of a race. There is no
-// equivalent encodeRaceStateMessage here: internal/room.RoomActor already
-// marshals its race_state ticks internally (via the now-exported
-// room.RaceStateMessage/room.ParticipantStateJSON) and hands out pre-encoded
-// bytes over Broadcast() — duplicating that here would just be a second,
-// unused code path for the same JSON shape.
-func encodeRaceFinishedMessage(results []RaceResultJSON) ([]byte, error) {
-	return json.Marshal(RaceFinishedMessage{Type: "race_finished", Results: results})
-}
+// RaceFinishedMessage/RaceResultJSON now live in internal/room
+// (room.RaceFinishedMessage/room.RaceResultJSON) — race-completion/finish-race.md's
+// RoomActor.finishRace marshals and broadcasts that message itself, the same
+// way broadcastSnapshot already does for race_state, instead of routing
+// through this package.

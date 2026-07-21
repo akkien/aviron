@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"sort"
 	"time"
 )
@@ -25,6 +26,10 @@ type ParticipantState struct {
 	// in time. Stopped and cleared on reconnect so a stale expiry can never
 	// remove someone who's since reattached.
 	graceTimer *time.Timer
+	// FinishedAt/FinishRank are set together, once, the moment WordsCorrect
+	// reaches the room's distanceMeters (race-completion/finish-race.md).
+	FinishedAt *time.Time
+	FinishRank *int
 }
 
 type RoomActor struct {
@@ -41,15 +46,27 @@ type RoomActor struct {
 	broadcast      chan []byte
 	ctx            context.Context
 	cancel         context.CancelFunc
+	// finisher persists final results once the race completes
+	// (race-completion/finish-race.md) — see finish.go.
+	finisher RaceFinisher
+	// startedAt is this actor's own construction time, used as the baseline
+	// for FinishTimeMs. Not literally races.started_at (that UPDATE and this
+	// Spawn happen milliseconds apart, in the same handler) — close enough
+	// for a side project, not worth threading the DB timestamp through.
+	startedAt time.Time
+	// finished guards against calling finisher.FinishRace more than once —
+	// belt-and-suspenders on top of checkRaceFinished's own event-transition
+	// guards (see there for why a double-call shouldn't be reachable anyway).
+	finished bool
 }
 
 // NewRoomActor constructs a room actor for race id, seeded with the already
 // generated promptText/distanceMeters from the race row. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int, broadcast chan []byte) *RoomActor {
+func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
-	return &RoomActor{
+	r := &RoomActor{
 		id:             id,
 		participants:   make(map[string]*ParticipantState),
 		evicted:        make(map[string]struct{}),
@@ -59,7 +76,13 @@ func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int
 		broadcast:      broadcast,
 		ctx:            actorCtx,
 		cancel:         cancel,
+		finisher:       finisher,
+		startedAt:      time.Now(),
 	}
+	time.AfterFunc(noShowTimeoutDuration, func() {
+		r.Send(noShowTimeout{})
+	})
+	return r
 }
 
 // Broadcast returns the channel this actor sends race_state snapshots on.
@@ -183,6 +206,23 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		}
 		p.WordsCorrect = e.WordsCorrect
 		p.LastSeq = e.Seq
+		if p.FinishRank == nil && p.WordsCorrect >= r.distanceMeters {
+			// race-completion/finish-race.md: a participant individually
+			// "finishes" the moment they reach the target, in finishing
+			// order — first to reach it is rank 1. Counting existing
+			// FinishRanks (rather than a separate counter field) keeps this
+			// self-contained in the one place rank is ever assigned.
+			now := time.Now()
+			p.FinishedAt = &now
+			rank := 1
+			for _, other := range r.participants {
+				if other.FinishRank != nil {
+					rank++
+				}
+			}
+			p.FinishRank = &rank
+			r.checkRaceFinished()
+		}
 	case ParticipantDisconnected:
 		p, ok := r.participants[e.UserID]
 		if !ok {
@@ -211,6 +251,7 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		if p, ok := r.participants[e.UserID]; ok && p.DisconnectedAt != nil {
 			delete(r.participants, e.UserID)
 			r.evicted[e.UserID] = struct{}{}
+			r.checkRaceFinished()
 		}
 	case evictionQuery:
 		_, evicted := r.evicted[e.UserID]
@@ -218,7 +259,87 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		case e.Reply <- evicted:
 		default:
 		}
+	case noShowTimeout:
+		// A no-op if anyone has joined by now — checkRaceFinished only acts
+		// when participants is empty or everyone remaining has finished.
+		r.checkRaceFinished()
 	}
+}
+
+// checkRaceFinished is race-completion/finish-race.md's finish condition:
+// the race is over once there are zero live participants remaining, either
+// because everyone who connected eventually left (grace period expired for
+// each) or nobody finished (participants is empty). Called from every event
+// that could produce that transition — TelemetryReceived (someone just
+// finished), ParticipantLeft (someone just got evicted), and noShowTimeout
+// (nobody ever joined) — never from ParticipantJoined/ParticipantDisconnected
+// /evictionQuery, none of which can complete a race by themselves.
+func (r *RoomActor) checkRaceFinished() {
+	if r.finished {
+		return
+	}
+	for _, p := range r.participants {
+		if p.FinishRank == nil {
+			return // still someone connected-and-racing or in their grace period
+		}
+	}
+
+	results := make([]ParticipantResult, 0, len(r.participants))
+	for _, p := range r.participants {
+		var finishTimeMs int64
+		if p.FinishedAt != nil {
+			finishTimeMs = p.FinishedAt.Sub(r.startedAt).Milliseconds()
+		}
+		results = append(results, ParticipantResult{
+			UserID:       p.UserID,
+			FinishRank:   p.FinishRank,
+			FinishTimeMs: &finishTimeMs,
+			// AvgPaceWatt: no per-tick pace tracking exists anywhere in this
+			// codebase yet (internal/ws's ClientMessage.PaceWatt is decoded
+			// but never forwarded into TelemetryReceived) — left at the zero
+			// value rather than building that infrastructure as a side
+			// effect of this feature.
+			DisconnectedCount: p.DisconnectedCount,
+		})
+	}
+	r.finishRace(results)
+}
+
+// finishRace persists results, notifies clients, and tears the room down.
+// Called only from checkRaceFinished, always from inside applyEvent — the
+// single-writer goroutine — so this blocks Run()'s select loop for the
+// duration of the Postgres write, which is fine: a finishing race has
+// nothing left to process concurrently anyway.
+func (r *RoomActor) finishRace(results []ParticipantResult) {
+	if err := r.finisher.FinishRace(r.ctx, r.id, r.distanceMeters, results); err != nil {
+		// No retry: this is a side project's accepted gap, not a production
+		// resilience story. Logged and left running rather than torn down,
+		// so at least the room doesn't silently vanish if Postgres hiccups.
+		log.Printf("room %s: finish race: %v", r.id, err)
+		return
+	}
+	r.finished = true
+
+	resultsJSON := make([]RaceResultJSON, len(results))
+	for i, res := range results {
+		resultsJSON[i] = RaceResultJSON{
+			UserID:       res.UserID,
+			FinishRank:   res.FinishRank,
+			FinishTimeMs: res.FinishTimeMs,
+			AvgPaceWatt:  res.AvgPaceWatt,
+		}
+	}
+	body, err := json.Marshal(RaceFinishedMessage{Type: "race_finished", Results: resultsJSON})
+	if err == nil {
+		select {
+		case r.broadcast <- body:
+		default:
+			// Same non-blocking rule as broadcastSnapshot — a full or
+			// nonexistent listener must never stall the actor.
+		}
+	}
+
+	r.cancel()
 }
 
 // ParticipantStateJSON and RaceStateMessage are exported (rather than kept
