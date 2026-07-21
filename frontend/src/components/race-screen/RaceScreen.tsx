@@ -20,9 +20,9 @@ interface RaceScreenProps {
 
 // RaceScreen is the full-height 30/70 shell (race-screen.md) that takes
 // over from the Dashboard state entirely once a race exists — RacesPage
-// renders this OR the Dashboard, never both stacked. Owns useRaceSocket
-// (moved up from the old TypingView) so both the sidebar leaderboard and
-// the track panel share one raceState.
+// (Dashboard) and RaceDetailPage (this) are separate routes/pages, never
+// both stacked. Owns useRaceSocket (moved up from the old TypingView) so
+// both the sidebar leaderboard and the track panel share one raceState.
 export function RaceScreen({
   raceId,
   sessionToken,
@@ -43,6 +43,16 @@ export function RaceScreen({
   // (Registry.Spawn only runs from POST /races/{id}/start).
   const { raceState, finished, connectionError, leaving, reconnecting, evicted, sendTelemetry, leaveRace } =
     useRaceSocket(raceId, isActive ? sessionToken : null)
+
+  // Quitting mid-race (the sidebar's "Quit Race" button, via leaveRace)
+  // only ever flipped this local `leaving` flag — nothing told the caller
+  // the player was done, so there was no route back except editing the URL
+  // by hand. The pre-race "Leave" button (RaceScreenSidebar's own REST
+  // call) already calls onLeftRace directly; this makes the mid-race path
+  // do the same.
+  useEffect(() => {
+    if (leaving) onLeftRace()
+  }, [leaving, onLeftRace])
 
   useEffect(() => {
     if (!isActive || promptText !== null) return

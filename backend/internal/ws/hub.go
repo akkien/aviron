@@ -64,7 +64,33 @@ func (h *hub) run(broadcast <-chan []byte, done <-chan struct{}, onClose func())
 		case c := <-h.unregister:
 			delete(conns, c)
 		case <-done:
-			return
+			// broadcast is buffered (room.broadcastBufferSize) and the room
+			// actor's finishRace sends its final race_state/race_finished
+			// messages and then calls cancel() right after — both without
+			// blocking. That makes `broadcast` (non-empty) and `done`
+			// (just closed) ready at essentially the same moment, and
+			// select picks a ready case pseudo-randomly, not in send
+			// order: without draining here, this case could win first and
+			// return, leaving those final messages stuck in the buffer,
+			// never delivered to any connection — the client would see
+			// its connection simply die mid-race with no race_finished,
+			// indistinguishable from a real drop, and go through the full
+			// reconnect-then-evict path against a room that's already
+			// gone. Draining any already-enqueued messages before
+			// returning guarantees delivery instead.
+			for {
+				select {
+				case msg := <-broadcast:
+					for c := range conns {
+						select {
+						case c <- msg:
+						default:
+						}
+					}
+				default:
+					return
+				}
+			}
 		}
 	}
 }
