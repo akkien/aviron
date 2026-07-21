@@ -22,9 +22,16 @@ export function RaceStatusView({
 }: RaceStatusViewProps) {
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const isCreator = raceDetail !== null && raceDetail.created_by === currentUserId
   const canStart = isCreator && raceDetail?.status === "pending"
+
+  async function handleCopyRaceId() {
+    await navigator.clipboard.writeText(raceId)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
 
   async function handleStart() {
     setError(null)
@@ -62,6 +69,13 @@ export function RaceStatusView({
               <dd>{raceDetail.status}</dd>
               <dt className="text-muted-foreground">Target word count</dt>
               <dd>{raceDetail.distance_meters}</dd>
+              <dt className="text-muted-foreground">Race ID</dt>
+              <dd className="flex items-center gap-2">
+                <span className="truncate font-mono text-xs">{raceId}</span>
+                <Button variant="outline" size="sm" onClick={handleCopyRaceId}>
+                  {copied ? "Copied!" : "Copy"}
+                </Button>
+              </dd>
             </dl>
             <div>
               <p className="mb-1 text-sm font-medium">Participants</p>
