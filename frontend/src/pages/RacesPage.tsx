@@ -8,9 +8,8 @@ import { AppHeader } from "@/components/layout/AppHeader"
 import { CreateRaceForm } from "@/components/races/CreateRaceForm"
 import { JoinRaceForm } from "@/components/races/JoinRaceForm"
 import { OpenRacesList } from "@/components/races/OpenRacesList"
-import { RaceStatusView } from "@/components/races/RaceStatusView"
 import { StatCards } from "@/components/races/StatCards"
-import { TypingView } from "@/components/races/TypingView"
+import { RaceScreen } from "@/components/race-screen/RaceScreen"
 
 export function RacesPage() {
   const navigate = useNavigate()
@@ -18,9 +17,8 @@ export function RacesPage() {
   const [raceDetail, setRaceDetail] = useState<RaceStatusResponse | null>(null)
   const [promptText, setPromptText] = useState<string | null>(null)
   // sessionToken is the WS handshake's credential (websocket-client.md) —
-  // only set once the local player actually joins; the race's creator has
-  // none until/unless they separately call Join too (a pre-existing Phase 1
-  // gap: creating a race doesn't auto-add the creator as a participant).
+  // set on both create and join now that CreateRace auto-adds the creator
+  // as a participant and returns their own session_token too.
   const [sessionToken, setSessionToken] = useState<string | null>(null)
 
   useEffect(() => {
@@ -37,9 +35,9 @@ export function RacesPage() {
     if (raceId) refreshStatus(raceId)
   }, [raceId, refreshStatus])
 
-  function handleCreated(id: string) {
+  function handleCreated(id: string, token: string) {
     setPromptText(null)
-    setSessionToken(null)
+    setSessionToken(token)
     setRaceId(id)
   }
 
@@ -47,6 +45,31 @@ export function RacesPage() {
     setPromptText(null)
     setSessionToken(token)
     setRaceId(id)
+  }
+
+  function handleLeftRace() {
+    setRaceId(null)
+    setRaceDetail(null)
+    setPromptText(null)
+    setSessionToken(null)
+  }
+
+  if (raceId) {
+    return (
+      <div className="mx-auto max-w-6xl p-6">
+        <RaceScreen
+          raceId={raceId}
+          sessionToken={sessionToken}
+          raceDetail={raceDetail}
+          currentUserId={getUserID()}
+          promptText={promptText}
+          onPromptTextFetched={setPromptText}
+          onStarted={setPromptText}
+          onRefresh={() => refreshStatus(raceId)}
+          onLeftRace={handleLeftRace}
+        />
+      </div>
+    )
   }
 
   return (
@@ -60,27 +83,6 @@ export function RacesPage() {
         </div>
         <OpenRacesList />
       </div>
-
-      {raceId && (
-        <RaceStatusView
-          raceId={raceId}
-          raceDetail={raceDetail}
-          currentUserId={getUserID()}
-          onRefresh={() => refreshStatus(raceId)}
-          onStarted={setPromptText}
-        />
-      )}
-
-      {raceId && raceDetail?.status === "active" && (
-        <TypingView
-          raceId={raceId}
-          sessionToken={sessionToken}
-          distanceMeters={raceDetail.distance_meters}
-          participants={raceDetail.participants}
-          promptText={promptText}
-          onPromptTextFetched={setPromptText}
-        />
-      )}
     </div>
   )
 }

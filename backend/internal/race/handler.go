@@ -59,7 +59,7 @@ func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, fieldErrs, err := h.svc.CreateRace(r.Context(), req.Name, req.DistanceMeters, userID)
+	created, sessionToken, fieldErrs, err := h.svc.CreateRace(r.Context(), req.Name, req.DistanceMeters, userID)
 	if len(fieldErrs) > 0 {
 		httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{"errors": fieldErrs})
 		return
@@ -76,6 +76,7 @@ func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Status:         created.Status,
 		CreatedBy:      created.CreatedBy,
 		CreatedAt:      created.CreatedAt.Format(time.RFC3339),
+		SessionToken:   sessionToken,
 	})
 }
 

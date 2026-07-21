@@ -7,6 +7,9 @@ export interface CreateRaceResponse {
   status: string
   created_by: string
   created_at: string
+  // The creator is auto-added as a participant by CreateRace — this is
+  // their own WS handshake credential, same shape as JoinRaceResponse's.
+  session_token: string
 }
 
 export interface JoinRaceResponse {
@@ -23,6 +26,10 @@ export interface StartRaceResponse {
 
 export interface GetRaceTextResponse {
   prompt_text: string
+}
+
+export interface LeaveRaceResponse {
+  race_id: string
 }
 
 export interface Participant {

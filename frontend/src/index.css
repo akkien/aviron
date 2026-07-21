@@ -81,3 +81,10 @@
     @apply bg-background text-foreground font-sans;
   }
 }
+
+/* Blinking caret for TypingBox's fake render (race-screen.md). */
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}

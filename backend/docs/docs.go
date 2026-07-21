@@ -596,6 +596,10 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "session_token": {
+                    "description": "SessionToken is the creator's own WS handshake credential — the\ncreator is auto-added as a participant by CreateRace, same as JoinRace.",
+                    "type": "string"
+                },
                 "status": {
                     "type": "string"
                 }

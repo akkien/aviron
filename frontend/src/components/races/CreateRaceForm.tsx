@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/card"
 
 interface CreateRaceFormProps {
-  onCreated: (raceId: string) => void
+  onCreated: (raceId: string, sessionToken: string) => void
 }
 
 export function CreateRaceForm({ onCreated }: CreateRaceFormProps) {
@@ -37,7 +37,7 @@ export function CreateRaceForm({ onCreated }: CreateRaceFormProps) {
         method: "POST",
         body: JSON.stringify({ name, distance_meters: wordCount }),
       })
-      onCreated(res.id)
+      onCreated(res.id, res.session_token)
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to create race")
     } finally {
