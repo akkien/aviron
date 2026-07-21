@@ -100,6 +100,41 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 	}
 }
 
+func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actor := room.NewRoomActor(ctx, "race-1", "some prompt text", 5, make(chan []byte, 8), fakeFinisher{})
+	go actor.Run()
+
+	conn := newFakeConn()
+	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+	conn.queueRead([]byte(`{"type":"leave_race"}`), nil)
+	// No further queued reads, and no io.EOF: leave-race.md's readLoop must
+	// return on its own after leave_race, not wait for the client to also
+	// close the socket.
+
+	h := newTestWSHandler()
+
+	done := make(chan struct{})
+	go func() {
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn did not return after leave_race — reader goroutine left blocked forever")
+	}
+
+	select {
+	case <-conn.closed:
+	default:
+		t.Error("conn.Close was never called")
+	}
+}
+
 func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

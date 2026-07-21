@@ -16,7 +16,9 @@ Phase 2 (context/project-overview.md §12) turns the REST-only typing race from 
    1. `reconnection/grace-period.md` — abrupt-close handling, the grace-period timer, and reattachment when a client reconnects with a valid `session_token` before it expires
 4. **Race Completion** (folder: `race-completion/`) — referenced as "Phase 2's race-completion logic" in `context/features/phase1/phase-1-plan.md`'s out-of-scope note
    1. `race-completion/finish-race.md` — the room actor detecting a race is done and writing results to Postgres in one transaction (§3); the Kafka event emission mentioned in the same step of §2 is explicitly deferred to Phase 4 (§6)
-5. **Frontend Realtime** (folder: `frontend-realtime/`) — split into two
+5. **Leave Race** (folder: `leave-race/`) — not part of the original §12 roadmap, added by explicit request after the rest of Phase 2's backend was done
+   1. `leave-race/leave-race.md` — a REST endpoint to leave a still-`pending` race, an immediate (non-grace-period) WebSocket path to quit mid-race, and an update to `race-completion/finish-race.md`'s rank-assignment rule so quitters get an explicit shared last-place rank instead of vanishing from the results silently
+6. **Frontend Realtime** (folder: `frontend-realtime/`) — split into two
    1. `frontend-realtime/websocket-client.md` — the React app opens the WebSocket after a race starts, sends `telemetry` per correct word, and renders every participant's car moving live from `race_state` ticks (removing Phase 1's "only your own car moves" limitation)
    2. `frontend-realtime/reconnect-ui.md` — detecting a dropped WebSocket, retrying, and resyncing from the full snapshot the server resends on reattach
 
@@ -26,8 +28,9 @@ Phase 2 (context/project-overview.md §12) turns the REST-only typing race from 
 - The WebSocket Endpoint depends on the Protocol schema being defined and on a Room Registry to attach a connection to.
 - Reconnection depends on the WebSocket Endpoint already working — there's nothing to reconnect to otherwise.
 - Race Completion depends on the room actor already ingesting real telemetry over WebSocket, since "is this race done" is a question about live progress, not REST-only state.
-- Both Frontend Realtime features depend on the entire backend half of Phase 2 being done.
-- Recommended build order: Room Actor (2 features) → WebSocket (2 features) → Reconnection (1 feature) → Race Completion (1 feature) → Frontend Realtime (2 features).
+- Leave Race depends on Race Completion (it changes that feature's rank-assignment rule) and Reconnection (it reuses the `evicted`/`IsEvicted` mechanism for quitters).
+- Both Frontend Realtime features depend on the entire backend half of Phase 2 being done — Leave Race included, if `reconnect-ui.md` wants a "leave race" affordance.
+- Recommended build order: Room Actor (2 features) → WebSocket (2 features) → Reconnection (1 feature) → Race Completion (1 feature) → Leave Race (1 feature) → Frontend Realtime (2 features).
 
 ## Explicitly out of scope for Phase 2
 

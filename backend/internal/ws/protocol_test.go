@@ -41,6 +41,16 @@ func TestDecodeClientMessage_Telemetry_OK(t *testing.T) {
 	}
 }
 
+func TestDecodeClientMessage_LeaveRace_OK(t *testing.T) {
+	m, err := decodeClientMessage([]byte(`{"type":"leave_race"}`))
+	if err != nil {
+		t.Fatalf("decodeClientMessage() error = %v", err)
+	}
+	if m.Type != "leave_race" {
+		t.Errorf("Type = %q, want %q", m.Type, "leave_race")
+	}
+}
+
 func TestDecodeClientMessage_MalformedJSON(t *testing.T) {
 	_, err := decodeClientMessage([]byte(`not json`))
 	if err == nil {
@@ -102,6 +112,23 @@ func TestClientMessage_ToRoomEvent_Telemetry(t *testing.T) {
 	}
 	if telemetry.WordsCorrect != 12 {
 		t.Errorf("WordsCorrect = %d, want 12", telemetry.WordsCorrect)
+	}
+}
+
+func TestClientMessage_ToRoomEvent_LeaveRace(t *testing.T) {
+	m := ClientMessage{Type: "leave_race"}
+
+	ev, err := m.toRoomEvent("user-1", "Alice")
+	if err != nil {
+		t.Fatalf("toRoomEvent() error = %v", err)
+	}
+
+	left, ok := ev.(room.ParticipantLeft)
+	if !ok {
+		t.Fatalf("event type = %T, want room.ParticipantLeft", ev)
+	}
+	if left.UserID != "user-1" {
+		t.Errorf("UserID = %q, want %q", left.UserID, "user-1")
 	}
 }
 

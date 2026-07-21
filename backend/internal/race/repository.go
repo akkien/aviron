@@ -14,6 +14,11 @@ type RaceRepository interface {
 	GetRace(ctx context.Context, raceID string) (Race, error)
 	AddParticipant(ctx context.Context, raceID, userID string) error
 	CountParticipants(ctx context.Context, raceID string) (int, error)
+	// RemoveParticipant deletes the race_participants row for raceID/userID
+	// (leave-race.md's REST leave path, pending races only — an active
+	// race's participant list lives in the room actor, not here). Returns
+	// ErrNotParticipant if no such row existed.
+	RemoveParticipant(ctx context.Context, raceID, userID string) error
 	StartRace(ctx context.Context, raceID, promptText string) (Race, error)
 	GetRaceText(ctx context.Context, raceID string) (string, error)
 	GetRaceWithParticipants(ctx context.Context, raceID string) (RaceDetail, error)

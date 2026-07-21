@@ -74,6 +74,22 @@ func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sess
 	return signed, nil
 }
 
+// LeaveRace removes userID as a participant of raceID. Only valid while the
+// race is still pending — mirrors JoinRace's own pending-only rule. Once
+// active, leaving must go through the WebSocket leave_race path
+// (leave-race.md) instead, since the room actor is the only place holding
+// authoritative participant state at that point, not race_participants.
+func (s *RaceService) LeaveRace(ctx context.Context, raceID, userID string) error {
+	r, err := s.repo.GetRace(ctx, raceID)
+	if err != nil {
+		return err
+	}
+	if r.Status != "pending" {
+		return ErrRaceNotPending
+	}
+	return s.repo.RemoveParticipant(ctx, raceID, userID)
+}
+
 // StartRace generates the shared prompt text and flips raceID from pending
 // to active. Only the race's creator may call this.
 func (s *RaceService) StartRace(ctx context.Context, raceID, callerID string) (Race, error) {

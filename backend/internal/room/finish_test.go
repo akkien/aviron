@@ -1,6 +1,7 @@
 package room
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -76,6 +77,54 @@ func TestRoomActor_ApplyEvent_TelemetryReceived_RankAssignedInFinishingOrder(t *
 	}
 }
 
+func TestRoomActor_ApplyEvent_TelemetryReceived_RankUnaffectedByEarlierFinisherDeparting(t *testing.T) {
+	// Regression: FinishRank must not be derived by counting FinishRank !=
+	// nil over the live r.participants map at the moment someone finishes —
+	// a participant who already finished can later depart (their connection
+	// drops and the grace period lapses) and move into departedParticipants,
+	// which would silently drop them from that count and hand the next
+	// finisher a duplicate rank (leave-race.md).
+	r := newTestActor()
+	r.distanceMeters = 10
+	spy := &spyFinisher{}
+	r.finisher = spy
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantJoined{UserID: "user-2", DisplayName: "Bob"})
+	r.applyEvent(ParticipantJoined{UserID: "user-3", DisplayName: "Carol"})
+
+	r.applyEvent(TelemetryReceived{UserID: "user-1", Seq: 1, WordsCorrect: 10}) // user-1 finishes rank 1
+
+	// user-1 disconnects after finishing and their grace period expires —
+	// moved out of r.participants into departedParticipants, but their
+	// FinishRank must still count toward the next finisher's rank.
+	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
+
+	r.applyEvent(TelemetryReceived{UserID: "user-2", Seq: 1, WordsCorrect: 10}) // user-2 finishes rank 2
+	if rank := r.participants["user-2"].FinishRank; rank == nil || *rank != 2 {
+		t.Fatalf("user-2 FinishRank = %v, want 2 (user-1 already finished at rank 1, despite having since departed)", rank)
+	}
+
+	r.applyEvent(TelemetryReceived{UserID: "user-3", Seq: 1, WordsCorrect: 10}) // user-3 finishes rank 3
+	if rank := r.participants["user-3"].FinishRank; rank == nil || *rank != 3 {
+		t.Fatalf("user-3 FinishRank = %v, want 3", rank)
+	}
+
+	if len(spy.calls) != 1 {
+		t.Fatalf("finisher.calls = %d, want 1", len(spy.calls))
+	}
+	ranks := make(map[string]int)
+	for _, res := range spy.calls[0].results {
+		if res.FinishRank != nil {
+			ranks[res.UserID] = *res.FinishRank
+		}
+	}
+	if ranks["user-1"] != 1 || ranks["user-2"] != 2 || ranks["user-3"] != 3 {
+		t.Errorf("ranks = %+v, want user-1:1 user-2:2 user-3:3 (no duplicates)", ranks)
+	}
+}
+
 func TestRoomActor_ApplyEvent_TelemetryReceived_DoesNotFinishWhileSomeoneStillRacing(t *testing.T) {
 	r := newTestActor()
 	r.distanceMeters = 10
@@ -94,20 +143,71 @@ func TestRoomActor_ApplyEvent_TelemetryReceived_DoesNotFinishWhileSomeoneStillRa
 	}
 }
 
-func TestRoomActor_ApplyEvent_ParticipantLeft_EmptyingRoomTriggersFinish(t *testing.T) {
+func TestRoomActor_ApplyEvent_ParticipantEvicted_EmptyingRoomTriggersFinish(t *testing.T) {
 	r := newTestActor()
 	spy := &spyFinisher{}
 	r.finisher = spy
 
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
-	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
 
 	if len(spy.calls) != 1 {
 		t.Fatalf("finisher.calls = %d, want 1", len(spy.calls))
 	}
-	if len(spy.calls[0].results) != 0 {
-		t.Errorf("results = %+v, want empty (nobody finished)", spy.calls[0].results)
+	// leave-race.md: a non-finisher no longer vanishes from the results —
+	// they get a result with a shared last-place rank equal to the total
+	// number of distinct participants the room ever saw (1, here).
+	if len(spy.calls[0].results) != 1 {
+		t.Fatalf("results = %+v, want 1 entry for the evicted non-finisher", spy.calls[0].results)
+	}
+	result := spy.calls[0].results[0]
+	if result.UserID != "user-1" {
+		t.Errorf("UserID = %q, want %q", result.UserID, "user-1")
+	}
+	if result.FinishRank == nil || *result.FinishRank != 1 {
+		t.Errorf("FinishRank = %v, want 1 (shared last place, total 1 participant ever joined)", result.FinishRank)
+	}
+	if result.FinishTimeMs != nil {
+		t.Errorf("FinishTimeMs = %v, want nil (never finished)", result.FinishTimeMs)
+	}
+	if !r.finished {
+		t.Error("r.finished = false, want true")
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantEvicted_DoesNotFinishIfOthersStillRacing(t *testing.T) {
+	r := newTestActor()
+	spy := &spyFinisher{}
+	r.finisher = spy
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantJoined{UserID: "user-2", DisplayName: "Bob"})
+	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
+
+	if len(spy.calls) != 0 {
+		t.Errorf("finisher.calls = %d, want 0 (user-2 is still racing)", len(spy.calls))
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantLeft_EmptyingRoomTriggersFinish(t *testing.T) {
+	r := newTestActor()
+	spy := &spyFinisher{}
+	r.finisher = spy
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantLeft{UserID: "user-1"}) // intentional quit, no disconnect needed first
+
+	if len(spy.calls) != 1 {
+		t.Fatalf("finisher.calls = %d, want 1", len(spy.calls))
+	}
+	if len(spy.calls[0].results) != 1 {
+		t.Fatalf("results = %+v, want 1 entry for the quitter", spy.calls[0].results)
+	}
+	result := spy.calls[0].results[0]
+	if result.FinishRank == nil || *result.FinishRank != 1 {
+		t.Errorf("FinishRank = %v, want 1 (shared last place, total 1 participant ever joined)", result.FinishRank)
 	}
 	if !r.finished {
 		t.Error("r.finished = false, want true")
@@ -121,11 +221,60 @@ func TestRoomActor_ApplyEvent_ParticipantLeft_DoesNotFinishIfOthersStillRacing(t
 
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 	r.applyEvent(ParticipantJoined{UserID: "user-2", DisplayName: "Bob"})
-	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
 	r.applyEvent(ParticipantLeft{UserID: "user-1"})
 
 	if len(spy.calls) != 0 {
 		t.Errorf("finisher.calls = %d, want 0 (user-2 is still racing)", len(spy.calls))
+	}
+}
+
+func TestRoomActor_CheckRaceFinished_QuittersShareLastPlaceRank(t *testing.T) {
+	// Mirrors leave-race.md's own example: a 5-player race where nobody
+	// finishes and everyone quits mid-race means every one of them is
+	// recorded at rank 5 — tied for last, not individually ordered by when
+	// they quit.
+	r := newTestActor()
+	spy := &spyFinisher{}
+	r.finisher = spy
+
+	for i := 1; i <= 5; i++ {
+		userID := fmt.Sprintf("user-%d", i)
+		r.applyEvent(ParticipantJoined{UserID: userID, DisplayName: userID})
+	}
+	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+	r.applyEvent(ParticipantLeft{UserID: "user-2"})
+	r.applyEvent(ParticipantDisconnected{UserID: "user-3"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-3"})
+	r.applyEvent(ParticipantLeft{UserID: "user-4"})
+	r.applyEvent(ParticipantLeft{UserID: "user-5"})
+
+	if len(spy.calls) != 1 {
+		t.Fatalf("finisher.calls = %d, want 1", len(spy.calls))
+	}
+	results := spy.calls[0].results
+	if len(results) != 5 {
+		t.Fatalf("results = %+v, want 5 entries (everyone who ever joined)", results)
+	}
+	for _, res := range results {
+		if res.FinishRank == nil || *res.FinishRank != 5 {
+			t.Errorf("user %s: FinishRank = %v, want 5 (shared last place, 5 total participants)", res.UserID, res.FinishRank)
+		}
+		if res.FinishTimeMs != nil {
+			t.Errorf("user %s: FinishTimeMs = %v, want nil (never finished)", res.UserID, res.FinishTimeMs)
+		}
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantJoined_ReconnectDoesNotIncrementTotalParticipants(t *testing.T) {
+	r := newTestActor()
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"}) // reconnect
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"}) // duplicate while connected
+
+	if r.totalParticipants != 1 {
+		t.Errorf("totalParticipants = %d, want 1 (only the original join counts)", r.totalParticipants)
 	}
 }
 
@@ -164,7 +313,7 @@ func TestRoomActor_CheckRaceFinished_DoesNotCallFinisherTwice(t *testing.T) {
 
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
-	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
 	if len(spy.calls) != 1 {
 		t.Fatalf("finisher.calls = %d, want 1 after first finish", len(spy.calls))
 	}

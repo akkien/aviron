@@ -135,11 +135,11 @@ func TestIntegration_RejectsReconnectAfterGracePeriodExpired(t *testing.T) {
 
 	// Simulate user-1 having joined, disconnected, and had their grace
 	// period expire — without waiting the real 30s: reconnection/grace-period.md's
-	// ParticipantLeft is exported specifically so this is reachable from
+	// ParticipantEvicted is exported specifically so this is reachable from
 	// here, the same as a real expiry would apply it.
 	actor.Send(room.ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 	actor.Send(room.ParticipantDisconnected{UserID: "user-1"})
-	actor.Send(room.ParticipantLeft{UserID: "user-1"})
+	actor.Send(room.ParticipantEvicted{UserID: "user-1"})
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) && !actor.IsEvicted("user-1") {

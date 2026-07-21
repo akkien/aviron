@@ -39,3 +39,7 @@ var ErrRaceNotPending = errors.New("race: not pending")
 var ErrNotCreator = errors.New("race: caller is not the creator")
 var ErrPromptNotReady = errors.New("race: prompt text not ready")
 var ErrRaceFull = errors.New("race: full")
+
+// ErrNotParticipant is returned by LeaveRace (leave-race.md) when the caller
+// was never a participant of the race — never joined, or already left.
+var ErrNotParticipant = errors.New("race: caller is not a participant")

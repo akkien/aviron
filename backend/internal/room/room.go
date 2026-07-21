@@ -22,7 +22,7 @@ type ParticipantState struct {
 	ConnectedAt       time.Time
 	DisconnectedAt    *time.Time
 	DisconnectedCount int
-	// graceTimer fires ParticipantLeft if this participant doesn't reconnect
+	// graceTimer fires ParticipantEvicted if this participant doesn't reconnect
 	// in time. Stopped and cleared on reconnect so a stale expiry can never
 	// remove someone who's since reattached.
 	graceTimer *time.Timer
@@ -35,17 +35,29 @@ type ParticipantState struct {
 type RoomActor struct {
 	id           string
 	participants map[string]*ParticipantState
-	// evicted tracks user_ids removed via grace-period expiry, so a
-	// too-late reconnect attempt can be rejected by websocket/ws-endpoint.md
-	// instead of silently rejoining as a fresh participant.
-	evicted        map[string]struct{}
-	promptText     string
-	distanceMeters int
-	tickCount      int64
-	inbox          chan RoomEvent
-	broadcast      chan []byte
-	ctx            context.Context
-	cancel         context.CancelFunc
+	// evicted tracks user_ids removed via grace-period expiry or an
+	// intentional quit (leave-race.md), so a too-late reconnect attempt can
+	// be rejected by websocket/ws-endpoint.md instead of silently rejoining
+	// as a fresh participant.
+	evicted map[string]struct{}
+	// departedParticipants holds anyone removed from participants — via
+	// ParticipantEvicted or ParticipantLeft — before finishing, so
+	// checkRaceFinished can still produce a result for them (leave-race.md)
+	// instead of the entry silently vanishing the moment they're removed.
+	departedParticipants map[string]*ParticipantState
+	// totalParticipants counts every genuinely new participant this room
+	// ever saw (leave-race.md) — incremented only in ParticipantJoined's
+	// unknown-participant branch, never on a reconnect or a duplicate join
+	// while still connected. Used as the shared rank for anyone who leaves
+	// without finishing.
+	totalParticipants int
+	promptText        string
+	distanceMeters    int
+	tickCount         int64
+	inbox             chan RoomEvent
+	broadcast         chan []byte
+	ctx               context.Context
+	cancel            context.CancelFunc
 	// finisher persists final results once the race completes
 	// (race-completion/finish-race.md) — see finish.go.
 	finisher RaceFinisher
@@ -58,6 +70,16 @@ type RoomActor struct {
 	// belt-and-suspenders on top of checkRaceFinished's own event-transition
 	// guards (see there for why a double-call shouldn't be reachable anyway).
 	finished bool
+	// finishedCount is a monotonic count of how many participants have
+	// finished so far, used to assign FinishRank in finishing order. Not
+	// derived by counting FinishRank != nil over r.participants at the
+	// moment someone finishes: a participant who already finished can later
+	// depart (their connection drops and the grace period lapses, or they
+	// send leave_race after already crossing the line) and move into
+	// departedParticipants, which would silently drop them from that count
+	// and hand the next finisher a duplicate rank (leave-race.md). A counter
+	// untouched by departure sidesteps that entirely.
+	finishedCount int
 }
 
 // NewRoomActor constructs a room actor for race id, seeded with the already
@@ -67,17 +89,18 @@ type RoomActor struct {
 func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
-		id:             id,
-		participants:   make(map[string]*ParticipantState),
-		evicted:        make(map[string]struct{}),
-		promptText:     promptText,
-		distanceMeters: distanceMeters,
-		inbox:          make(chan RoomEvent, 64), // generous buffer: a burst of telemetry must not block reader goroutines
-		broadcast:      broadcast,
-		ctx:            actorCtx,
-		cancel:         cancel,
-		finisher:       finisher,
-		startedAt:      time.Now(),
+		id:                   id,
+		participants:         make(map[string]*ParticipantState),
+		evicted:              make(map[string]struct{}),
+		departedParticipants: make(map[string]*ParticipantState),
+		promptText:           promptText,
+		distanceMeters:       distanceMeters,
+		inbox:                make(chan RoomEvent, 64), // generous buffer: a burst of telemetry must not block reader goroutines
+		broadcast:            broadcast,
+		ctx:                  actorCtx,
+		cancel:               cancel,
+		finisher:             finisher,
+		startedAt:            time.Now(),
 	}
 	time.AfterFunc(noShowTimeoutDuration, func() {
 		r.Send(noShowTimeout{})
@@ -191,6 +214,10 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 				DisplayName: e.DisplayName,
 				ConnectedAt: time.Now(),
 			}
+			// Only a genuinely new participant counts — not a reconnect, not a
+			// duplicate join while still connected (leave-race.md's shared
+			// last-place rank is "how many distinct people ever raced here").
+			r.totalParticipants++
 		}
 		// Broadcast immediately rather than waiting for the next tick (up to
 		// 250ms away) — websocket/protocol.md's join_race message is meant to
@@ -209,17 +236,15 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		if p.FinishRank == nil && p.WordsCorrect >= r.distanceMeters {
 			// race-completion/finish-race.md: a participant individually
 			// "finishes" the moment they reach the target, in finishing
-			// order — first to reach it is rank 1. Counting existing
-			// FinishRanks (rather than a separate counter field) keeps this
-			// self-contained in the one place rank is ever assigned.
+			// order — first to reach it is rank 1. r.finishedCount (not a
+			// live count of FinishRank != nil over r.participants) so a
+			// finisher who's since departed still counts toward the next
+			// finisher's rank instead of leaving a gap a later arrival could
+			// collide with (leave-race.md).
 			now := time.Now()
 			p.FinishedAt = &now
-			rank := 1
-			for _, other := range r.participants {
-				if other.FinishRank != nil {
-					rank++
-				}
-			}
+			r.finishedCount++
+			rank := r.finishedCount
 			p.FinishRank = &rank
 			r.checkRaceFinished()
 		}
@@ -239,9 +264,9 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		}
 		userID := e.UserID
 		p.graceTimer = time.AfterFunc(gracePeriodDuration, func() {
-			r.Send(ParticipantLeft{UserID: userID})
+			r.Send(ParticipantEvicted{UserID: userID})
 		})
-	case ParticipantLeft:
+	case ParticipantEvicted:
 		// Guard against a reconnect and an already-fired timer racing each
 		// other: only honor this if the participant is still the one who
 		// disconnected (DisconnectedAt != nil). If they reconnected in the
@@ -249,9 +274,15 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		// ParticipantJoined case above already cleared DisconnectedAt and
 		// stopped the timer — this stale event must not remove them anyway.
 		if p, ok := r.participants[e.UserID]; ok && p.DisconnectedAt != nil {
-			delete(r.participants, e.UserID)
-			r.evicted[e.UserID] = struct{}{}
-			r.checkRaceFinished()
+			r.departParticipant(e.UserID, p)
+		}
+	case ParticipantLeft:
+		// An intentional quit (leave-race.md): unlike ParticipantEvicted,
+		// unconditional — a still-connected participant sending this is
+		// exactly who's expected to, so there's no DisconnectedAt guard to
+		// check. Removed immediately, no timer, no grace period.
+		if p, ok := r.participants[e.UserID]; ok {
+			r.departParticipant(e.UserID, p)
 		}
 	case evictionQuery:
 		_, evicted := r.evicted[e.UserID]
@@ -266,14 +297,34 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 	}
 }
 
+// departParticipant moves a participant out of the live participants map and
+// into departedParticipants (leave-race.md), so checkRaceFinished can still
+// produce a result for them instead of them vanishing from the finish
+// transaction entirely. Shared by both ParticipantEvicted and ParticipantLeft
+// — the two events differ only in whether a guard gates removal, not in what
+// removal itself does.
+func (r *RoomActor) departParticipant(userID string, p *ParticipantState) {
+	delete(r.participants, userID)
+	r.departedParticipants[userID] = p
+	r.evicted[userID] = struct{}{}
+	r.checkRaceFinished()
+}
+
 // checkRaceFinished is race-completion/finish-race.md's finish condition:
 // the race is over once there are zero live participants remaining, either
-// because everyone who connected eventually left (grace period expired for
-// each) or nobody finished (participants is empty). Called from every event
-// that could produce that transition — TelemetryReceived (someone just
-// finished), ParticipantLeft (someone just got evicted), and noShowTimeout
-// (nobody ever joined) — never from ParticipantJoined/ParticipantDisconnected
-// /evictionQuery, none of which can complete a race by themselves.
+// because everyone who connected eventually left (grace period expired or
+// quit for each) or nobody finished (participants is empty). Called from
+// every event that could produce that transition — TelemetryReceived (someone
+// just finished), departParticipant (someone just got evicted or quit), and
+// noShowTimeout (nobody ever joined) — never from
+// ParticipantJoined/ParticipantDisconnected/evictionQuery, none of which can
+// complete a race by themselves.
+//
+// Results union participants (everyone still live — by this point, always
+// finishers, since a live non-finisher would have returned above) with
+// departedParticipants (leave-race.md: everyone evicted or who quit before
+// finishing). buildParticipantResult assigns the latter group's shared
+// last-place rank.
 func (r *RoomActor) checkRaceFinished() {
 	if r.finished {
 		return
@@ -284,25 +335,50 @@ func (r *RoomActor) checkRaceFinished() {
 		}
 	}
 
-	results := make([]ParticipantResult, 0, len(r.participants))
+	results := make([]ParticipantResult, 0, len(r.participants)+len(r.departedParticipants))
 	for _, p := range r.participants {
-		var finishTimeMs int64
-		if p.FinishedAt != nil {
-			finishTimeMs = p.FinishedAt.Sub(r.startedAt).Milliseconds()
-		}
-		results = append(results, ParticipantResult{
-			UserID:       p.UserID,
-			FinishRank:   p.FinishRank,
-			FinishTimeMs: &finishTimeMs,
-			// AvgPaceWatt: no per-tick pace tracking exists anywhere in this
-			// codebase yet (internal/ws's ClientMessage.PaceWatt is decoded
-			// but never forwarded into TelemetryReceived) — left at the zero
-			// value rather than building that infrastructure as a side
-			// effect of this feature.
-			DisconnectedCount: p.DisconnectedCount,
-		})
+		results = append(results, r.buildParticipantResult(p))
+	}
+	for _, p := range r.departedParticipants {
+		results = append(results, r.buildParticipantResult(p))
 	}
 	r.finishRace(results)
+}
+
+// buildParticipantResult converts one participant's in-memory state into its
+// final race_participants row. A participant who never finished (evicted or
+// quit, leave-race.md) has no FinishRank yet at this point — they share one
+// rank with every other non-finisher, equal to totalParticipants (the total
+// number of distinct participants this room ever saw), not finishing order
+// and not a per-quitter sequential rank. FinishTimeMs stays nil for them
+// (never set), matching ParticipantResult's documented "nil means never
+// finished" contract — unlike the previous version of this code, which
+// always wrote a non-nil *int64 (zero for anyone reaching this loop without
+// FinishedAt set); that never surfaced as a bug before this feature, since a
+// live non-finisher always blocked the finish-condition loop above from ever
+// reaching a non-finisher in the first place.
+func (r *RoomActor) buildParticipantResult(p *ParticipantState) ParticipantResult {
+	rank := p.FinishRank
+	if rank == nil {
+		nonFinisherRank := r.totalParticipants
+		rank = &nonFinisherRank
+	}
+	var finishTimeMs *int64
+	if p.FinishedAt != nil {
+		ms := p.FinishedAt.Sub(r.startedAt).Milliseconds()
+		finishTimeMs = &ms
+	}
+	return ParticipantResult{
+		UserID:       p.UserID,
+		FinishRank:   rank,
+		FinishTimeMs: finishTimeMs,
+		// AvgPaceWatt: no per-tick pace tracking exists anywhere in this
+		// codebase yet (internal/ws's ClientMessage.PaceWatt is decoded
+		// but never forwarded into TelemetryReceived) — left at the zero
+		// value rather than building that infrastructure as a side
+		// effect of this feature.
+		DisconnectedCount: p.DisconnectedCount,
+	}
 }
 
 // finishRace persists results, notifies clients, and tears the room down.

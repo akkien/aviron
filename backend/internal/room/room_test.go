@@ -41,13 +41,14 @@ func (s *spyFinisher) FinishRace(ctx context.Context, raceID string, distanceMet
 func newTestActor() *RoomActor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RoomActor{
-		id:             "race-1",
-		participants:   make(map[string]*ParticipantState),
-		evicted:        make(map[string]struct{}),
-		distanceMeters: 1_000_000,
-		finisher:       noopFinisher{},
-		ctx:            ctx,
-		cancel:         cancel,
+		id:                   "race-1",
+		participants:         make(map[string]*ParticipantState),
+		evicted:              make(map[string]struct{}),
+		departedParticipants: make(map[string]*ParticipantState),
+		distanceMeters:       1_000_000,
+		finisher:             noopFinisher{},
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 }
 
@@ -217,36 +218,66 @@ func TestRoomActor_ApplyEvent_ParticipantJoined_DuplicateWhileConnected_Preserve
 	}
 }
 
-func TestRoomActor_ApplyEvent_ParticipantLeft_RemovesAndEvicts(t *testing.T) {
+func TestRoomActor_ApplyEvent_ParticipantEvicted_RemovesAndEvicts(t *testing.T) {
 	r := newTestActor()
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
 
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
+
+	if _, ok := r.participants["user-1"]; ok {
+		t.Error("participant still present after ParticipantEvicted, want removed")
+	}
+	if _, ok := r.evicted["user-1"]; !ok {
+		t.Error("user-1 not recorded as evicted after ParticipantEvicted")
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantEvicted_StaleEventIgnoredAfterReconnect(t *testing.T) {
+	r := newTestActor()
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
+	// Reconnect before the (simulated) stale ParticipantEvicted arrives — mirrors
+	// the real race between a firing timer and an in-flight reconnect.
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
+
+	if _, ok := r.participants["user-1"]; !ok {
+		t.Error("participant was removed by a stale ParticipantEvicted after reconnecting")
+	}
+	if _, ok := r.evicted["user-1"]; ok {
+		t.Error("user-1 was marked evicted despite having reconnected before the stale event applied")
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantEvicted_UnknownParticipant(t *testing.T) {
+	r := newTestActor()
+
+	// Must not panic for a ParticipantEvicted referencing nobody in the room.
+	r.applyEvent(ParticipantEvicted{UserID: "ghost"})
+
+	if len(r.evicted) != 0 {
+		t.Errorf("evicted = %v, want empty", r.evicted)
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantLeft_RemovesAndEvictsImmediately(t *testing.T) {
+	r := newTestActor()
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	// Unlike ParticipantEvicted, no ParticipantDisconnected is needed first —
+	// an intentional quit is honored while still connected.
 	r.applyEvent(ParticipantLeft{UserID: "user-1"})
 
 	if _, ok := r.participants["user-1"]; ok {
 		t.Error("participant still present after ParticipantLeft, want removed")
 	}
+	if _, ok := r.departedParticipants["user-1"]; !ok {
+		t.Error("user-1 not tracked in departedParticipants after ParticipantLeft")
+	}
 	if _, ok := r.evicted["user-1"]; !ok {
 		t.Error("user-1 not recorded as evicted after ParticipantLeft")
-	}
-}
-
-func TestRoomActor_ApplyEvent_ParticipantLeft_StaleEventIgnoredAfterReconnect(t *testing.T) {
-	r := newTestActor()
-	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
-	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
-	// Reconnect before the (simulated) stale ParticipantLeft arrives — mirrors
-	// the real race between a firing timer and an in-flight reconnect.
-	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
-
-	r.applyEvent(ParticipantLeft{UserID: "user-1"})
-
-	if _, ok := r.participants["user-1"]; !ok {
-		t.Error("participant was removed by a stale ParticipantLeft after reconnecting")
-	}
-	if _, ok := r.evicted["user-1"]; ok {
-		t.Error("user-1 was marked evicted despite having reconnected before the stale event applied")
 	}
 }
 
@@ -265,7 +296,7 @@ func TestRoomActor_ApplyEvent_EvictionQuery(t *testing.T) {
 	r := newTestActor()
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
-	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
 
 	evictedReply := make(chan bool, 1)
 	r.applyEvent(evictionQuery{UserID: "user-1", Reply: evictedReply})

@@ -152,6 +152,80 @@ func TestRaceService_JoinRace_RaceNotPending(t *testing.T) {
 	}
 }
 
+func TestRaceService_LeaveRace_Success(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	if _, err := svc.JoinRace(ctx, created.ID, "user-2"); err != nil {
+		t.Fatalf("JoinRace() error = %v", err)
+	}
+
+	if err := svc.LeaveRace(ctx, created.ID, "user-2"); err != nil {
+		t.Fatalf("LeaveRace() error = %v", err)
+	}
+
+	detail, err := svc.GetRaceDetail(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetRaceDetail() error = %v", err)
+	}
+	for _, p := range detail.Participants {
+		if p.UserID == "user-2" {
+			t.Error("user-2 still listed as a participant after LeaveRace")
+		}
+	}
+}
+
+func TestRaceService_LeaveRace_RaceNotFound(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+
+	err := svc.LeaveRace(context.Background(), "nonexistent-race", "user-1")
+	if !errors.Is(err, race.ErrRaceNotFound) {
+		t.Errorf("err = %v, want ErrRaceNotFound", err)
+	}
+}
+
+func TestRaceService_LeaveRace_NotParticipant(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+
+	err = svc.LeaveRace(ctx, created.ID, "user-2")
+	if !errors.Is(err, race.ErrNotParticipant) {
+		t.Errorf("err = %v, want ErrNotParticipant", err)
+	}
+}
+
+func TestRaceService_LeaveRace_RaceNotPending(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	if _, err := svc.JoinRace(ctx, created.ID, "user-2"); err != nil {
+		t.Fatalf("JoinRace() error = %v", err)
+	}
+	repo.races[0].Status = "active"
+
+	err = svc.LeaveRace(ctx, created.ID, "user-2")
+	if !errors.Is(err, race.ErrRaceNotPending) {
+		t.Errorf("err = %v, want ErrRaceNotPending", err)
+	}
+}
+
 func TestRaceService_StartRace_Success(t *testing.T) {
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, []byte("test-secret"))

@@ -72,6 +72,24 @@ func (r *RaceRepository) AddParticipant(ctx context.Context, raceID, userID stri
 	return nil
 }
 
+// RemoveParticipant deletes the race_participants row for raceID/userID
+// (leave-race.md's REST leave path). A real DELETE, not a soft-remove — a
+// pending race has no result worth preserving for someone who backs out
+// before it starts. Returns race.ErrNotParticipant if no such row existed
+// (never joined, or already left).
+func (r *RaceRepository) RemoveParticipant(ctx context.Context, raceID, userID string) error {
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM race_participants WHERE race_id = $1 AND user_id = $2
+	`, raceID, userID)
+	if err != nil {
+		return fmt.Errorf("postgres: remove participant: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return race.ErrNotParticipant
+	}
+	return nil
+}
+
 func (r *RaceRepository) CountParticipants(ctx context.Context, raceID string) (int, error) {
 	var count int
 	err := r.pool.QueryRow(ctx, `

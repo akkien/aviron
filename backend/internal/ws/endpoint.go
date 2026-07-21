@@ -147,6 +147,14 @@ func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, d
 		}
 
 		actor.Send(ev)
+
+		if _, ok := ev.(room.ParticipantLeft); ok {
+			// An intentional quit (leave-race.md): the room already has the
+			// event, so there's nothing left to read from this participant —
+			// close the connection from the server side too, rather than
+			// waiting for the client to hang up (or not) on its own.
+			return
+		}
 	}
 }
 

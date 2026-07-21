@@ -87,6 +87,19 @@ func (f *fakeRepository) AddParticipant(ctx context.Context, raceID, userID stri
 	return nil
 }
 
+func (f *fakeRepository) RemoveParticipant(ctx context.Context, raceID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i, p := range f.participants {
+		if p.raceID == raceID && p.userID == userID {
+			f.participants = append(f.participants[:i], f.participants[i+1:]...)
+			return nil
+		}
+	}
+	return race.ErrNotParticipant
+}
+
 func (f *fakeRepository) CountParticipants(ctx context.Context, raceID string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -311,6 +311,71 @@ const docTemplate = `{
                 }
             }
         },
+        "/races/{id}/leave": {
+            "post": {
+                "description": "Removes the caller as a participant of a still-pending race. Once the race is active, quit via the WebSocket leave_race message instead.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "races"
+                ],
+                "summary": "Leave a race",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Race ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_race.leaveRaceResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "error: invalid_race_id",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "error: unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "error: race_not_found | not_participant",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "error: race_not_pending",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/races/{id}/start": {
             "post": {
                 "description": "Creator starts the race: generates the shared prompt text and flips status to active",
@@ -551,6 +616,14 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "session_token": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_race.leaveRaceResponse": {
+            "type": "object",
+            "properties": {
+                "race_id": {
                     "type": "string"
                 }
             }

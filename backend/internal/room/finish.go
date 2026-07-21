@@ -17,14 +17,16 @@ type RaceFinisher interface {
 }
 
 // ParticipantResult is one participant's final row in race_participants.
-// FinishRank/FinishTimeMs are nil for a participant who never reached the
-// target — in practice, by the time checkRaceFinished actually calls
-// FinishRace, every entry in this slice already has both set, since a
-// participant still in RoomActor.participants without a FinishRank blocks
-// the race from finishing at all (see checkRaceFinished). They stay pointer
-// types to match the schema (race_participants.finish_rank/finish_time_ms
-// are nullable) and because RaceFinisher is a general-purpose seam, not
-// something that should assume this one caller's invariants forever.
+// FinishTimeMs is nil for a participant who never reached the target
+// (evicted or quit, leave-race.md) — they were never at the finish line, so
+// there's no time to record. FinishRank, by contrast, is never nil by the
+// time checkRaceFinished (internal/room/room.go) builds this slice: a
+// non-finisher still gets one, a single shared value equal to the total
+// number of distinct participants the room ever saw (leave-race.md), rather
+// than being left nil like FinishTimeMs. Both stay pointer types to match
+// the schema (race_participants.finish_rank/finish_time_ms are nullable) and
+// because RaceFinisher is a general-purpose seam, not something that should
+// assume this one caller's invariants forever.
 type ParticipantResult struct {
 	UserID            string
 	FinishRank        *int

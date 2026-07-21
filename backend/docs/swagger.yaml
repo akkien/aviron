@@ -66,6 +66,11 @@ definitions:
       session_token:
         type: string
     type: object
+  internal_race.leaveRaceResponse:
+    properties:
+      race_id:
+        type: string
+    type: object
   internal_race.participantResponse:
     properties:
       display_name:
@@ -305,6 +310,50 @@ paths:
               type: string
             type: object
       summary: Join a race
+      tags:
+      - races
+  /races/{id}/leave:
+    post:
+      description: Removes the caller as a participant of a still-pending race. Once
+        the race is active, quit via the WebSocket leave_race message instead.
+      parameters:
+      - description: Race ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_race.leaveRaceResponse'
+        "400":
+          description: 'error: invalid_race_id'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: 'error: race_not_found | not_participant'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: 'error: race_not_pending'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Leave a race
       tags:
       - races
   /races/{id}/start:

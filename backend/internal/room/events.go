@@ -27,11 +27,22 @@ type ParticipantDisconnected struct {
 
 func (ParticipantDisconnected) isRoomEvent() {}
 
-// ParticipantLeft is applied when a disconnected participant's grace period
+// ParticipantEvicted is applied when a disconnected participant's grace period
 // expires without a reconnect (reconnection/grace-period.md). There is
 // deliberately no ParticipantReconnected variant — a reconnect reuses
 // ParticipantJoined, distinguished from a fresh join by applyEvent checking
 // existing participant state instead of the event carrying a new type.
+type ParticipantEvicted struct {
+	UserID string
+}
+
+func (ParticipantEvicted) isRoomEvent() {}
+
+// ParticipantLeft is applied when a still-connected participant intentionally
+// quits mid-race (leave-race.md's WebSocket leave_race message). Unlike
+// ParticipantEvicted, it carries no DisconnectedAt guard — a still-connected
+// participant sending this is exactly who's expected to, so it's always
+// honored immediately, with no timer and no grace period.
 type ParticipantLeft struct {
 	UserID string
 }

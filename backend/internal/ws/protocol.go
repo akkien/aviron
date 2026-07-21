@@ -36,7 +36,7 @@ func decodeClientMessage(data []byte) (ClientMessage, error) {
 	}
 
 	switch m.Type {
-	case "join_race", "telemetry":
+	case "join_race", "telemetry", "leave_race":
 	default:
 		return ClientMessage{}, fmt.Errorf("ws: unknown message type %q", m.Type)
 	}
@@ -56,6 +56,8 @@ func (m ClientMessage) toRoomEvent(userID, displayName string) (room.RoomEvent, 
 		return room.ParticipantJoined{UserID: userID, DisplayName: displayName}, nil
 	case "telemetry":
 		return room.TelemetryReceived{UserID: userID, Seq: m.Seq, WordsCorrect: int(m.DistanceM)}, nil
+	case "leave_race":
+		return room.ParticipantLeft{UserID: userID}, nil
 	default:
 		return nil, fmt.Errorf("ws: unknown message type %q", m.Type)
 	}
