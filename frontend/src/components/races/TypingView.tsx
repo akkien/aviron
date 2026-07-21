@@ -39,7 +39,7 @@ export function TypingView({
   const [input, setInput] = useState("")
   const [error, setError] = useState<string | null>(null)
 
-  const { raceState, finished, connectionError, leaving, sendTelemetry, leaveRace } =
+  const { raceState, finished, connectionError, leaving, reconnecting, evicted, sendTelemetry, leaveRace } =
     useRaceSocket(raceId, sessionToken)
 
   const seqRef = useRef(0)
@@ -55,10 +55,13 @@ export function TypingView({
 
   // Send one telemetry message per newly-completed word (context/project
   // -overview.md §13's per-word cadence, not a fixed timer) — stops once
-  // the race has finished or the local player has quit, since there's
-  // nothing left to report.
+  // the race has finished, the local player has quit, or they've been
+  // evicted after exhausting every reconnect attempt, since there's nothing
+  // left to report. Sends attempted while merely reconnecting are still
+  // fine to try — useRaceSocket's sendTelemetry silently drops them if the
+  // socket isn't open, matching reconnect-ui.md's "lost, not queued" model.
   useEffect(() => {
-    if (finished || leaving) return
+    if (finished || leaving || evicted) return
     const wordsCompleted = Math.min(countCompletedWords(input), distanceMeters)
     if (wordsCompleted <= lastSentWordsRef.current) return
 
@@ -69,7 +72,7 @@ export function TypingView({
     lastSentWordsRef.current = wordsCompleted
     seqRef.current += 1
     sendTelemetry(seqRef.current, wordsCompleted, paceWatt)
-  }, [input, distanceMeters, finished, leaving, sendTelemetry])
+  }, [input, distanceMeters, finished, leaving, evicted, sendTelemetry])
 
   if (promptText === null) {
     return (
@@ -88,6 +91,18 @@ export function TypingView({
       <Card>
         <CardContent className="pt-6">
           <p className="text-sm text-muted-foreground">You left the race.</p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (evicted) {
+    return (
+      <Card>
+        <CardContent className="pt-6">
+          <p className="text-sm text-muted-foreground">
+            You were disconnected too long and have left the race.
+          </p>
         </CardContent>
       </Card>
     )
@@ -136,6 +151,9 @@ export function TypingView({
         </Button>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
+        {reconnecting && (
+          <p className="text-sm text-muted-foreground">Reconnecting...</p>
+        )}
         {connectionError && <p className="text-sm text-destructive">{connectionError}</p>}
         <p className="rounded-md border bg-muted/50 p-3 font-mono text-sm leading-relaxed">
           <span className="text-muted-foreground">{typed}</span>
