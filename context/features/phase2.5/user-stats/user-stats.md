@@ -2,7 +2,7 @@
 
 ## Overview
 
-`dashboard.md` ships `StatCards.tsx` with 4 hardcoded values (Races Joined, Races Won, Avg WPM, Avg Accuracy), explicitly flagged there as a placeholder pending real backend support. This spec builds that support — for 3 of the 4 stats. Per explicit decision: **Avg Accuracy is dropped, not built** — the server never validates typed text (`context/project-overview.md` §13's trust model), so there's no server-side notion of "correct vs incorrect" to average without adding a new self-reported client metric, which is out of scope here. `StatCards.tsx` becomes a 3-card row once this lands.
+`dashboard.md` ships `StatCards.tsx` as a 3-card row (Races Joined, Races Won, Avg WPM) with hardcoded values, explicitly flagged there as a placeholder pending real backend support. The mockup's 4th card (Avg Accuracy) was never built at all — the server never validates typed text (`context/project-overview.md` §13's trust model), so there's no server-side notion of "correct vs incorrect" to average without adding a new self-reported client metric, which is out of scope here. This spec builds the real backend support for all 3 cards `StatCards.tsx` already has.
 
 Unlike the rest of Phase 2.5, this is primarily a **backend** spec (new migration, a fixed pre-existing gap, a new domain package) with one small frontend piece (swap `StatCards.tsx`'s hardcoded source for a real fetch).
 
@@ -37,7 +37,7 @@ Unlike the rest of Phase 2.5, this is primarily a **backend** spec (new migratio
 
 ### Frontend wiring
 
-- `StatCards.tsx` (from `dashboard.md`): drop the Avg Accuracy card, fetch the other 3 from `GET /leaderboard/me` instead of the hardcoded constant. Same loading-state conventions the rest of the app already uses (`RaceStatusView`'s `raceDetail === null ? "Loading..." : ...}` pattern).
+- `StatCards.tsx` (from `dashboard.md`, already a 3-card row): fetch its 3 values from `GET /leaderboard/me` instead of the hardcoded constant. Same loading-state conventions the rest of the app already uses (`RaceStatusView`'s `raceDetail === null ? "Loading..." : ...}` pattern).
 - New type in `frontend/src/types/`: `LeaderboardMeResponse { races_joined: number; races_won: number; avg_wpm: number }`, mirroring the Go DTO.
 
 ## Validation

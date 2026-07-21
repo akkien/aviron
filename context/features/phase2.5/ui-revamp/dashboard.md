@@ -17,8 +17,8 @@ Two things in the mockup have no backing data today and are explicitly built as 
 
 ### `StatCards.tsx` (new, `frontend/src/components/races/`)
 
-- 4 cards matching the mockup: Races Joined, Races Won, Avg WPM, Avg Accuracy.
-- **Hardcoded values.** No API call. Comment directly in the component noting this is a placeholder pending `user-stats/user-stats.md` (already spec'd — that feature replaces 3 of these 4 cards with real data and **drops the Avg Accuracy card entirely**, since it turns out not to be measurable under this project's trust model; see that spec's Overview). Structure the hardcoded values as a single object/array passed into the card-rendering markup (not inlined literally per-JSX-element) so swapping the data source later is a small, contained diff.
+- 3 cards: Races Joined, Races Won, Avg WPM. The mockup's 4th card (Avg Accuracy) is dropped outright, not built at all — it turns out not to be measurable under this project's never-verify-typed-text trust model (see `user-stats/user-stats.md`'s Overview), so there is nothing for that spec to later remove.
+- **Hardcoded values.** No API call. Comment directly in the component noting this is a placeholder pending `user-stats/user-stats.md` (already spec'd — that feature replaces all 3 cards with real data). Structure the hardcoded values as a single object/array passed into the card-rendering markup (not inlined literally per-JSX-element) so swapping the data source later is a small, contained diff.
 
 ### `OpenRacesList.tsx` (new, `frontend/src/components/races/`)
 
