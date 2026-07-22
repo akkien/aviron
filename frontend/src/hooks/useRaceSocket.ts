@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import type { RaceFinishedMessage, RaceStateMessage } from "@/types/race"
+import type { RaceFinishedMessage, RaceStartedMessage, RaceStateMessage } from "@/types/race"
 
 // wsURL swaps VITE_API_URL's http(s) scheme for ws(s) — there's no separate
 // WS base URL configured (frontend-realtime/websocket-client.md).
@@ -34,6 +34,10 @@ interface UseRaceSocketResult {
   // refused. Named to match the backend's own vocabulary for this state
   // (RoomActor.evicted/IsEvicted/ParticipantEvicted), not a new metaphor.
   evicted: boolean
+  // expired is true once race_expired arrives — the pending room's lifetime
+  // ran out before the race ever started (live-lobby.md), distinct from
+  // evicted (a lapsed reconnect grace period) and leaving (a self-quit).
+  expired: boolean
   sendTelemetry: (seq: number, wordsCorrect: number, paceWatt: number) => void
   leaveRace: () => void
 }
@@ -49,6 +53,15 @@ interface UseRaceSocketResult {
 export function useRaceSocket(
   raceId: string | null,
   sessionToken: string | null,
+  // Called with the prompt text as soon as race_started arrives — lets an
+  // already-connected client start typing immediately, no
+  // GET /races/{id}/text round-trip needed (race-started-broadcast.md).
+  onRaceStarted?: (promptText: string) => void,
+  // Called (with no args) on race_started too, to re-fetch REST race
+  // status — the only way a non-creator pending player's raceDetail.status
+  // ever flips from "pending" to "active" today, since nothing else
+  // re-polls it (live-lobby.md).
+  onRefresh?: () => void,
 ): UseRaceSocketResult {
   const [raceState, setRaceState] = useState<RaceStateMessage | null>(null)
   const [finished, setFinished] = useState<RaceFinishedMessage | null>(null)
@@ -56,16 +69,28 @@ export function useRaceSocket(
   const [leaving, setLeaving] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
   const [evicted, setEvicted] = useState(false)
+  const [expired, setExpired] = useState(false)
 
   const wsRef = useRef<WebSocket | null>(null)
-  // Mirrors of the `finished`/`leaving` state, readable synchronously from
-  // inside onclose — a closure created earlier by the same effect run can't
-  // see a state update from onmessage/leaveRace in the same tick, so a
-  // plain state read here would be stale.
+  // Mirrors of the `finished`/`leaving`/`expired` state, readable
+  // synchronously from inside onclose — a closure created earlier by the
+  // same effect run can't see a state update from onmessage/leaveRace in
+  // the same tick, so a plain state read here would be stale.
   const finishedRef = useRef(false)
   const leavingRef = useRef(false)
+  const expiredRef = useRef(false)
   const attemptRef = useRef(0)
   const reconnectTimerRef = useRef<number | null>(null)
+
+  // "Latest" refs for the two optional callbacks, updated on every render
+  // without being effect dependencies — including them in the connection
+  // effect's dependency array would reconnect the socket every time a
+  // parent re-render happens to recreate an inline callback (onRefresh in
+  // particular is a fresh arrow function on every RaceDetailPage render).
+  const onRaceStartedRef = useRef(onRaceStarted)
+  onRaceStartedRef.current = onRaceStarted
+  const onRefreshRef = useRef(onRefresh)
+  onRefreshRef.current = onRefresh
 
   useEffect(() => {
     if (!raceId || !sessionToken) return
@@ -78,8 +103,10 @@ export function useRaceSocket(
     setLeaving(false)
     setReconnecting(false)
     setEvicted(false)
+    setExpired(false)
     finishedRef.current = false
     leavingRef.current = false
+    expiredRef.current = false
     attemptRef.current = 0
 
     // `stopped` is a plain closure variable scoped to *this* effect
@@ -111,6 +138,14 @@ export function useRaceSocket(
           finishedRef.current = true
           setFinished(msg as RaceFinishedMessage)
           ws.close()
+        } else if (msg.type === "race_started") {
+          const started = msg as RaceStartedMessage
+          onRaceStartedRef.current?.(started.prompt_text)
+          onRefreshRef.current?.()
+        } else if (msg.type === "race_expired") {
+          expiredRef.current = true
+          setExpired(true)
+          ws.close()
         }
       }
 
@@ -128,9 +163,9 @@ export function useRaceSocket(
           wsRef.current = null
         }
 
-        // Intentional close — race finished, the player quit, or this
-        // effect is tearing down — none of those deserve a reconnect.
-        if (stopped || finishedRef.current || leavingRef.current) {
+        // Intentional close — race finished, expired, the player quit, or
+        // this effect is tearing down — none of those deserve a reconnect.
+        if (stopped || finishedRef.current || leavingRef.current || expiredRef.current) {
           return
         }
 
@@ -192,6 +227,7 @@ export function useRaceSocket(
     leaving,
     reconnecting,
     evicted,
+    expired,
     sendTelemetry,
     leaveRace,
   }

@@ -28,10 +28,6 @@ export interface GetRaceTextResponse {
   prompt_text: string
 }
 
-export interface LeaveRaceResponse {
-  race_id: string
-}
-
 export interface Participant {
   user_id: string
   display_name: string
@@ -45,6 +41,9 @@ export interface RaceStatusResponse {
   status: string
   created_by: string
   participants: Participant[]
+  // null once the race is no longer pending (active, finished, or
+  // cancelled) — mirrors pending-expiry.md's "nil means N/A" convention.
+  pending_expires_at: string | null
 }
 
 // Mirrors backend/internal/room's outbound WebSocket messages
@@ -76,4 +75,18 @@ export interface RaceResultJSON {
 export interface RaceFinishedMessage {
   type: "race_finished"
   results: RaceResultJSON[]
+}
+
+// Broadcast the instant a room goes active (race-started-broadcast.md),
+// reaching every connection already attached to the pending lobby.
+export interface RaceStartedMessage {
+  type: "race_started"
+  prompt_text: string
+}
+
+// Broadcast when a pending room's lifetime runs out without the race
+// starting (race-expired-broadcast.md) — no payload beyond the type
+// discriminator, mirroring the backend's own message shape.
+export interface RaceExpiredMessage {
+  type: "race_expired"
 }

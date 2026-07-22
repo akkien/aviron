@@ -1,24 +1,57 @@
-# Current Feature
+# Current Feature: Live Lobby (Frontend)
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- `useRaceSocket` opens the instant a `session_token` exists, no longer gated on `raceDetail.status === "active"` — every player holds a live connection from the moment they land on `/races/:raceId`, pending or active. This one line is the structural fix the whole phase exists for.
+- `race_started` (received by anyone already connected) sets `promptText` immediately and flips the sidebar to the active view — without a second `GET /races/{id}/text` round-trip.
+- `race_expired` (received by anyone still connected when a pending room's lifetime runs out) shows a distinct terminal message and auto-redirects to `/races`, reusing the existing `onLeftRace` pattern — the same treatment `leaving` already gets.
+- The pending-expiry countdown (`pending_expires_at`) renders for **every** player in the lobby, not just the creator — resolved via direct question, following the spec's own recommended leaning: only the creator can prevent expiry, but a countdown only they can see would make the room's disappearance look unexplained to everyone else, exactly the "silent death" problem this phase exists to avoid.
+- The pending lobby's "Refresh" button is **removed entirely** — resolved via direct question, following the spec's own recommended leaning: both things it manually worked around (new joiners, race start) now arrive live.
+- The pending "Leave" button unifies onto the same `leaveRace()` the active "Quit Race" button already calls — `POST /races/{id}/leave` doesn't exist anymore (removed by `pending-connections.md`), so `handleLeavePending`'s REST call and the now-dead `LeaveRaceResponse` type go away.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **Confirmed live: `useRaceSocket.ts`'s `ws.onmessage` only handles `race_state`/`race_finished` today** — neither `race_started` nor `race_expired` exist anywhere in the frontend yet, exactly as the spec assumes.
+- **Confirmed live: `types/race.ts`'s `RaceStatusResponse` has no `pending_expires_at` field** — the backend (`pending-expiry.md`) has shipped it for a while now, but the frontend type was never updated to match. This is a real, standing drift this feature closes, not something new.
+- **A design question the spec left as "an implementation detail for `start`" is resolved here, not deferred further**: how does an already-connected *non-creator* pending player learn the race went active? `RaceScreenSidebar`'s top-level dispatch still branches on `raceDetail.status === "pending"` — a plain REST snapshot that nothing currently re-fetches except an explicit `onRefresh()` call. Today only the creator's own `handleStart` calls `onRefresh()`, so every *other* pending player's `raceDetail.status` would stay stuck on `"pending"` forever once `useRaceSocket` no longer polls anything. Resolved by having `race_started`'s handler call the *same* `onRefresh` callback `RaceScreen` already threads down (today only invoked from `handleStart`) — reusing the existing REST re-fetch mechanism for every connected client uniformly, rather than introducing a new "am I active" field that would have to be reconciled with `raceDetail.status` anyway. `handleStart`'s own explicit `onRefresh()` call is left untouched (harmless, and not what either open question was about) — the creator is also a connected client and will *additionally* receive their own `race_started` broadcast, so the two paths simply overlap rather than conflict.
+- **Confirmed via reading `RaceDetailPage.tsx`: `onStarted` and `onPromptTextFetched` are already literally the same function (`setPromptText`) passed under two prop names** — so wiring `race_started` to call the existing `onStarted` prop (threaded into the hook) requires zero changes to `RaceDetailPage.tsx` itself; the plumbing already exists end-to-end.
+- **Confirmed via reading the dispatch order in `RaceScreenSidebar.tsx`**: `pending` is checked *before* `leaving`/`evicted`/the existing `cancelled` branch. This means clicking pending "Leave" won't visibly render an intermediate "leaving" state before the pending view re-renders once — but `RaceScreen.tsx`'s existing `useEffect` on `leaving` already navigates away via `onLeftRace()` on the very next tick regardless, the same way the mid-race "Quit Race" button already behaves today. Not reordering the dispatch chain for this — matches the spec's own "no new pattern beyond what's described" scope note, and mirrors an already-accepted existing behavior rather than introducing a new one.
+- **`race_expired`'s auto-redirect is a deliberate asymmetry with the already-shipped `cancelled` cold-visit state, confirmed from the spec text itself, not an oversight**: a cold visitor to an already-`cancelled` race (`cancelled-race-status.md`) sees a static message with no navigation, matching `evicted`'s existing no-auto-redirect precedent. `race_expired` is different — the spec explicitly calls for reusing "this project's existing redirect-on-quit pattern (`onLeftRace`)" for it, since it's the live, already-connected case, not the cold-REST-visit one. Both are correct for their own scenario; they're not meant to look identical.
+- **The countdown's "creator-only visual emphasis on top" idea from the spec is intentionally not built here** — the resolved decision was "everyone sees it," and the creator-only emphasis was explicitly framed as an optional nice-to-have ("a reasonable middle ground"), not a requirement. Flagged so it isn't mistaken for a dropped requirement later.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`frontend/src/types/race.ts`**:
+   - `RaceStatusResponse` gains `pending_expires_at: string | null`.
+   - New `RaceStartedMessage { type: "race_started"; prompt_text: string }` and `RaceExpiredMessage { type: "race_expired" }`, mirroring the backend's wire shapes exactly.
+   - Remove `LeaveRaceResponse` (dead code — `POST /races/{id}/leave` no longer exists).
+2. **`frontend/src/hooks/useRaceSocket.ts`**:
+   - Gains two new callback params (exact signature — separate params vs. one options object — is an implementation detail for `start`): one called on `race_started` with the prompt text (wired to `RaceScreen`'s existing `onStarted`), one called to trigger a REST re-fetch (wired to `RaceScreen`'s existing `onRefresh`).
+   - `ws.onmessage` gains `race_started` (call the prompt-text callback, call the refresh callback) and `race_expired` (`expiredRef.current = true`, `setExpired(true)`, `ws.close()`) cases.
+   - New `expired` boolean state + `expiredRef` (mirrors the existing `finishedRef` pattern) — added to `onclose`'s reconnect bail-out condition (`stopped || finishedRef.current || leavingRef.current || expiredRef.current`) alongside the existing guards.
+   - Returned result gains `expired: boolean`.
+3. **`frontend/src/components/race-screen/RaceScreen.tsx`**:
+   - `useRaceSocket(raceId, isActive ? sessionToken : null)` → `useRaceSocket(raceId, sessionToken, onStarted, onRefresh)` — the `isActive` gate is removed from this call only; the variable itself stays, still gating the existing `GET /races/{id}/text` fallback effect exactly as today.
+   - New `useEffect` on `expired` calling `onLeftRace()`, mirroring the existing `leaving` effect exactly.
+   - `expired` threaded down to `RaceScreenSidebar` as a new prop.
+4. **`frontend/src/components/race-screen/RaceScreenSidebar.tsx`**:
+   - Remove the `LeaveRaceResponse` import, `handleLeavePending`, and the `leavingPending` state — the pending view's "Leave" button's `onClick` becomes `leaveRace` directly (same prop the active "Quit Race" button already uses), label stays static "Leave" (no loading text, matching "Quit Race"'s own lack of one).
+   - Remove the "Refresh" button from the pending view's participants-list header; keep the "Players (N)" label.
+   - Add a live countdown (ticking every second, `useEffect`/`setInterval`, `mm:ss` remaining) computed from `raceDetail.pending_expires_at`, rendered in the pending view for every player.
+   - New `expired` prop; add an `if (expired) return <terminal message>` branch alongside the existing `leaving`/`evicted` checks, before the existing `raceDetail.status === "cancelled"` branch — distinct wording from that branch's message, per the spec: "This race wasn't started in time and has been closed."
+5. **Verify**: `yarn build`/`yarn lint` (no live browser test available in this environment, same disclosed limitation as every prior frontend feature) — no backend changes, so no Go verification needed.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on every backend spec in this phase (`early-spawn.md`, `pending-connections.md`, `race-started-broadcast.md`, `pending-expiry.md`, `race-expired-broadcast.md`, `cancelled-race-status.md`) — all done. This spec has no backend work of its own.
+- Full spec: `context/features/phase2.6/frontend/live-lobby.md`.
+- No change to `TypingBox.tsx`, `RaceTrack.tsx`, or any rendering logic beyond what's described above, per the spec's own scope note.
+- **Last of seven Phase 2.6 specs** — completing this closes out the entire phase.
+- Two open questions the spec flagged for `load` were resolved by direct question rather than silently assumed, per this project's established pattern for genuine UX preference calls: countdown visibility (everyone, not creator-only) and the Refresh button (removed, not kept as a fallback). Both followed the spec's own stated recommendation.
 
 ## History
 
