@@ -25,7 +25,7 @@ This project simulates that "workout telemetry" signal with a **typing race** ra
 - Sync race position across multiple clients in a room, ticking at a fixed interval (e.g. 250ms) — position is driven by words typed correctly in a shared typing race (§13), not real fitness telemetry
 - Reconnect handling: a client that drops still rejoins the correct race instead of being treated as "quit" immediately
 - Persist race results + workout history in PostgreSQL
-- Basic leaderboard (all-time, per-race) queried from Postgres first, later upgraded via ClickHouse
+- Per-user all-time stats (races joined, races won, avg WPM), queried from Postgres, backing the dashboard's own stat cards
 - Horizontal scaling: run ≥2 Go instances, use Redis pub/sub to sync room state cross-instance
 - Observability: structured logs, Prometheus metrics, optionally OpenTelemetry tracing
 - Testing: unit tests for logic, `go test -race` for concurrency, load testing with k6/ghz
@@ -234,7 +234,8 @@ Things worth practicing here because they connect directly to the spirit of the 
 - `POST /races/{id}/start` — creator starts the race: generates the shared typing-race prompt text, flips status to `active` (§13)
 - `GET /races/{id}/text` — fetch the race's already-generated prompt text (for players joining after start, or reconnecting)
 - `GET /races/{id}` — status/results
-- `GET /leaderboard?window=alltime|weekly`
+- `GET /races` — browse open (pending, joinable) races
+- `GET /leaderboard/me` — the caller's own all-time stats (races joined, races won, avg WPM)
 
 **WebSocket:** `GET /ws?race_id=...&session_token=...`
 

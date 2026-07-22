@@ -31,6 +31,6 @@ Phase 1 (context/project-overview.md §12) delivers the REST + Postgres foundati
 
 - WebSocket, the room actor, live race sync (Phase 2)
 - Reconnection / grace period (Phase 2 — depends on the WebSocket connection existing at all)
-- `GET /leaderboard` — meaningless until races can actually finish, which needs Phase 2's race-completion logic; revisit once that lands
+- Leaderboard/stats endpoints — meaningless until races can actually finish, which needs Phase 2's race-completion logic
 - Redis, Kafka, Kubernetes (Phase 4)
 - Race status ever reaching `finished` (ranking, finish times) — that still depends on Phase 2's live progress tracking. `pending` → `active` **is** in scope now, via `races/start-race.md`'s REST-only `POST /races/{id}/start` — this is a change from the original plan, which assumed status only ever moved via Phase 2's room actor.

@@ -30,5 +30,4 @@ Three scope decisions were made with the user before/while writing these specs, 
 - A real `GET /races` browsable-list endpoint — `dashboard.md`'s Open Races list stays hardcoded/decorative.
 - A real synced vehicle field — stays purely cosmetic/client-side per the decision above.
 - The Avg Accuracy stat — dropped, not deferred; would require a new self-reported client metric that was explicitly declined.
-- The full ranked/windowed `GET /leaderboard?window=alltime|weekly` from `project-overview.md`'s original API surface — `user-stats.md` only builds `GET /leaderboard/me` (the caller's own stats), not a public ranked list.
 - Redesigning `LoginPage.tsx` beyond applying the new theme tokens (no mockup was provided for it).

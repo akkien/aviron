@@ -31,9 +31,9 @@ Unlike the rest of Phase 2.5, this is primarily a **backend** spec (new migratio
 
 ### New endpoint: `GET /leaderboard/me`
 
-- New domain package `internal/leaderboard` (not bolted onto `internal/race` — `leaderboard_alltime` is conceptually its own domain, and `project-overview.md`'s API surface already reserves `GET /leaderboard?window=...` as a distinct future endpoint; nesting this under the same path prefix keeps them composable later without a rename). Follows the standard Handler/Service/Repository layering (`coding-standards.md`) like every other REST domain in this codebase — `LeaderboardHandler`/`LeaderboardService`/`LeaderboardRepository`, `NewLeaderboardHandler`/`NewLeaderboardService`, a `postgres.LeaderboardRepository` implementation.
+- New domain package `internal/leaderboard` (not bolted onto `internal/race` — `leaderboard_alltime` is conceptually its own domain). Follows the standard Handler/Service/Repository layering (`coding-standards.md`) like every other REST domain in this codebase — `LeaderboardHandler`/`LeaderboardService`/`LeaderboardRepository`, `NewLeaderboardHandler`/`NewLeaderboardService`, a `postgres.LeaderboardRepository` implementation.
 - `GET /leaderboard/me` (authenticated, wrapped in `middleware.Auth` like every other real endpoint): returns the caller's own `{races_joined, races_won, avg_wpm}` — a single-row lookup (`SELECT total_races, total_wins, total_pace_watt_sum FROM leaderboard_alltime WHERE user_id = $1`, dividing `total_pace_watt_sum / total_races` in Go, guarding the zero-races divide). A user with no `leaderboard_alltime` row yet (never finished a race) gets all-zero stats, not a 404 — this is a normal, expected state for a new account, not an error.
-- Deliberately **not** the full ranked/windowed `GET /leaderboard?window=alltime|weekly` from `project-overview.md`'s original API surface — that's a public ranked list across all users, a materially bigger feature (pagination, time windowing) that stays out of scope here. This spec only covers "my own stats for my own dashboard."
+- This is the only leaderboard endpoint this project has — a public ranked/windowed list across all users was considered and explicitly dropped, not deferred; per-user stats for one's own dashboard is the whole scope.
 
 ### Frontend wiring
 
@@ -67,5 +67,4 @@ ALTER TABLE leaderboard_alltime ADD COLUMN total_pace_watt_sum NUMERIC NOT NULL 
 - Depends on `dashboard.md`'s `StatCards.tsx` existing (this spec replaces its hardcoded data source, doesn't build the component from scratch).
 - Depends on `race-completion/finish-race.md` (done) — extends its existing `FinishRace` transaction rather than adding a new write path.
 - Closes a real, previously-disclosed gap (`AvgPaceWatt` always `0.0`) as a side effect, not just new work — worth calling out at `complete` since it fixes something flagged as a known limitation in an earlier feature's History entry.
-- `GET /leaderboard?window=alltime|weekly` (the full ranked leaderboard from `project-overview.md`'s original API surface) is still not built — this spec deliberately only covers the caller's own stats, not a ranked list. Future work, not redefined here.
 - No changes to `dashboard.md`'s `OpenRacesList.tsx` — that stays hardcoded/decorative; this spec is scoped to "statistic" per the explicit request, not the open-races list.

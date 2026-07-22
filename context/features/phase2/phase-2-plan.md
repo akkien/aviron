@@ -36,6 +36,6 @@ Phase 2 (context/project-overview.md §12) turns the REST-only typing race from 
 
 - Redis pub/sub, the room-ownership registry, and anything about running ≥2 instances (Phase 4, context/project-overview.md §5) — Phase 2 is single-instance; a room actor only ever needs to coordinate goroutines within one process
 - Kafka event pipeline (`workout.sample`, `race.finished` topics) and the ClickHouse consumer (Phase 4, §6) — Race Completion still writes the finish transaction to Postgres directly, per §2 step 4, but does not publish anything
-- `GET /leaderboard` — `leaderboard_alltime` gets written to as part of Race Completion's finish transaction, but no endpoint reads it yet; that's Phase 3/4 territory once there's enough finished-race data to make a leaderboard meaningful
+- A leaderboard/stats endpoint — `leaderboard_alltime` gets written to as part of Race Completion's finish transaction, but no endpoint reads it yet; that's Phase 2.5 territory once there's enough finished-race data to make it meaningful
 - Kubernetes, Prometheus metrics, structured logging, `pprof` (Phase 3, §9) — Phase 2 is about correctness and concurrency safety first; observability instrumentation comes once the real-time core is stable
 - gRPC between Race Service and a separate Analytics/Leaderboard service (§8) — no second service exists yet to talk to

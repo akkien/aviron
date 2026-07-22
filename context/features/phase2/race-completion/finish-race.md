@@ -57,4 +57,4 @@ type ParticipantResult struct {
 
 - The Kafka emission described alongside this step in context/project-overview.md §2 ("...and emits an event to Kafka/NATS") is explicitly **out of scope** here — that's Phase 4 (§6). This spec only covers the Postgres transaction.
 - `GET /races/{id}` (Phase 1's Race Status endpoint) already returns whatever `status` the race is in — once this feature lands, `status: "finished"` becomes a real, reachable value instead of theoretical.
-- `GET /leaderboard` is still out of scope (Phase 3/4) — this spec only writes to `leaderboard_alltime`, it doesn't add anything that reads from it.
+- No endpoint reads `leaderboard_alltime` yet — this spec only writes to it (Phase 2.5's `user-stats/user-stats.md` is what eventually adds `GET /leaderboard/me`).
