@@ -51,8 +51,11 @@ type RoomActor struct {
 	// while still connected. Used as the shared rank for anyone who leaves
 	// without finishing.
 	totalParticipants int
-	promptText        string
 	distanceMeters    int
+	// active is true once the race has actually started (MarkActive) — lets
+	// checkRaceFinished tell "never started" apart from "started, then
+	// emptied out" (see there).
+	active bool
 	tickCount         int64
 	inbox             chan RoomEvent
 	broadcast         chan []byte
@@ -82,18 +85,19 @@ type RoomActor struct {
 	finishedCount int
 }
 
-// NewRoomActor constructs a room actor for race id, seeded with the already
-// generated promptText/distanceMeters from the race row. Call go actor.Run()
+// NewRoomActor constructs a room actor for race id, seeded with the race
+// row's distanceMeters. A room actor exists for a race's entire lifetime,
+// spawned at creation, before prompt_text exists — see MarkActive for how
+// the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id, promptText string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
 		participants:         make(map[string]*ParticipantState),
 		evicted:              make(map[string]struct{}),
 		departedParticipants: make(map[string]*ParticipantState),
-		promptText:           promptText,
 		distanceMeters:       distanceMeters,
 		inbox:                make(chan RoomEvent, 64), // generous buffer: a burst of telemetry must not block reader goroutines
 		broadcast:            broadcast,
@@ -169,6 +173,21 @@ func (r *RoomActor) IsEvicted(userID string) bool {
 	case <-r.ctx.Done():
 		return false
 	}
+}
+
+// activated carries no data — MarkActive is the only place that sends it,
+// and there's nothing for applyEvent to do beyond setting r.active.
+// Event-through-inbox rather than MarkActive mutating r.active directly,
+// consistent with every other piece of room state (room-actor-core.md's
+// single-writer principle).
+type activated struct{}
+
+func (activated) isRoomEvent() {}
+
+// MarkActive tells the room actor its race has started. Called by
+// RaceHandler.Start once RaceService.StartRace succeeds.
+func (r *RoomActor) MarkActive() {
+	r.Send(activated{})
 }
 
 // Run is the room actor's single-writer loop: participants is only ever
@@ -294,6 +313,8 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		// A no-op if anyone has joined by now — checkRaceFinished only acts
 		// when participants is empty or everyone remaining has finished.
 		r.checkRaceFinished()
+	case activated:
+		r.active = true
 	}
 }
 
@@ -333,6 +354,17 @@ func (r *RoomActor) checkRaceFinished() {
 		if p.FinishRank == nil {
 			return // still someone connected-and-racing or in their grace period
 		}
+	}
+
+	if !r.active {
+		// The room emptied out (or nobody ever showed up, noShowTimeout)
+		// without the race ever actually starting — there's no real race
+		// to persist: no started_at, no participant who actually raced.
+		// Tear down with zero Postgres writes rather than calling
+		// finisher.FinishRace with an empty or meaningless result set.
+		r.finished = true
+		r.cancel()
+		return
 	}
 
 	results := make([]ParticipantResult, 0, len(r.participants)+len(r.departedParticipants))

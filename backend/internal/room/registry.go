@@ -27,18 +27,17 @@ func NewRegistry() *Registry {
 }
 
 // Spawn constructs a RoomActor for raceID seeded with the race's
-// already-generated promptText/distanceMeters, registers it, and starts its
-// Run loop. ctx should outlive the caller (e.g. the process's root context),
-// not a per-request context, since the room actor must keep running after
-// the request that triggered the spawn has returned. finisher persists
-// results once the race completes (race-completion/finish-race.md) —
-// typically the concrete *race.RaceService, passed in by the caller
-// (RaceHandler.Start already holds it) rather than threaded through this
-// Registry's own construction, to avoid reordering how internal/app.go
-// wires the composition root.
-func (reg *Registry) Spawn(ctx context.Context, raceID, promptText string, distanceMeters int, finisher RaceFinisher) *RoomActor {
+// distanceMeters, registers it, and starts its Run loop. ctx should outlive
+// the caller (e.g. the process's root context), not a per-request context,
+// since the room actor must keep running after the request that triggered
+// the spawn has returned. finisher persists results once the race completes
+// (race-completion/finish-race.md) — typically the concrete
+// *race.RaceService, passed in by the caller rather than threaded through
+// this Registry's own construction, to avoid reordering how
+// internal/app.go wires the composition root.
+func (reg *Registry) Spawn(ctx context.Context, raceID string, distanceMeters int, finisher RaceFinisher) *RoomActor {
 	broadcast := make(chan []byte, broadcastBufferSize)
-	actor := NewRoomActor(ctx, raceID, promptText, distanceMeters, broadcast, finisher)
+	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher)
 
 	reg.mu.Lock()
 	reg.rooms[raceID] = actor
