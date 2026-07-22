@@ -49,4 +49,8 @@ type raceStatusResponse struct {
 	Status         string                `json:"status"`
 	CreatedBy      string                `json:"created_by"`
 	Participants   []participantResponse `json:"participants"`
+	// PendingExpiresAt is nil once the race is no longer pending (active,
+	// finished, or cancelled) — there's no expiry concept once a race has
+	// actually started (room-lifecycle/pending-expiry.md).
+	PendingExpiresAt *string `json:"pending_expires_at"`
 }

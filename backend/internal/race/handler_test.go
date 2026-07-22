@@ -492,6 +492,62 @@ func TestRaceHandler_Status_OK(t *testing.T) {
 	}
 }
 
+func TestRaceHandler_Status_PendingRaceIncludesPendingExpiresAt(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, secret)
+	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	raceID := createTestRace(t, secret, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID, nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-1"))
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Status)).ServeHTTP(rec, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	raw, ok := resp["pending_expires_at"].(string)
+	if !ok {
+		t.Fatalf("pending_expires_at missing or not a string: %v", resp)
+	}
+	got, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("pending_expires_at not RFC3339: %v", err)
+	}
+	want := repo.races[0].CreatedAt.Add(room.PendingTimeoutDuration)
+	if diff := got.Sub(want); diff < -time.Second || diff > time.Second {
+		t.Errorf("pending_expires_at = %v, want ~%v (created_at + PendingTimeoutDuration)", got, want)
+	}
+}
+
+func TestRaceHandler_Status_ActiveRaceOmitsPendingExpiresAt(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, secret)
+	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	raceID := createTestRace(t, secret, h)
+	repo.races[0].Status = "active"
+
+	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID, nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-1"))
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Status)).ServeHTTP(rec, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp["pending_expires_at"] != nil {
+		t.Errorf("pending_expires_at = %v, want nil for an active race", resp["pending_expires_at"])
+	}
+}
+
 func TestRaceHandler_Status_NotFound(t *testing.T) {
 	secret := []byte("test-secret")
 	h := newTestHandler()

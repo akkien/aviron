@@ -98,6 +98,15 @@ PendingExpiresAt *string `json:"pending_expires_at"`
 - `websocket/race-expired-broadcast.md` covers the actual message this
   sends before tearing down — this spec only covers the timer and teardown
   decision.
+- **Superseded in one respect**: this spec's "zero Postgres writes" framing
+  (Teardown condition, above) turned out to be incomplete — it correctly
+  means no `race_participants`/`leaderboard_alltime` writes, but leaving
+  `races.status` on `'pending'` forever was a real gap (a room whose actor
+  is gone could still be joined via REST, and a fresh visitor saw no
+  indication the race was dead). `room-lifecycle/cancelled-race-status.md`
+  closes that gap by having `expirePendingRoom()` persist
+  `races.status = 'cancelled'` before broadcasting/tearing down — read that
+  spec for the actual current behavior of this teardown path.
 - `go test -race` mandatory, same bar as every other `internal/room` spec
   — in particular, a test proving `pendingExpired` is a genuine no-op once
   status has already flipped to `roomActive` (the timer firing concurrently

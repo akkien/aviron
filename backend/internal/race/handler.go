@@ -284,12 +284,19 @@ func (h *RaceHandler) Status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var pendingExpiresAt *string
+	if detail.Status == "pending" {
+		formatted := detail.CreatedAt.Add(room.PendingTimeoutDuration).Format(time.RFC3339)
+		pendingExpiresAt = &formatted
+	}
+
 	httpx.WriteJSON(w, http.StatusOK, raceStatusResponse{
-		ID:             detail.ID,
-		Name:           detail.Name,
-		DistanceMeters: detail.DistanceMeters,
-		Status:         detail.Status,
-		CreatedBy:      detail.CreatedBy,
-		Participants:   participants,
+		ID:               detail.ID,
+		Name:             detail.Name,
+		DistanceMeters:   detail.DistanceMeters,
+		Status:           detail.Status,
+		CreatedBy:        detail.CreatedBy,
+		Participants:     participants,
+		PendingExpiresAt: pendingExpiresAt,
 	})
 }
