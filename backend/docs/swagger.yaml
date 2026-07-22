@@ -32,6 +32,15 @@ definitions:
       id:
         type: string
     type: object
+  internal_leaderboard.LeaderboardMeResponse:
+    properties:
+      avg_wpm:
+        type: number
+      races_joined:
+        type: integer
+      races_won:
+        type: integer
+    type: object
   internal_race.createRaceRequest:
     properties:
       distance_meters:
@@ -215,6 +224,26 @@ paths:
       summary: Health check
       tags:
       - system
+  /leaderboard/me:
+    get:
+      description: Returns the caller's own races-joined/races-won/avg-WPM stats.
+        An account with no finished races yet gets all-zero stats, not a 404.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_leaderboard.LeaderboardMeResponse'
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get my leaderboard stats
+      tags:
+      - leaderboard
   /races:
     post:
       consumes:

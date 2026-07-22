@@ -15,10 +15,16 @@ import (
 var gracePeriodDuration = 30 * time.Second
 
 type ParticipantState struct {
-	UserID            string
-	DisplayName       string
-	WordsCorrect      int
-	LastSeq           int
+	UserID       string
+	DisplayName  string
+	WordsCorrect int
+	LastSeq      int
+	// PaceWatt is the latest self-reported average WPM (project-overview.md
+	// §13 — "pace_watt" is a holdover field name from the original
+	// fitness-telemetry design), updated on every TelemetryReceived. Since
+	// the client computes it as a cumulative average from race start, the
+	// value at finish time already is the participant's final average WPM.
+	PaceWatt          float64
 	ConnectedAt       time.Time
 	DisconnectedAt    *time.Time
 	DisconnectedCount int
@@ -270,6 +276,7 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		}
 		p.WordsCorrect = e.WordsCorrect
 		p.LastSeq = e.Seq
+		p.PaceWatt = e.PaceWatt
 		if p.FinishRank == nil && p.WordsCorrect >= r.distanceMeters {
 			// race-completion/finish-race.md: a participant individually
 			// "finishes" the moment they reach the target, in finishing
@@ -509,11 +516,10 @@ func (r *RoomActor) buildParticipantResult(p *ParticipantState) ParticipantResul
 		UserID:       p.UserID,
 		FinishRank:   rank,
 		FinishTimeMs: finishTimeMs,
-		// AvgPaceWatt: no per-tick pace tracking exists anywhere in this
-		// codebase yet (internal/ws's ClientMessage.PaceWatt is decoded
-		// but never forwarded into TelemetryReceived) — left at the zero
-		// value rather than building that infrastructure as a side
-		// effect of this feature.
+		// p.PaceWatt is the client's own cumulative-average WPM as of its
+		// last telemetry message, which for a finisher is also their final
+		// average WPM for the whole race (see ParticipantState.PaceWatt).
+		AvgPaceWatt:       p.PaceWatt,
 		DisconnectedCount: p.DisconnectedCount,
 	}
 }

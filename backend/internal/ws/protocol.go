@@ -55,7 +55,7 @@ func (m ClientMessage) toRoomEvent(userID, displayName string) (room.RoomEvent, 
 	case "join_race":
 		return room.ParticipantJoined{UserID: userID, DisplayName: displayName}, nil
 	case "telemetry":
-		return room.TelemetryReceived{UserID: userID, Seq: m.Seq, WordsCorrect: int(m.DistanceM)}, nil
+		return room.TelemetryReceived{UserID: userID, Seq: m.Seq, WordsCorrect: int(m.DistanceM), PaceWatt: m.PaceWatt}, nil
 	case "leave_race":
 		return room.ParticipantLeft{UserID: userID}, nil
 	default:

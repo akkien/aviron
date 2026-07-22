@@ -140,6 +140,35 @@ const docTemplate = `{
                 }
             }
         },
+        "/leaderboard/me": {
+            "get": {
+                "description": "Returns the caller's own races-joined/races-won/avg-WPM stats. An account with no finished races yet gets all-zero stats, not a 404.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "leaderboard"
+                ],
+                "summary": "Get my leaderboard stats",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_leaderboard.LeaderboardMeResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "error: unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/races": {
             "post": {
                 "description": "Creates a new typing race with a name and target word count",
@@ -499,6 +528,20 @@ const docTemplate = `{
                 },
                 "id": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_leaderboard.LeaderboardMeResponse": {
+            "type": "object",
+            "properties": {
+                "avg_wpm": {
+                    "type": "number"
+                },
+                "races_joined": {
+                    "type": "integer"
+                },
+                "races_won": {
+                    "type": "integer"
                 }
             }
         },

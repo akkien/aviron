@@ -6,6 +6,7 @@ import (
 
 	"github.com/akkien/aviron/internal/auth"
 	"github.com/akkien/aviron/internal/config"
+	"github.com/akkien/aviron/internal/leaderboard"
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/postgres"
 	"github.com/akkien/aviron/internal/race"
@@ -37,6 +38,12 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	server.Handle("POST /races/{id}/start", requireAuth(http.HandlerFunc(raceHandler.Start)))
 	server.Handle("GET /races/{id}/text", requireAuth(http.HandlerFunc(raceHandler.Text)))
 	server.Handle("GET /races/{id}", requireAuth(http.HandlerFunc(raceHandler.Status)))
+
+	leaderboardRepo := postgres.NewLeaderboardRepository(pool)
+	leaderboardSvc := leaderboard.NewLeaderboardService(leaderboardRepo)
+	leaderboardHandler := leaderboard.NewLeaderboardHandler(leaderboardSvc)
+
+	server.Handle("GET /leaderboard/me", requireAuth(http.HandlerFunc(leaderboardHandler.Me)))
 
 	// Not wrapped in requireAuth: this endpoint authenticates via the
 	// query-string session_token (websocket/ws-endpoint.md), not the

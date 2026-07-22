@@ -1,24 +1,67 @@
-# Current Feature
+# Current Feature: User Stats (Backend for Dashboard Stat Cards)
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- `StatCards.tsx`'s 3 cards (Races Joined, Races Won, Avg WPM) show real per-user data instead of the hardcoded `STATS` constant.
+- Fix the disclosed `AvgPaceWatt` gap: `race_participants.avg_pace_watt` (and the new `leaderboard_alltime` running sum) actually get the participant's latest reported WPM instead of always `0.0`.
+- New `GET /leaderboard/me` (authenticated) returns the caller's own `{races_joined, races_won, avg_wpm}`, all-zero (not 404) for a user with no `leaderboard_alltime` row yet.
+- `leaderboard_alltime.total_wins` is incrementally maintained in the same `FinishRace` transaction that already maintains `total_races`/`total_distance_m`.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- `dashboard.md` shipped `StatCards.tsx` with hardcoded values, explicitly flagged as a placeholder for this spec.
+- Races Joined needs no backend change — `leaderboard_alltime.total_races` is already incremented in `RaceRepository.FinishRace`'s transaction (confirmed: `internal/postgres/race_repository.go:251`). Known nuance (not fixed here): only counts races where the participant actually opened the WebSocket, not just `POST /races/{id}/join`.
+- Races Won is a new column (`total_wins`), incremented in the same upsert using the same pattern `total_distance_m` already uses.
+- Avg WPM fixes a real, already-disclosed gap. Confirmed by reading the code directly: `internal/room/room.go:512-516`'s `buildParticipantResult` comment states `AvgPaceWatt` is left at zero because `internal/ws`'s `ClientMessage.PaceWatt` (`internal/ws/protocol.go:23`) is decoded off the wire but never forwarded — `toRoomEvent`'s `telemetry` case (`internal/ws/protocol.go:57-58`) only passes `Seq`/`WordsCorrect` into `TelemetryReceived`, dropping `PaceWatt` on the floor. `TelemetryReceived` itself (`internal/room/events.go:16-21`) has no `PaceWatt` field to receive it. The frontend already computes and sends a cumulative-average WPM per telemetry message (`frontend-realtime/websocket-client.md`), so the fix is pure wiring — no new averaging logic.
+- `GET /leaderboard/me` is a new domain package (`internal/leaderboard`), not bolted onto `internal/race`, following this project's standard Handler/Service/Repository layering (`coding-standards.md`) — confirmed `internal/race/handler.go`'s `NewRaceHandler(svc, registry, ctx)` and `route.go`'s wiring style as the pattern to match, and `middleware.UserIDFromContext` as the auth-identity accessor every authenticated handler already uses.
+- Frontend: `StatCards.tsx` fetches from `GET /leaderboard/me` via the existing `apiFetch<T>` helper (`frontend/src/lib/api.ts`) instead of reading the hardcoded `STATS` array; a new `LeaderboardMeResponse` type goes in `frontend/src/types/` (confirmed `types/race.ts`'s existing convention of one file per domain, mirroring the Go DTO).
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **Migration** `000004_leaderboard_wins_and_pace` (next number after `000003_shorten_race_id`):
+   - `ALTER TABLE leaderboard_alltime ADD COLUMN total_wins INT NOT NULL DEFAULT 0;`
+   - `ALTER TABLE leaderboard_alltime ADD COLUMN total_pace_watt_sum NUMERIC NOT NULL DEFAULT 0;`
+   - Matching `.down.sql` drops both columns.
+
+2. **`internal/room/events.go`**: add `PaceWatt float64` field to `TelemetryReceived`.
+
+3. **`internal/ws/protocol.go`**: `toRoomEvent`'s `"telemetry"` case forwards `PaceWatt: m.PaceWatt` into the constructed `room.TelemetryReceived`.
+
+4. **`internal/room/room.go`**:
+   - `ParticipantState` gains `PaceWatt float64`.
+   - `applyEvent`'s `TelemetryReceived` case sets `p.PaceWatt = e.PaceWatt` alongside the existing `WordsCorrect`/`LastSeq` updates.
+   - `buildParticipantResult` sets `AvgPaceWatt: p.PaceWatt` instead of the implicit zero value; update/remove the now-stale comment explaining why it was left at zero.
+
+5. **`internal/postgres/race_repository.go`**: extend `FinishRace`'s existing per-participant loop and leaderboard upsert:
+   - Compute `won := res.FinishRank != nil && *res.FinishRank == 1` before the query (simpler than an in-SQL CASE against a value not otherwise passed, per the spec).
+   - Upsert query gains `total_wins = leaderboard_alltime.total_wins + $N` (won as 0/1) and `total_pace_watt_sum = leaderboard_alltime.total_pace_watt_sum + $N` (`res.AvgPaceWatt`), following the exact `total_races`/`total_distance_m` pattern already in the `ON CONFLICT DO UPDATE SET` clause. Initial-insert branch (`VALUES (...)`) also needs the two new columns seeded.
+
+6. **New package `internal/leaderboard`** (Handler/Service/Repository layering, per `coding-standards.md`):
+   - `dtos.go`: `LeaderboardMeResponse{RacesJoined int; RacesWon int; AvgWPM float64}` with the exact JSON tags from the spec.
+   - `repository.go`: `LeaderboardRepository` interface, one method — `GetUserStats(ctx, userID string) (totalRaces, totalWins int, totalPaceWattSum float64, err error)` (or similar shape; final field naming decided at `start`). Returns zero values, not an error, when no row exists (`pgx.ErrNoRows` → treated as all-zero in the service or repository — decide the exact seam at `start`, but the *outcome* must be a 200 with `{0,0,0}`, never a 404).
+   - `service.go`: `LeaderboardService.GetMyStats(ctx, userID) (LeaderboardMeResponse, error)` — divides `total_pace_watt_sum / total_races` in Go, guarding the zero-races case (return `0`, not NaN/Inf).
+   - `handler.go`: `LeaderboardHandler.Me(w, r)` — reads `userID` via `middleware.UserIDFromContext(r.Context())`, calls the service, writes JSON via `internal/httpx`'s existing `WriteJSON`/`WriteError` helpers.
+   - `internal/postgres/leaderboard_repository.go`: `postgres.LeaderboardRepository` implementing the interface — single `SELECT total_races, total_wins, total_pace_watt_sum FROM leaderboard_alltime WHERE user_id = $1`.
+
+7. **`internal/httpserver/route.go`**: wire `leaderboardRepo → leaderboardSvc → leaderboardHandler`, register `server.Handle("GET /leaderboard/me", requireAuth(http.HandlerFunc(leaderboardHandler.Me)))` — matching every other authenticated route's registration style already in this file.
+
+8. **Frontend**:
+   - `frontend/src/types/leaderboard.ts` (new file, mirrors the Go DTO): `LeaderboardMeResponse { races_joined: number; races_won: number; avg_wpm: number }`.
+   - `StatCards.tsx`: replace the hardcoded `STATS` constant with a `useEffect`/`useState` fetch via `apiFetch<LeaderboardMeResponse>("/leaderboard/me")`, following `RaceStatusView`'s existing `raceDetail === null ? "Loading..." : ...` loading-state convention. Keep the same 3-card layout, `valueClassName` color mapping, and `font-heading` styling — only the data source changes.
+
+9. **Swagger**: regenerate via `make docs` after the new endpoint is annotated.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on `dashboard.md`'s `StatCards.tsx` (exists) and `race-completion/finish-race.md`'s `FinishRace` transaction (exists) — both confirmed read directly, not assumed from the spec.
+- `GET /leaderboard?window=alltime|weekly` (the full ranked/public leaderboard) is explicitly out of scope — this is caller-only stats.
+- No changes to `OpenRacesList.tsx` — stays hardcoded/decorative, per the spec.
+- No new client-side validation; server-side just needs the existing `middleware.Auth` 401 behavior, already exercised by every other authenticated route.
+- Worth calling out explicitly at `complete`: this closes a real, previously-disclosed gap (`AvgPaceWatt` always `0.0`) flagged in an earlier feature's History entry (Race Completion, 2026-07-21), not just new work.
 
 ## History
 

@@ -233,14 +233,25 @@ func (r *RaceRepository) FinishRace(ctx context.Context, raceID string, distance
 			return fmt.Errorf("postgres: finish race: update participant %s: %w", res.UserID, err)
 		}
 
+		// won/total_wins and res.AvgPaceWatt/total_pace_watt_sum follow the
+		// exact same "insert this race's contribution, add it to the running
+		// total on conflict" pattern total_distance_m already uses above —
+		// won is computed here rather than in-SQL since a CASE over a value
+		// not otherwise passed to the query would be more indirect for no
+		// benefit (user-stats/user-stats.md).
+		won := 0
+		if res.FinishRank != nil && *res.FinishRank == 1 {
+			won = 1
+		}
+
 		// best_2000m_ms is a holdover name from the original fitness-telemetry
 		// schema (project-overview.md §13) — this project has no fixed-distance
 		// race type, so it's treated simply as "best finish time recorded so
 		// far": kept as-is if this race's result is NULL (didn't finish) or
 		// worse than the existing value, taken fresh if there's no prior value.
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO leaderboard_alltime (user_id, best_2000m_ms, total_races, total_distance_m, updated_at)
-			VALUES ($1, $2, 1, $3, now())
+			INSERT INTO leaderboard_alltime (user_id, best_2000m_ms, total_races, total_distance_m, total_wins, total_pace_watt_sum, updated_at)
+			VALUES ($1, $2, 1, $3, $4, $5, now())
 			ON CONFLICT (user_id) DO UPDATE SET
 				best_2000m_ms = CASE
 					WHEN EXCLUDED.best_2000m_ms IS NULL THEN leaderboard_alltime.best_2000m_ms
@@ -250,8 +261,10 @@ func (r *RaceRepository) FinishRace(ctx context.Context, raceID string, distance
 				END,
 				total_races = leaderboard_alltime.total_races + 1,
 				total_distance_m = leaderboard_alltime.total_distance_m + EXCLUDED.total_distance_m,
+				total_wins = leaderboard_alltime.total_wins + EXCLUDED.total_wins,
+				total_pace_watt_sum = leaderboard_alltime.total_pace_watt_sum + EXCLUDED.total_pace_watt_sum,
 				updated_at = now()
-		`, res.UserID, res.FinishTimeMs, distanceMeters); err != nil {
+		`, res.UserID, res.FinishTimeMs, distanceMeters, won, res.AvgPaceWatt); err != nil {
 			return fmt.Errorf("postgres: finish race: upsert leaderboard for %s: %w", res.UserID, err)
 		}
 	}

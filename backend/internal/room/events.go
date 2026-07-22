@@ -17,6 +17,7 @@ type TelemetryReceived struct {
 	UserID       string
 	Seq          int
 	WordsCorrect int
+	PaceWatt     float64
 }
 
 func (TelemetryReceived) isRoomEvent() {}
