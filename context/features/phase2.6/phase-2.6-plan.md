@@ -65,7 +65,16 @@ mysteriously dies.
    connection that silently dies (exactly the failure mode
    `docs/concurrency.md`'s finish-race bugfix already exists to prevent —
    this reuses that same guarantee, not a new one).
-6. `frontend/live-lobby.md` — open `useRaceSocket` as soon as a session
+6. `room-lifecycle/cancelled-race-status.md` — not originally planned;
+   discovered while checking what a user sees entering a race that stopped
+   before finishing. `pending-expiry.md`'s no-Postgres-write teardown left
+   `races.status` on `'pending'` forever, so `POST /races/{id}/join` kept
+   succeeding into a dead room and `GET /races/{id}` never told a fresh
+   visitor the race was gone. Persists `races.status = 'cancelled'` (a
+   value the schema comment always anticipated, never written) before the
+   room tears down, and gives the frontend a real terminal state instead of
+   a permanent fake "Loading prompt...".
+7. `frontend/live-lobby.md` — open `useRaceSocket` as soon as a session
    token exists, not gated on the race already being active; handle
    `race_started` and `race_expired`; render the pending-expiry countdown;
    reconcile the pending "Leave" button and the now-redundant "Refresh"
@@ -87,7 +96,13 @@ mysteriously dies.
   something server-side deciding to expire before there's anything to
   broadcast) the same way `race-started-broadcast.md` depends on
   `pending-connections.md`.
-- `frontend/live-lobby.md` depends on every backend spec above — it has no
+- `cancelled-race-status.md` depends on `pending-expiry.md` (it wires
+  directly into `expirePendingRoom`) but is independent of
+  `race-expired-broadcast.md` — persisting the status and broadcasting the
+  live message are separate concerns that happen to share a call site, not
+  a sequencing dependency on each other.
+- `frontend/live-lobby.md` depends on every backend spec above, including
+  `cancelled-race-status.md` for its `raceDetail.status` value — it has no
   backend work of its own, it's purely the consumer of what they build.
 
 ## Explicitly out of scope
