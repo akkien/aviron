@@ -44,6 +44,15 @@ type RaceLeaver interface {
 	LeaveRace(ctx context.Context, raceID, userID string) error
 }
 
+// RaceCanceller persists a pending race's cancellation
+// (room-lifecycle/cancelled-race-status.md) — called when a room tears down
+// before ever going active (pending-expiry timeout, no-show timeout, or a
+// pending lobby emptied out by departing participants). Mirrors
+// RaceFinisher/RaceLeaver exactly, for the same import-cycle reason.
+type RaceCanceller interface {
+	CancelRace(ctx context.Context, raceID string) error
+}
+
 // noShowTimeoutDuration bounds how long a room waits for a first participant
 // to ever connect before treating it as abandoned. Deliberately a separate
 // var from reconnection/grace-period.md's gracePeriodDuration — despite

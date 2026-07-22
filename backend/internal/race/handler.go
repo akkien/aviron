@@ -70,7 +70,7 @@ func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc, h.svc)
+	h.registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc, h.svc, h.svc)
 
 	httpx.WriteJSON(w, http.StatusCreated, createRaceResponse{
 		ID:             created.ID,

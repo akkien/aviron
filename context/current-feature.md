@@ -1,24 +1,46 @@
-# Current Feature
+# Current Feature: Cancelled Race Status
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- A room torn down via `pendingExpired`/`noShowTimeout` (or a pending room that emptied out via `ParticipantLeft`) persists `races.status = 'cancelled'` before the room actor closes — no more Postgres row stuck on `'pending'` forever.
+- `POST /races/{id}/join` and `POST /races/{id}/start` correctly reject a cancelled race with the existing `409 race_not_pending` — for free, once the status is real, with zero changes to either handler/service.
+- A user who visits a cancelled race cold (never connected, plain `GET /races/{id}`) sees an actual "this race was cancelled" message instead of a permanent, misleading "Loading prompt...".
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **Every claim in this spec still holds against the current shipped code, reverified after `pending-expiry`/`race-expired-broadcast` merged** — `expirePendingRoom()` (`room.go:386-390`) is exactly `broadcastRaceExpired()` → `r.finished = true` → `r.cancel()`, no persistence step yet, confirming the gap is still open. `RaceFinisher`/`RaceLeaver` (`finish.go:15-17,43-45`) are exactly the two-line structural-interface shape `RaceCanceller` mirrors. `RaceRepository` (`repository.go`) has no `CancelRace` method yet. `RaceHandler.Create`'s `registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc, h.svc)` (`handler.go:73`) passes `h.svc` for both existing roles — confirms the third `canceller` parameter slots in the same way.
+- **The frontend insertion point is confirmed, not assumed**: `RaceScreenSidebar.tsx`'s dispatch order is `pending` (line 121) → `leaving` (219) → `evicted` (223) → `finished` (231) → the `promptText === null` fallback (260) that currently swallows a cancelled race. The new `cancelled` branch goes with the other terminal states, before the fallback — exact insertion point, not a guess.
+- **Why this is safe to persist unconditionally, regardless of which of the three paths reaches `expirePendingRoom`**: `pendingExpired`, `noShowTimeout` (via `checkRaceFinished`'s `!r.active` branch), and a pending room fully emptied by `ParticipantLeft` (which doesn't call `checkRaceFinished` at all today, so it only ever gets cleaned up once one of the other two timers eventually fires) all funnel through this one method — persisting `'cancelled'` here closes the gap uniformly for all three, not path-by-path, matching `race_expired`'s own "no reason field" precedent.
+- **The ordering decision (persist before broadcast, no teardown on failure) is a direct mirror of `finishRace`'s already-shipped shape**, not new reasoning: `finishRace` persists first, and only broadcasts/tears down on success, leaving the room running (not silently vanished) if the write fails — same no-retry gap already accepted there, now extended consistently to `expirePendingRoom`.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/room/finish.go`**: new `RaceCanceller` interface (alongside `RaceFinisher`/`RaceLeaver`): `CancelRace(ctx context.Context, raceID string) error`.
+2. **`internal/room/room.go`**: `RoomActor` gains a `canceller RaceCanceller` field; `NewRoomActor`/`Registry.Spawn` gain a `canceller RaceCanceller` parameter alongside `finisher`/`leaver`.
+3. **`internal/room/room.go`'s `expirePendingRoom()`**: call `r.canceller.CancelRace(r.ctx, r.id)` first; on error, log and `return` (no broadcast, no `r.finished`/`r.cancel()` — room stays running, matching `finishRace`'s no-retry precedent). On success, proceed exactly as today: `broadcastRaceExpired()` → `r.finished = true` → `r.cancel()`.
+4. **`internal/race/repository.go`**: `RaceRepository` gains `CancelRace(ctx context.Context, raceID string) error`.
+5. **`internal/postgres/race_repository.go`**: implement `CancelRace` as a single statement (no transaction, matching `RemoveParticipant`'s precedent): `UPDATE races SET status = 'cancelled', ended_at = now() WHERE id = $1 AND status = 'pending'`.
+6. **`internal/race/service.go`**: `RaceService.CancelRace(ctx, raceID) error` — thin delegate to the repository, mirroring `FinishRace`'s existing shape, satisfying `room.RaceCanceller` structurally.
+7. **`internal/race/handler.go`**: `RaceHandler.Create`'s `registry.Spawn(...)` call passes `h.svc` for `canceller` too (now four args: `h.ctx, created.ID, created.DistanceMeters, h.svc, h.svc, h.svc` — finisher/leaver/canceller all the same concrete value).
+8. **`frontend/src/components/race-screen/RaceScreenSidebar.tsx`**: new `if (raceDetail.status === "cancelled")` branch, inserted alongside `leaving`/`evicted`/`finished` (before the `promptText === null` fallback) — a static message, same shape as `evicted`, no auto-navigate:
+   `This race was cancelled — it wasn't started in time.`
+9. **Tests**:
+   - New: `internal/room` — a fake `RaceCanceller` records the call and its `raceID`; `expirePendingRoom()` calls it before broadcasting/tearing down; a canceller failure leaves `r.finished` false, `r.ctx` open, and no `race_expired` broadcast.
+   - New: `internal/postgres` or a repository-level test (matching existing coverage conventions for this repo) — `CancelRace` against an already-`'active'`/`'finished'` race is a no-op (the `AND status = 'pending'` guard), not an error and not a clobber.
+   - New: `internal/race` — end-to-end-ish: a fake repository's `CancelRace` call is exercised via `RaceService.CancelRace`.
+10. **Verify**: `go build`/`go vet`/`gofmt -l .`/`go test ./... -race`; `yarn build`/`yarn lint` on the frontend for the sidebar change (no live browser test available in this environment, per every prior frontend-touching feature this project).
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on `room-lifecycle/pending-expiry.md` (done — wires directly into `expirePendingRoom`) and transitively `early-spawn.md`/`pending-connections.md`.
+- Full spec: `context/features/phase2.6/room-lifecycle/cancelled-race-status.md`.
+- Sixth of what's now seven Phase 2.6 specs — `frontend/live-lobby.md` remains last, and depends on this spec landing first for its own `raceDetail.status` handling.
+- Not `frontend/live-lobby.md`'s territory despite touching the same component: that spec is for a client *already connected* when a room expires (live `race_expired` consumption, countdown); this spec is for a client that *never connected*, hitting a since-cancelled race cold via REST. Independent, no dependency either direction.
+- Out of scope, matching the spec's own call: no `reason` field anywhere, no distinguishing no-show vs. pending-expiry vs. everyone-left in the UI or schema.
 
 ## History
 

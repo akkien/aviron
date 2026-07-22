@@ -145,6 +145,15 @@ func (s *RaceService) FinishRace(ctx context.Context, raceID string, distanceMet
 	return s.repo.FinishRace(ctx, raceID, distanceMeters, results)
 }
 
+// CancelRace persists a pending race's cancellation. Exists specifically to
+// satisfy room.RaceCanceller (structurally, same import-cycle reasoning as
+// FinishRace) so the room actor can call it when a pending room tears down
+// before ever going active (room-lifecycle/cancelled-race-status.md). A thin
+// delegate, same as FinishRace — the single UPDATE lives in the repository.
+func (s *RaceService) CancelRace(ctx context.Context, raceID string) error {
+	return s.repo.CancelRace(ctx, raceID)
+}
+
 func validateCreateRace(name string, distanceMeters int) map[string]string {
 	errs := map[string]string{}
 

@@ -34,6 +34,7 @@ type fakeRepository struct {
 	races        []race.Race
 	participants []participantRecord
 	finishCalls  []finishRaceCall
+	cancelCalls  []string // raceIDs
 }
 
 func newFakeRepository() *fakeRepository {
@@ -187,5 +188,20 @@ func (f *fakeRepository) FinishRace(ctx context.Context, raceID string, distance
 	defer f.mu.Unlock()
 
 	f.finishCalls = append(f.finishCalls, finishRaceCall{raceID: raceID, distanceMeters: distanceMeters, results: results})
+	return nil
+}
+
+// CancelRace mirrors the real repository's status='pending' guard — a no-op
+// (not an error) if the race already moved on.
+func (f *fakeRepository) CancelRace(ctx context.Context, raceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.cancelCalls = append(f.cancelCalls, raceID)
+	for i, r := range f.races {
+		if r.ID == raceID && r.Status == "pending" {
+			f.races[i].Status = "cancelled"
+		}
+	}
 	return nil
 }

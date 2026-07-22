@@ -47,7 +47,7 @@ func TestIntegration_HandshakeJoinAndReceiveSnapshot(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
@@ -89,7 +89,7 @@ func TestIntegration_ConnectsToPendingRace(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}) // pending: MarkActive() never called
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{}) // pending: MarkActive() never called
 
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
@@ -125,7 +125,7 @@ func TestIntegration_RejectsInvalidToken(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=not-a-real-token"
 
@@ -146,7 +146,7 @@ func TestIntegration_RejectsRaceIDMismatch(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 
 	// Token is valid for race-1, but the query string asks to join race-2.
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
@@ -166,7 +166,7 @@ func TestIntegration_RejectsReconnectAfterGracePeriodExpired(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	actor := registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
+	actor := registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 
 	// A second, still-racing participant keeps the room alive once user-1 is
 	// evicted — race-completion/finish-race.md means an empty room finishes
