@@ -278,18 +278,24 @@ func TestRoomActor_ApplyEvent_ParticipantJoined_ReconnectDoesNotIncrementTotalPa
 	}
 }
 
-func TestRoomActor_ApplyEvent_NoShowTimeout_EmptyRoomTriggersFinish(t *testing.T) {
+func TestRoomActor_ApplyEvent_NoShowTimeout_NeverActiveEmptyRoom_TearsDownWithoutFinishing(t *testing.T) {
 	r := newTestActor()
+	r.active = false // nobody ever joined, so the race never started
 	spy := &spyFinisher{}
 	r.finisher = spy
 
 	r.applyEvent(noShowTimeout{})
 
-	if len(spy.calls) != 1 {
-		t.Fatalf("finisher.calls = %d, want 1", len(spy.calls))
+	if len(spy.calls) != 0 {
+		t.Fatalf("finisher.calls = %d, want 0 — a room that never went active has no real race to persist", len(spy.calls))
 	}
-	if len(spy.calls[0].results) != 0 {
-		t.Errorf("results = %+v, want empty", spy.calls[0].results)
+	if !r.finished {
+		t.Error("r.finished = false, want true after tearing down")
+	}
+	select {
+	case <-r.ctx.Done():
+	default:
+		t.Error("r.ctx not cancelled after tearing down")
 	}
 }
 

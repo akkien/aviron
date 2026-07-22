@@ -35,7 +35,7 @@ func TestRoomActor_Run_NoShowTimeout_FinishesEmptyRoom(t *testing.T) {
 	defer cancel()
 	spy := &spyFinisher{}
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast, spy)
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, spy)
 	go r.Run()
 
 	select {
@@ -60,7 +60,7 @@ func TestRoomActor_Run_NoShowTimeout_NoopIfSomeoneJoined(t *testing.T) {
 	defer cancel()
 	spy := &spyFinisher{}
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast, spy)
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, spy)
 	go r.Run()
 
 	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
@@ -86,7 +86,7 @@ func TestRoomActor_Run_GracePeriodExpiry_RemovesAndEvictsParticipant(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, noopFinisher{})
 	go r.Run()
 
 	// A second, still-racing participant keeps the room alive once user-1 is
@@ -118,7 +118,7 @@ func TestRoomActor_Run_ReconnectWithinGracePeriod_CancelsTimer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, noopFinisher{})
 	go r.Run()
 
 	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
@@ -143,7 +143,7 @@ func TestRoomActor_IsEvicted_UnknownUser(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, noopFinisher{})
 	go r.Run()
 
 	if r.IsEvicted("never-joined") {
@@ -155,7 +155,7 @@ func TestRoomActor_IsEvicted_DoesNotBlockAfterContextCancelled(t *testing.T) {
 	broadcast := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 5, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, noopFinisher{})
 	go r.Run()
 	cancel()
 	time.Sleep(50 * time.Millisecond) // let Run() actually exit first
@@ -178,7 +178,7 @@ func TestRoomActor_Send_DeliversToInbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 3, broadcast, noopFinisher{})
 	go r.Run()
 
 	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
@@ -194,7 +194,7 @@ func TestRoomActor_Send_DoesNotBlockAfterContextCancelled(t *testing.T) {
 	broadcast := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 3, broadcast, noopFinisher{})
 	go r.Run()
 	cancel()
 	time.Sleep(50 * time.Millisecond) // let Run() actually exit before Send
@@ -216,7 +216,7 @@ func TestRoomActor_Context_DoneAfterCancel(t *testing.T) {
 	broadcast := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 3, broadcast, noopFinisher{})
 	cancel()
 
 	select {
@@ -231,7 +231,7 @@ func TestRoomActor_Run_BroadcastsOnTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := NewRoomActor(ctx, "race-1", "some prompt text", 3, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 3, broadcast, noopFinisher{})
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 
 	go r.Run()
@@ -263,7 +263,7 @@ func TestRoomActor_Run_StopsOnContextCancel(t *testing.T) {
 	broadcast := make(chan []byte, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 3, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 3, broadcast, noopFinisher{})
 
 	done := make(chan struct{})
 	go func() {
@@ -284,7 +284,7 @@ func TestRoomActor_Run_ConcurrentInboxSenders(t *testing.T) {
 	broadcast := make(chan []byte, 256)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	r := NewRoomActor(ctx, "race-1", "prompt", 100, broadcast, noopFinisher{})
+	r := NewRoomActor(ctx, "race-1", 100, broadcast, noopFinisher{})
 
 	const numParticipants = 5
 	const eventsPerParticipant = 50

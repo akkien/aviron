@@ -37,7 +37,10 @@ func (s *spyFinisher) FinishRace(ctx context.Context, raceID string, distanceMet
 // WordsCorrect) never accidentally trigger a finish — tests that actually
 // want to exercise finishing set r.distanceMeters explicitly. ctx/cancel are
 // real (not nil) so finishRace's r.cancel() call is safe even without Run()
-// ever having started.
+// ever having started. active defaults true: an already-started race is
+// what the overwhelming majority of this suite means to simulate (people
+// joining, typing, finishing) — a room that never started is its own
+// explicit scenario, not the default one.
 func newTestActor() *RoomActor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RoomActor{
@@ -47,6 +50,7 @@ func newTestActor() *RoomActor {
 		departedParticipants: make(map[string]*ParticipantState),
 		distanceMeters:       1_000_000,
 		finisher:             noopFinisher{},
+		active:               true,
 		ctx:                  ctx,
 		cancel:               cancel,
 	}

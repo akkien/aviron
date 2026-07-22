@@ -1,24 +1,47 @@
-# Current Feature
+# Current Feature: Early Room Spawn
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- `RaceHandler.Create` spawns a `RoomActor` immediately after a successful `CreateRace`, so a room actor exists for a race's entire lifetime (creation through finish), not just from `POST /races/{id}/start` onward.
+- `RaceHandler.Start` no longer spawns — it looks up the already-spawned actor via `registry.Get(raceID)` instead. If `Get` finds nothing, that's a real `500` (logged), not a silent no-op — room lifecycle state drifting from race lifecycle state should never happen under this design.
+- `NewRoomActor`/`Registry.Spawn` drop the `promptText` parameter entirely — confirmed dead state today (see Explain), not carried forward just because the spec left it as an open question.
+- `checkRaceFinished` never calls `finisher.FinishRace` (a real Postgres write) for a room that's emptied out without ever having gone active — no race happened, nothing to persist.
+- This is the foundational spec for Phase 2.6 (`context/features/phase2.6/phase-2.6-plan.md`) — nothing else in that phase (pending WebSocket connections, the `race_started`/`race_expired` broadcasts, the 5-minute pending-expiry timer) is possible until a room actor exists before the race starts.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **Confirmed via direct reads, not just trusting the spec's own prose** (this project's established `load` discipline): `internal/race/handler.go`'s `Create` (lines 49-79) genuinely never touches `h.registry` today — the gap this spec fills is real. `Start` (lines 190-231) is the only current caller of `registry.Spawn`, calling `h.registry.Spawn(h.ctx, raceID, promptText, started.DistanceMeters, h.svc)` right after `StartRace` succeeds. `Registry.Spawn`'s real signature (`internal/room/registry.go:39`) matches the spec's citation exactly, and its existing `cleanupWhenDone` watcher goroutine (watches `actor.Context().Done()`, removes the map entry) already does exactly what this spec needs reused for tearing down an abandoned pending room — no new registry cleanup logic needed.
+- **Resolved the spec's own open question, not just flagged it**: grepped every usage of `promptText`/`r.promptText` across `internal/room` (`registry.go`, `room.go`) — it's stored on `RoomActor` (`room.go:96`) but genuinely never read anywhere else in the package, not in `applyEvent`, `broadcastSnapshot`, or `finishRace`. This confirms the spec's "leaning toward dropping it" is correct, not just plausible — going with that.
+- `RaceService.CreateRace` (`internal/race/service.go:29`) returns `(r Race, sessionToken string, fieldErrs map[string]string, err error)` with `r.ID`/`r.DistanceMeters` populated on success — everything `RaceHandler.Create` needs to call the new (promptText-less) `Spawn` signature is already in scope at the call site.
+- Confirmed `checkRaceFinished` (`room.go:328-346`) really does call `r.finishRace(results)` with an **empty** `results` slice for a room with zero participants — the `for range r.participants` guard loop is vacuously true on an empty map, so it falls straight through to the Postgres write. This is the literal bug the spec's `noShowTimeout` reconciliation section predicted, confirmed by reading the actual loop rather than taking the spec's word for it.
+- **A real gap in the spec itself, found during this grounding pass, not before**: `early-spawn.md`'s own `noShowTimeout` fix says the empty-room guard is "gated on the pending/active status `pending-connections.md` adds to `RoomActor`" — but `pending-connections.md` is the *next* spec in the phase, not this one. Taken literally, that leaves a real window if the two specs ever ship one at a time: the moment `Create` starts spawning actors (this feature), `noShowTimeoutDuration` (30s) starts firing meaningfully for genuinely-pending rooms far more often than it ever could before (previously a room only existed post-start, so this case was nearly unreachable) — and without a status field yet, `checkRaceFinished` would still call `FinishRace` with bogus/empty data exactly as it does today. Resolving this now (see Plan) rather than letting it ride until the next spec's `load`.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/room/room.go`**:
+   - Remove the `promptText` field from `RoomActor` and from `NewRoomActor`'s signature/body.
+   - Add a minimal `active bool` field (defaults `false`), doc-commented as provisional — `pending-connections.md` will replace/rename this into its full `roomStatus`/`roomPending`/`roomActive` type; this feature only needs a bool, not the full enum, to close the gap above.
+   - Add a new unexported `activated struct{}` `RoomEvent` (`isRoomEvent()` marker, matching every other event's shape) and an `applyEvent` case setting `r.active = true`. Event-through-inbox, not a direct method mutation — consistent with `room-actor-core.md`'s single-writer principle, and this pre-resolves the "direct method call vs. event" open question `websocket/race-started-broadcast.md` (a later spec) flagged for itself.
+   - Add an exported `func (r *RoomActor) MarkActive()` calling `r.Send(activated{})` — the entry point `RaceHandler.Start` calls. (Name provisional — `race-started-broadcast.md` may want to rename/expand this once it also needs to broadcast `race_started` from the same place; not this feature's concern to get the final name right.)
+   - Update `checkRaceFinished`: after the existing "still someone unfinished" guard loop, add `if !r.active { r.finished = true; r.cancel(); return }` **before** building `results`/calling `finishRace` — this generalizes beyond just the `noShowTimeout` trigger to *any* path that empties out a still-pending room (e.g. every pending participant leaving one by one via `departParticipant`), not only the 30s no-show case.
+2. **`internal/room/registry.go`**: `Spawn`'s signature drops `promptText` — `Spawn(ctx context.Context, raceID string, distanceMeters int, finisher RaceFinisher) *RoomActor`, updating its one internal `NewRoomActor(...)` call accordingly.
+3. **`internal/race/handler.go`**:
+   - `Create`: after a successful `CreateRace`, call `h.registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc)` — mirrors exactly how `Start` calls it today, just moved.
+   - `Start`: remove its own `Spawn` call. Replace with `actor, ok := h.registry.Get(raceID)`; if `!ok`, log and `500` (`internal_error`) — a genuine invariant violation, not a race condition to silently tolerate; if found, call `actor.MarkActive()` after `StartRace` succeeds, before writing the response.
+4. **Tests**: `internal/room` gains coverage for the promptText-less `NewRoomActor`/`Spawn` signatures, `checkRaceFinished`'s never-active-empty-room path (asserts `finisher.FinishRace` is never called and the room's context ends up cancelled), and `activated`/`MarkActive` flipping `active` correctly. `internal/race`'s `handler_test.go`/`service_test.go` fixtures updated for `Create` now spawning (check existing `Start` test patterns for how a real `room.Registry` is already wired into handler tests, reuse that same pattern for `Create`'s tests) and for `Start`'s new `registry.Get`-not-found `500` path.
+5. No REST/DTO/wire-protocol changes — `POST /races` and `POST /races/{id}/start`'s request/response shapes are unchanged, this is pure internal wiring. No Swagger regeneration needed.
+6. Verify: `go build`/`go vet`/`gofmt -l .`/`go test ./... -race` (full suite, not just `internal/room`/`internal/race` — this touches room-actor construction timing, which `internal/ws`'s tests also construct actors around).
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on nothing else in Phase 2.6 — this is the spec everything else in the phase builds on (`context/features/phase2.6/phase-2.6-plan.md`'s dependency order).
+- Full spec: `context/features/phase2.6/room-lifecycle/early-spawn.md`.
+- Next spec per the phase plan: `room-lifecycle/pending-connections.md` — takes the minimal `active bool` this feature introduces and expands it into the full pending/active status, plus relaxes `GET /ws`'s rejection rule so a connection can actually attach to a still-pending room.
+- `go test -race` mandatory, consistent with every other `internal/room`/`internal/ws` spec in this project.
 
 ## History
 

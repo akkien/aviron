@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"time"
@@ -68,6 +69,8 @@ func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+
+	h.registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc)
 
 	httpx.WriteJSON(w, http.StatusCreated, createRaceResponse{
 		ID:             created.ID,
@@ -225,7 +228,13 @@ func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
 		startedAt = started.StartedAt.Format(time.RFC3339)
 	}
 
-	h.registry.Spawn(h.ctx, raceID, promptText, started.DistanceMeters, h.svc)
+	actor, ok := h.registry.Get(raceID)
+	if !ok {
+		log.Printf("race %s: room actor missing at start", raceID)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	actor.MarkActive()
 
 	httpx.WriteJSON(w, http.StatusOK, startRaceResponse{
 		ID:         started.ID,

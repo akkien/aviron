@@ -19,7 +19,7 @@ func TestRegistry_CleansUpWhenActorSelfCancels(t *testing.T) {
 	// (race-completion/finish-race.md) fires and the actor cancels its own
 	// context — Remove is never called explicitly. Registry still has to
 	// notice and clean up its map entry.
-	reg.Spawn(ctx, "race-1", "prompt", 5, noopFinisher{})
+	reg.Spawn(ctx, "race-1", 5, noopFinisher{})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -36,7 +36,7 @@ func TestRegistry_SpawnThenGet(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	spawned := reg.Spawn(ctx, "race-1", "prompt", 5, noopFinisher{})
+	spawned := reg.Spawn(ctx, "race-1", 5, noopFinisher{})
 
 	got, ok := reg.Get("race-1")
 	if !ok {
@@ -61,7 +61,7 @@ func TestRegistry_Remove_StopsActorAndDeregisters(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := reg.Spawn(ctx, "race-1", "prompt", 5, noopFinisher{})
+	actor := reg.Spawn(ctx, "race-1", 5, noopFinisher{})
 
 	reg.Remove("race-1")
 
@@ -99,7 +99,7 @@ func TestRegistry_ConcurrentGetDuringSpawn(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			reg.Spawn(ctx, raceID, "prompt", 5, noopFinisher{})
+			reg.Spawn(ctx, raceID, 5, noopFinisher{})
 		}()
 		go func() {
 			defer wg.Done()
@@ -124,7 +124,7 @@ func TestRegistry_RemoveRacingGet(t *testing.T) {
 
 	const numRaces = 50
 	for i := range numRaces {
-		reg.Spawn(ctx, fmt.Sprintf("race-%d", i), "prompt", 5, noopFinisher{})
+		reg.Spawn(ctx, fmt.Sprintf("race-%d", i), 5, noopFinisher{})
 	}
 
 	var wg sync.WaitGroup
