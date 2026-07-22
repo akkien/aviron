@@ -220,3 +220,311 @@ The JSON message schema exchanged over the WebSocket connection, kept as a pure 
 - `applyEvent`'s `ParticipantJoined` case now broadcasts immediately instead of waiting for the next 250ms tick, and the reader goroutine's read-error exit path pushes `ParticipantDisconnected` — both were event types/behaviors earlier features had already built the plumbing for but nothing had triggered yet
 - Registered outside `middleware.Auth`, since this endpoint authenticates via the query-string `session_token` rather than the `Authorization` header; reuses the existing `CORSAllowedOrigin` config for `coder/websocket`'s origin check, since without it the frontend's cross-origin handshake would be rejected by default
 - A `wsConn` interface lets most tests run against a fake connection instead of real sockets; one real end-to-end suite still dials an actual `coder/websocket` client against `httptest.Server` to prove the wire-level integration works
+
+## Reconnection & Grace Period
+
+A dropped WebSocket connection gets a 30-second grace period to reconnect before being evicted from the race, instead of losing its spot the instant the socket closes.
+
+### Goals (Reconnection & Grace Period)
+
+- A disconnected participant is marked, not removed — kept in the room for 30s
+- Reconnecting within the window resumes exactly where they left off (progress, `LastSeq` preserved)
+- Missing the window evicts them permanently (`ParticipantEvicted`), notifying the room
+- A reconnect attempt after eviction is rejected with the same `401` as an invalid token
+
+### Explain (Reconnection & Grace Period)
+
+- Reused `ParticipantJoined` for reconnection instead of adding a distinct `ParticipantReconnected` event — told apart from a fresh join purely by checking existing participant state in `applyEvent`
+- New `IsEvicted` query — the room actor's first synchronous request/reply-channel query on its own inbox, checked by the WS endpoint before allowing the upgrade
+- `graceTimer` self-schedules `ParticipantEvicted` via `time.AfterFunc`, guarded against a race between an already-fired timer and an in-flight reconnect landing at nearly the same moment
+- A duplicate `join_race` from an already-connected client (two tabs, a retry) is correctly told apart from "unknown participant" and doesn't reset progress — a real bug caught by direct review before shipping, not by a failing test
+
+## Race Completion
+
+The room actor detects a race is over and writes final results — rank, finish time, avg WPM — to Postgres in one transaction.
+
+### Goals (Race Completion)
+
+- A race finishes once every live participant has reached the target word count (or the room empties out)
+- `races`/`race_participants`/`leaderboard_alltime` updated atomically — all or nothing
+- `race_finished` broadcast to every connection with final ranks
+
+### Explain (Race Completion)
+
+- `RaceFinisher`/`ParticipantResult` live in `internal/room` (not `internal/race`) to avoid an import cycle — satisfied structurally by `RaceService.FinishRace`, the same repository-interface pattern this project already uses elsewhere
+- A room with zero live participants tears down via a registry watcher goroutine, rather than requiring every caller to remember to call `Remove`
+- Known, disclosed gaps at the time: no retry if the Postgres transaction fails (logged, room stays running); `AvgPaceWatt` always wrote `0.0` (fixed much later, in User Stats)
+
+## Leave Race
+
+`POST /races/{id}/leave` for backing out of a still-pending race, and an immediate WebSocket `leave_race` message for quitting mid-race.
+
+### Goals (Leave Race)
+
+- Leaving before start removes the participant outright, no trace left
+- Quitting mid-race is immediate — no 30s grace period, since it's a deliberate choice, not a dropped connection
+- Every participant who ever raced gets a result row, even quitters — sharing one last-place rank rather than vanishing from the leaderboard silently
+
+### Explain (Leave Race)
+
+- New `ParticipantLeft` event, distinct from the grace-period's `ParticipantEvicted` — a quit is always honored immediately, an eviction only after the grace window and only if still marked disconnected
+- A real rank-collision bug caught during review: computing "the next finisher's rank" by counting live participants missed anyone who'd already finished and then disconnected, handing two finishers the same rank — fixed with a monotonic counter immune to who's since departed, with a regression test reproducing the exact collision
+
+## WebSocket Client (Frontend)
+
+The React app opens the WebSocket connection, sends one `telemetry` message per correctly-typed word, and renders every participant's car moving live from the server's `race_state` broadcasts.
+
+### Goals (WebSocket Client)
+
+- Every participant's position updates live, not just the local player's own (closing Phase 1's biggest limitation)
+- A "Quit Race" button sends `leave_race` and shows results/DNF immediately
+
+### Explain (WebSocket Client)
+
+- Extracted into a `useRaceSocket` hook rather than inlining the connection in the typing view, deliberately, so a later reconnect feature could extend it instead of requiring a rewrite
+- Caught and fixed a spec-compliance slip before shipping: an early draft special-cased the local player's own lane for snappier feedback, but the spec explicitly said no more special-casing — corrected to drive every lane, including the local one, purely from the server's broadcast
+
+## Reconnect UI
+
+A dropped connection is retried automatically (3 attempts, 2s apart) instead of leaving the player stuck.
+
+### Goals (Reconnect UI)
+
+- A dropped connection retries automatically; the UI shows "Reconnecting..." rather than an error
+- Exhausting every retry (or a rejected reattach) shows a clear "evicted" state
+
+### Explain (Reconnect UI)
+
+- Two real React 18 StrictMode bugs caught and fixed during design review, before shipping: a shared ref tracking "did this effect already stop" got reset by StrictMode's dev-only double-invoke before a stale connection's `onclose` actually fired, and `onclose` unconditionally nulled out the active connection reference even when it was a late-firing stale one — both fixed by scoping state correctly per effect execution
+- No exponential backoff — a fixed, short retry window is enough for a side project, not a production reconnect strategy
+
+## Race ID Display & Shortening
+
+The race status view gained a copyable Race ID, and the ID format itself shrank from a raw UUID to a 12-character, hand-typeable string.
+
+### Goals (Race ID Display & Shortening)
+
+- A race's ID is visible and copyable from its status view
+- IDs are short enough to read aloud or type by hand to invite another player
+
+### Explain (Race ID Display & Shortening)
+
+- `crypto/rand`-backed generation using the Bitcoin base58 alphabet (excludes `0`/`O`/`I`/`l` for readability); `races.id` and its two FK columns switched from `UUID` to `TEXT` via migration
+- Postgres no longer guarantees uniqueness on its own, so `CreateRace` retries up to 5 times on a collision — at roughly 70 bits of entropy, vanishingly unlikely but no longer structurally impossible
+- Verified against a live database, not just tests — confirmed the migration applied cleanly to existing rows and a full register→create→join→leave flow round-tripped a real generated id
+
+## UI Revamp — Theme
+
+Fonts, a warm color palette, and rounded card chrome applied globally from a supplied design mockup.
+
+### Goals (UI Revamp — Theme)
+
+- The app's visual tokens (fonts, colors, corner radius) match the supplied mockup
+
+### Explain (UI Revamp — Theme)
+
+- Applied entirely through global CSS theme tokens, not per-component overrides — confirmed the login page needed zero direct edits to pick up the new look, proving the token-based approach actually works instead of requiring per-page touch-ups later
+
+## UI Revamp — Dashboard
+
+A real Dashboard (header, stat cards, open-races list, create/join forms) replaces the old plain forms page.
+
+### Goals (UI Revamp — Dashboard)
+
+- The Dashboard shows account info, placeholder stat cards, and create/join forms in the new visual style
+
+### Explain (UI Revamp — Dashboard)
+
+- Stat cards shipped with hardcoded placeholder values from the start, explicitly flagged as pending real backend support — closed later by User Stats
+- `CreateRace` was changed to auto-join the creator as a participant, closing a gap flagged back in Phase 1, as a small bundled fix alongside this rebuild
+
+## UI Revamp — Race Screen
+
+A single full-height race screen (30/70 sidebar/track split) replaces the old stacked status-view-plus-typing-view cards.
+
+### Goals (UI Revamp — Race Screen)
+
+- One unified screen handles both the pending lobby and the active race, instead of two separate stacked components
+- The typing box behaves like a real typing-test tool: a wrong keystroke is rejected outright, never inserted-then-flagged
+
+### Explain (UI Revamp — Race Screen)
+
+- The typing box went through many iterative rounds of direct user feedback before converging on its final strict-validation behavior
+- Several real rendering bugs (word-wrap, scroll-position drift, a keyboard-sound clip playing the wrong sample) were caught from user screenshots and fixed iteratively, since no browser is available in this environment to view the running app directly
+
+## Race Detail Route & Race-Finish Disconnect Fix
+
+Each race got its own URL (`/races/:raceId`), and a real concurrency bug where every player got disconnected the instant the last one finished was root-caused and fixed.
+
+### Goals (Race Detail Route & Race-Finish Disconnect Fix)
+
+- Visiting `/races/:raceId` shows that race directly — reloadable, shareable
+- Finishing a race no longer disconnects every other still-connected player
+
+### Explain (Race Detail Route & Race-Finish Disconnect Fix)
+
+- The disconnect bug was two stacked races, not one: broadcasting `race_finished` and cancelling the room happened close enough together that Go's `select` could pick the shutdown case over the still-unread final message — fixed by making each connection's context independent of the room's, so only that connection's own errors can cancel it, and draining broadcasts deterministically before signaling done
+- Confirmed with a real regression test proven to fail 20/20 times against the pre-fix code and pass 50/50 after, via an actual `git stash` comparison rather than just reasoning about it
+- Full root-cause writeup lives in `docs/concurrency.md`
+
+## Early Room Spawn
+
+The room actor now spawns when a race is created, not when it starts — the prerequisite for every player holding a live connection before the race begins.
+
+### Goals (Early Room Spawn)
+
+- A room actor exists from the moment a race is created, not just once started
+- `POST /races/{id}/start` activates the already-existing actor instead of spawning a new one
+
+### Explain (Early Room Spawn)
+
+- Root cause traced from a user report that other players had to manually refresh after the creator started a race — every player needing a live connection *before* start requires a room to connect to before start
+- A room can now legitimately be `pending` and empty at the same time, so the no-show-timeout logic had to stop assuming "empty room" always means "abandoned mid-race"
+
+## Pending Connections
+
+`GET /ws` can now attach to a still-pending room, with an explicit active/pending status gating telemetry until the race actually starts.
+
+### Goals (Pending Connections)
+
+- A pending room accepts WebSocket connections, not just active ones
+- Telemetry sent before the race is active is dropped, not accumulated
+- Leaving a pending lobby goes through the same WebSocket path as quitting mid-race, not a separate REST endpoint
+
+### Explain (Pending Connections)
+
+- A real, previously-live exploitable gap found during design review: a client connected to a pending race could already accumulate progress before the race legitimately started — fixed by gating `TelemetryReceived` on the room's active flag
+- `POST /races/{id}/leave` was removed entirely in favor of a WebSocket `leave_race` message for both pending and active races — one mechanism instead of two
+
+## race_started Broadcast
+
+The actual fairness fix the surrounding work exists for — every pending player learns the race started at the same moment, over the WebSocket connection they're already holding.
+
+### Goals (race_started Broadcast)
+
+- The instant a race starts, every connected pending player receives `race_started` with the prompt text already included
+- No more manual refresh or polling needed to discover the race began
+
+### Explain (race_started Broadcast)
+
+- Reuses the exact fan-out mechanism `race_state` already broadcasts through — no new delivery path, just a new message type
+- Carries `prompt_text` directly so a client can start typing immediately, with no follow-up REST round-trip adding its own delay variance between players
+
+## Pending Expiry & race_expired Broadcast
+
+A pending race now has a bounded lifetime instead of sitting open forever if the creator never starts it.
+
+### Goals (Pending Expiry & race_expired Broadcast)
+
+- A pending race nobody starts eventually expires and tears down cleanly
+- Every connected player sees a `race_expired` message and a visible countdown beforehand, not a connection that silently dies
+
+### Explain (Pending Expiry & race_expired Broadcast)
+
+- Found a real, previously-nonexistent gap while building this: a full or partial lobby sitting pending was never torn down by anything that existed before this feature — the only existing teardown path only fired once every participant had already finished, which a pending race's participants never do
+- Shares its teardown path with the empty-room case rather than duplicating it
+
+## Cancelled Race Status
+
+A race that expires or empties out before starting is now persisted as `cancelled` in Postgres, instead of silently staying `pending` forever.
+
+### Goals (Cancelled Race Status)
+
+- An expired/abandoned pending race's status becomes `cancelled`, not stuck on `pending`
+- Joining or starting a cancelled race is correctly rejected
+- A visitor arriving at a dead race sees a clear message, not a permanent loading spinner
+
+### Explain (Cancelled Race Status)
+
+- Found by asking what a real visitor actually sees after a race expires: the previous teardown wrote zero Postgres changes, so `races.status` stayed `'pending'` forever, meaning `POST /races/{id}/join` kept succeeding into a room whose actor was already gone
+- `RaceCanceller` mirrors the same structural-interface pattern already used for finishing/leaving a race
+
+## Live Lobby (Frontend)
+
+The frontend now holds a live WebSocket connection the moment a player lands on a pending race, consuming every message the backend work above added.
+
+### Goals (Live Lobby)
+
+- Every pending player sees new joins/leaves and the race starting live, no manual refresh
+- A visible countdown shows how long until an unstarted race expires
+- The manual "Refresh" button is gone entirely — nothing it worked around still needs it
+
+### Explain (Live Lobby)
+
+- The connection now opens the instant a session token exists, not gated on the race already being active
+- An already-connected non-creator learns the race went active via the same REST re-fetch mechanism the creator's own start action already used — one uniform path instead of a second "am I active" field to reconcile
+
+## Race Detail — Cold Visit & Spectator View
+
+Visiting a race's URL cold — after it finished, or without ever having joined — now renders correctly instead of showing a broken "disconnected" state or a permanent loading spinner.
+
+### Goals (Race Detail — Cold Visit & Spectator View)
+
+- Reloading right after finishing a race shows results, not "you were disconnected"
+- Visiting a race you never joined shows a read-only spectator view, not a broken state
+
+### Explain (Race Detail — Cold Visit & Spectator View)
+
+- Root cause was the page only ever rendering correctly for a client holding a live, successfully-connected WebSocket — a REST-only visitor had no path
+- The WebSocket connection gate checks for *terminal* status (finished/cancelled) rather than *known-good* status, so a fresh join/create's connection isn't delayed by a REST round-trip first — deliberately chosen to avoid reintroducing the exact connection-delay unfairness the Live Lobby work above was built to eliminate
+- `GetRaceWithParticipants`'s query was missing `finish_rank`/`finish_time_ms`/`avg_pace_watt` entirely — a real backend gap, not just a frontend one
+
+## User Stats (Backend for Dashboard Stat Cards)
+
+The dashboard's stat cards (races joined, races won, avg WPM) now show real per-user data from Postgres instead of hardcoded placeholder numbers.
+
+### Goals (User Stats)
+
+- `GET /leaderboard/me` returns the caller's own races-joined/races-won/avg-WPM
+- A brand-new account gets all-zero stats, not a 404
+
+### Explain (User Stats)
+
+- Closed a real, previously-disclosed gap: `AvgPaceWatt` had been written as `0.0` unconditionally since Race Completion shipped, because the WebSocket layer decoded `pace_watt` off the wire but never forwarded it into the room actor's telemetry event — now wired through end to end
+- New `internal/leaderboard` domain package, following the same Handler/Service/Repository layering as every other REST domain
+- `AvgWPM` rounds to 2 decimal places server-side, added after live testing surfaced a real, explainable oddity: a brand-new real race's WPM looked implausibly low because it was averaged against dozens of historical test races that had `0` pace recorded before this fix existed
+
+## Open Races (Real List + Polling)
+
+The dashboard's "Open Races" list now shows real, joinable pending races from Postgres, polling every 5 seconds, with a working "Join" button instead of a decorative fake one.
+
+### Goals (Open Races)
+
+- `GET /races` lists pending, joinable races the caller hasn't already created or joined
+- The list updates on its own every 5 seconds — no manual refresh
+- Clicking "Join" actually joins the race and lands the player on it
+
+### Explain (Open Races)
+
+- Excludes races the caller already created or joined, not just full ones — otherwise a creator would see their own just-created race in their own browsable list and get a conflict clicking it
+- Two real bugs found and fixed while testing this feature live: a pending lobby's player list never updated on a join/leave without a manual refresh (a frontend rendering gap, not a missing broadcast), and the last participant leaving a pending race never actually cancelled it (a missing call to the existing finish-check logic)
+
+## Redirect to Login on 401
+
+Any API call that comes back `401 Unauthorized` now clears the stored session and redirects to the login page automatically, instead of leaving the user stuck on a broken page.
+
+### Goals (Redirect to Login on 401)
+
+- An expired or invalid JWT on any authenticated request redirects to `/login`, app-wide
+- A wrong password on the login form itself still shows inline, not a redirect
+
+### Explain (Redirect to Login on 401)
+
+- Centralized in `apiFetch`, the one function every authenticated request already goes through — cheaper and more reliable than adding an `isAuthenticated()` check to every page individually
+- `/auth/login`/`/auth/register` are explicitly excluded, since a `401` there means "wrong credentials," a normal validation outcome, not "your session expired"
+
+## Idempotent Join / Session Token Recovery
+
+Joining a race you're already part of no longer errors — it hands back a working session token instead, closing a real gap where reloading the page mid-race could permanently strand a player as a read-only spectator.
+
+### Goals (Idempotent Join / Session Token Recovery)
+
+- Re-joining a race you're already in returns a fresh session token instead of a `409`
+- This now also works for a race already in progress, not just one still pending
+- Reloading the race page recovers automatically instead of getting stuck
+
+### Explain (Idempotent Join / Session Token Recovery)
+
+- Traced end to end before writing any code: the session token only ever lived in router navigation state, never persisted, so any reload lost it — and the only way to get a new one, re-joining, previously failed two different ways depending on race status
+- Fixed by checking participation before checking status — an already-joined caller gets a fresh token regardless of whether the race is pending, active, finished, or cancelled
+- Verified live against a real running server and Postgres, not just unit tests, reproducing every scenario directly with curl
