@@ -163,6 +163,33 @@
             }
         },
         "/races": {
+            "get": {
+                "description": "Returns pending, joinable races the caller hasn't already created or joined",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "races"
+                ],
+                "summary": "List open races",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_race.listOpenRacesResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "error: unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
             "post": {
                 "description": "Creates a new typing race with a name and target word count",
                 "consumes": [
@@ -592,6 +619,43 @@
                 },
                 "session_token": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_race.listOpenRacesResponse": {
+            "type": "object",
+            "properties": {
+                "races": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_race.openRaceResponse"
+                    }
+                }
+            }
+        },
+        "internal_race.openRaceResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "distance_meters": {
+                    "type": "integer"
+                },
+                "host_display_name": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "max_players": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "player_count": {
+                    "type": "integer"
                 }
             }
         },

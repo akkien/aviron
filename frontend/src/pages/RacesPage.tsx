@@ -30,7 +30,7 @@ export function RacesPage() {
           <CreateRaceForm onCreated={handleEnterRace} />
           <JoinRaceForm onJoined={handleEnterRace} />
         </div>
-        <OpenRacesList />
+        <OpenRacesList onJoined={handleEnterRace} />
       </div>
     </div>
   )

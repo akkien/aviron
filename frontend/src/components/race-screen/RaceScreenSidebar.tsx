@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { apiFetch } from "@/lib/api"
 import { laneColor } from "@/lib/colors"
@@ -137,6 +137,29 @@ export function RaceScreenSidebar({
     const id = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(id)
   }, [raceDetail?.status, raceDetail?.pending_expires_at])
+
+  // The pending lobby's player list (below) renders from raceDetail.participants
+  // — a one-time REST snapshot — not from the live raceState the socket
+  // already receives on every join/leave (race_state carries no
+  // display_name, so it can't replace raceDetail.participants outright).
+  // Without this, a second player joining or leaving the lobby is only
+  // ever reflected after a manual page refresh, even though the room actor
+  // is already broadcasting the change. Re-fetching via onRefresh whenever
+  // the live participant count disagrees with the REST snapshot closes
+  // that gap — mirrors the same onRefresh call race_started already makes
+  // (useRaceSocket.ts) to pull fresh data after a live event.
+  const liveParticipantCount = raceState?.participants.length
+  const lastRefreshedForCountRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!raceDetail || raceDetail.status !== "pending" || liveParticipantCount === undefined) return
+    if (liveParticipantCount === raceDetail.participants.length) {
+      lastRefreshedForCountRef.current = null
+      return
+    }
+    if (lastRefreshedForCountRef.current === liveParticipantCount) return
+    lastRefreshedForCountRef.current = liveParticipantCount
+    onRefresh()
+  }, [raceDetail, liveParticipantCount, onRefresh])
 
   if (raceDetail === null) {
     return <p className="text-sm text-muted-foreground">Loading...</p>

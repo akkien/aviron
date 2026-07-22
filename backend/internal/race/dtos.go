@@ -49,6 +49,20 @@ type participantResponse struct {
 	AvgPaceWatt  float64 `json:"avg_pace_watt"`
 }
 
+type openRaceResponse struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	DistanceMeters  int    `json:"distance_meters"`
+	HostDisplayName string `json:"host_display_name"`
+	PlayerCount     int    `json:"player_count"`
+	MaxPlayers      int    `json:"max_players"`
+	CreatedAt       string `json:"created_at"`
+}
+
+type listOpenRacesResponse struct {
+	Races []openRaceResponse `json:"races"`
+}
+
 type raceStatusResponse struct {
 	ID             string                `json:"id"`
 	Name           string                `json:"name"`

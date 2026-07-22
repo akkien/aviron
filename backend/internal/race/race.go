@@ -33,6 +33,20 @@ type RaceDetail struct {
 	Participants []Participant
 }
 
+// OpenRace is one row of the browsable "open races" list (open-races.md) —
+// a pending race the caller hasn't already created or joined. MaxPlayers is
+// always MaxParticipants, not a per-row column; it's included so the
+// frontend doesn't need to hardcode the cap a second place.
+type OpenRace struct {
+	ID              string
+	Name            string
+	DistanceMeters  int
+	HostDisplayName string
+	PlayerCount     int
+	MaxPlayers      int
+	CreatedAt       time.Time
+}
+
 // MaxParticipants caps how many players can join a single race — the room
 // actor (Phase 2) holds every participant's state in memory and broadcasts
 // a snapshot including all of them on every tick, so this also bounds the

@@ -80,6 +80,30 @@ definitions:
       session_token:
         type: string
     type: object
+  internal_race.listOpenRacesResponse:
+    properties:
+      races:
+        items:
+          $ref: '#/definitions/internal_race.openRaceResponse'
+        type: array
+    type: object
+  internal_race.openRaceResponse:
+    properties:
+      created_at:
+        type: string
+      distance_meters:
+        type: integer
+      host_display_name:
+        type: string
+      id:
+        type: string
+      max_players:
+        type: integer
+      name:
+        type: string
+      player_count:
+        type: integer
+    type: object
   internal_race.participantResponse:
     properties:
       avg_pace_watt:
@@ -245,6 +269,25 @@ paths:
       tags:
       - leaderboard
   /races:
+    get:
+      description: Returns pending, joinable races the caller hasn't already created
+        or joined
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_race.listOpenRacesResponse'
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List open races
+      tags:
+      - races
     post:
       consumes:
       - application/json

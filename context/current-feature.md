@@ -1,24 +1,67 @@
-# Current Feature
+# Current Feature: Open Races (Real List + Polling)
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- `OpenRacesList.tsx` shows real, joinable pending races from Postgres instead of the hardcoded 4-row `RACE_SEED`.
+- The list updates on its own via polling while the Dashboard is visible — no manual refresh needed to see new lobbies or updated player counts.
+- Clicking "Join" actually joins the race (`POST /races/{id}/join`) and lands the player on it, same as `JoinRaceForm`'s existing flow — not the old fake local player-count increment.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- Confirmed directly in code: `OpenRacesList.tsx`'s own comment says it plainly — "Hardcoded seed list — there is no GET /races browsable-list endpoint... Purely decorative: clicking Join only increments the row's local player count client-side, it never calls the real join API."
+- No list-races capability exists anywhere in the backend today: `race.RaceRepository`'s interface (`internal/race/repository.go`) only has single-race lookups (`GetRace`, `GetRaceWithParticipants`) — nothing that returns multiple rows. `project-overview.md` §8's API surface never reserved `GET /races` (no id) for anything, so it's free to use as the list endpoint.
+- Modeled the new query on two existing patterns read directly from `internal/postgres/race_repository.go`: `GetRaceWithParticipants`'s `race_participants rp JOIN users u ON u.id = rp.user_id` (for the host's `display_name`), and `CountParticipants`'s plain `count(*) ... WHERE race_id = $1` (for player counts, done here via `LEFT JOIN ... GROUP BY` instead, to get all races' counts in one query rather than N+1).
+- "Open" = `status = 'pending'` and not full. Excluding races the caller already created or joined (not just "not full") avoids a real edge case: `CreateRace` auto-joins its creator, so without this exclusion a user would see their own just-created race in the browsable list and clicking "Join" on it would 409 `already_joined` with no session token to actually enter it.
+- `race.MaxParticipants` (`internal/race/race.go`, already `10`) is the existing cap `JoinRace` enforces — reused as-is for the "not full" filter and echoed back in the response so the frontend doesn't hardcode `10` a second place (there's already a comment in `frontend/src/lib/vehicles.ts` noting `10` is tied to this same constant).
+- Poll interval: **5 seconds**. This is a passive lobby-browsing list on the Dashboard, not a race in progress — there's no WebSocket at this screen and no real-time-correctness requirement the way an active race has. 5s is frequent enough that a newly created race or an updated join count feels reasonably live without manual refresh, and infrequent enough not to hammer a plain REST endpoint for a decorative-adjacent widget. Plain `setInterval` in a `useEffect`, cleared on unmount (the interval only runs while `OpenRacesList` is actually mounted on the Dashboard) — no visibility-based pausing or backoff, which would be more machinery than this widget's importance justifies.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/race/race.go`**: add `OpenRace` struct — `ID, Name string; DistanceMeters int; HostDisplayName string; PlayerCount, MaxPlayers int; CreatedAt time.Time`.
+
+2. **`internal/race/repository.go`**: add `ListOpenRaces(ctx context.Context, excludeUserID string) ([]OpenRace, error)` to the `RaceRepository` interface.
+
+3. **`internal/postgres/race_repository.go`**: implement `ListOpenRaces`:
+   ```sql
+   SELECT r.id, r.name, r.distance_meters, u.display_name, count(rp2.user_id), r.created_at
+   FROM races r
+   JOIN users u ON u.id = r.created_by
+   LEFT JOIN race_participants rp2 ON rp2.race_id = r.id
+   WHERE r.status = 'pending'
+     AND NOT EXISTS (
+       SELECT 1 FROM race_participants rp3
+       WHERE rp3.race_id = r.id AND rp3.user_id = $1
+     )
+   GROUP BY r.id, u.display_name
+   HAVING count(rp2.user_id) < $2
+   ORDER BY r.created_at DESC
+   LIMIT $3
+   ```
+   Params: `excludeUserID`, `race.MaxParticipants`, a local `const openRacesLimit = 20` (no real pagination need for a side project — a flat cap is enough). `MaxPlayers` on each returned `OpenRace` is just `race.MaxParticipants`, not a per-row column.
+
+4. **`internal/race/service.go`**: `RaceService.ListOpenRaces(ctx, callerID string) ([]OpenRace, error)` — thin delegate, no validation/orchestration needed (same shape as `GetRaceText`/`GetRaceDetail`).
+
+5. **`internal/race/dtos.go`**: `openRaceResponse{ID, Name string; DistanceMeters int; HostDisplayName string; PlayerCount, MaxPlayers int; CreatedAt string}` and `listOpenRacesResponse{Races []openRaceResponse}`.
+
+6. **`internal/race/handler.go`**: `RaceHandler.ListOpen(w, r)` — same `middleware.UserIDFromContext` 401 guard every authenticated handler already uses, calls the service, formats `CreatedAt` via `time.RFC3339` (matching every other timestamp in this domain), writes JSON.
+
+7. **`internal/httpserver/route.go`**: `server.Handle("GET /races", requireAuth(http.HandlerFunc(raceHandler.ListOpen)))` — confirmed no route conflict: Go 1.22's `http.ServeMux` treats `GET /races` (exact) and `GET /races/{id}` (wildcard) as distinct patterns, and `POST /races` already coexists with `GET /races/{id}` today the same way.
+
+8. **Frontend**:
+   - `frontend/src/types/race.ts`: add `OpenRace`/`ListOpenRacesResponse` interfaces mirroring the new Go DTOs.
+   - `OpenRacesList.tsx`: replace `RACE_SEED`/local state with `useEffect` fetching `GET /races` on mount, then `setInterval(..., 5000)` re-fetching on the same code path, cleared on unmount. Replace `handleJoin`'s fake increment with a real `POST /races/{id}/join` call; on success, call a new `onJoined: (raceId, sessionToken) => void` prop — `RacesPage.tsx` passes its existing `handleEnterRace` (the same handler `CreateRaceForm`/`JoinRaceForm` already use), so joining from this list lands the player on `/races/{id}` exactly like every other join path. Keep the `laneColor(index)` colored-dot treatment, keyed off array position since there's no stored per-race color.
+
+9. **Swagger**: regenerate via `make docs` after the new endpoint is annotated.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- No pagination — a flat `LIMIT 20`, consistent with this being a side project and not expecting hundreds of concurrent open lobbies.
+- Does not touch `CreateRaceForm`/`JoinRaceForm` — both keep working exactly as they do today; this only replaces `OpenRacesList`'s data source and wires its Join button to the same real flow they already use.
+- No new backend tests infrastructure needed beyond what `internal/race` already has — `ListOpenRaces` gets covered the same way (`RaceService` tests against the existing fake repository in `helpers_test.go`, `RaceHandler` tests via `httptest`), per this project's standing testability convention.
 
 ## History
 

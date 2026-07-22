@@ -241,6 +241,43 @@ func (h *RaceHandler) Text(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, getRaceTextResponse{PromptText: promptText})
 }
 
+// ListOpen godoc
+// @Summary List open races
+// @Description Returns pending, joinable races the caller hasn't already created or joined
+// @Tags races
+// @Produce json
+// @Success 200 {object} listOpenRacesResponse
+// @Failure 401 {object} map[string]string "error: unauthorized"
+// @Router /races [get]
+func (h *RaceHandler) ListOpen(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	open, err := h.svc.ListOpenRaces(r.Context(), userID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+
+	races := make([]openRaceResponse, len(open))
+	for i, o := range open {
+		races[i] = openRaceResponse{
+			ID:              o.ID,
+			Name:            o.Name,
+			DistanceMeters:  o.DistanceMeters,
+			HostDisplayName: o.HostDisplayName,
+			PlayerCount:     o.PlayerCount,
+			MaxPlayers:      o.MaxPlayers,
+			CreatedAt:       o.CreatedAt.Format(time.RFC3339),
+		}
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, listOpenRacesResponse{Races: races})
+}
+
 // Status godoc
 // @Summary Get race status
 // @Description Returns a race's current status and participant list

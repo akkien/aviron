@@ -3,6 +3,7 @@ package race_test
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -211,6 +212,47 @@ func (f *fakeRepository) FinishRace(ctx context.Context, raceID string, distance
 		}
 	}
 	return nil
+}
+
+// ListOpenRaces mirrors the real repository's rules: pending, not full, and
+// excludeUserID isn't already a participant. HostDisplayName falls back to
+// the creator's user id, same "fake stand-in" convention
+// GetRaceWithParticipants's DisplayName already uses in this fake.
+func (f *fakeRepository) ListOpenRaces(ctx context.Context, excludeUserID string) ([]race.OpenRace, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var open []race.OpenRace
+	for _, r := range f.races {
+		if r.Status != "pending" {
+			continue
+		}
+		count := 0
+		excluded := false
+		for _, p := range f.participants {
+			if p.raceID != r.ID {
+				continue
+			}
+			count++
+			if p.userID == excludeUserID {
+				excluded = true
+			}
+		}
+		if excluded || count >= race.MaxParticipants {
+			continue
+		}
+		open = append(open, race.OpenRace{
+			ID:              r.ID,
+			Name:            r.Name,
+			DistanceMeters:  r.DistanceMeters,
+			HostDisplayName: r.CreatedBy,
+			PlayerCount:     count,
+			MaxPlayers:      race.MaxParticipants,
+			CreatedAt:       r.CreatedAt,
+		})
+	}
+	sort.Slice(open, func(i, j int) bool { return open[i].CreatedAt.After(open[j].CreatedAt) })
+	return open, nil
 }
 
 // CancelRace mirrors the real repository's status='pending' guard — a no-op

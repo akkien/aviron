@@ -622,3 +622,76 @@ func TestRaceHandler_Status_NotFound(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
+
+func TestRaceHandler_ListOpen_OK(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h) // created by "creator"
+
+	req := httptest.NewRequest(http.MethodGet, "/races", nil)
+	req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-1"))
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.ListOpen)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Races []map[string]any `json:"races"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(resp.Races) != 1 {
+		t.Fatalf("races = %+v, want exactly 1", resp.Races)
+	}
+	if resp.Races[0]["id"] != raceID {
+		t.Errorf("id = %v, want %q", resp.Races[0]["id"], raceID)
+	}
+	if resp.Races[0]["host_display_name"] != "creator" {
+		t.Errorf("host_display_name = %v, want %q", resp.Races[0]["host_display_name"], "creator")
+	}
+}
+
+func TestRaceHandler_ListOpen_ExcludesCallersOwnRace(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	createTestRace(t, secret, h) // created by "creator"
+
+	req := httptest.NewRequest(http.MethodGet, "/races", nil)
+	req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "creator"))
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.ListOpen)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Races []map[string]any `json:"races"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(resp.Races) != 0 {
+		t.Errorf("races = %+v, want none (caller is the creator)", resp.Races)
+	}
+}
+
+func TestRaceHandler_ListOpen_MissingAuth(t *testing.T) {
+	h := newTestHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/races", nil)
+	// No Authorization header, and not wrapped in middleware.Auth — simulates
+	// the handler being invoked directly, to prove its own defensive check.
+	rec := httptest.NewRecorder()
+
+	h.ListOpen(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}

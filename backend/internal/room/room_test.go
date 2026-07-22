@@ -422,6 +422,61 @@ func TestRoomActor_ApplyEvent_ParticipantLeft_Pending_LeaverFailureIsLoggedNotFa
 	}
 }
 
+// TestRoomActor_ApplyEvent_ParticipantLeft_Pending_LastParticipantCancelsRace
+// is a regression test: a pending room's ParticipantLeft branch removed the
+// departing participant but never called checkRaceFinished afterward (unlike
+// departParticipant, used by the active-race leave path just above), so the
+// last player leaving a pending lobby left the race sitting as "pending"
+// forever instead of being cancelled — nobody would see it cancel until
+// PendingTimeoutDuration eventually elapsed on its own.
+func TestRoomActor_ApplyEvent_ParticipantLeft_Pending_LastParticipantCancelsRace(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.broadcast = make(chan []byte, 4)
+	r.leaver = &spyLeaver{}
+	canceller := &spyCanceller{}
+	r.canceller = canceller
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+
+	if len(canceller.calls) != 1 {
+		t.Fatalf("canceller.calls = %d, want 1 (last participant leaving a pending room must cancel it)", len(canceller.calls))
+	}
+	if canceller.calls[0] != r.id {
+		t.Errorf("canceller called with raceID = %q, want %q", canceller.calls[0], r.id)
+	}
+	if !r.finished {
+		t.Error("r.finished = false after the last pending participant left, want true")
+	}
+}
+
+// TestRoomActor_ApplyEvent_ParticipantLeft_Pending_OthersRemaining_DoesNotCancel
+// confirms the fix above didn't overreach: leaving a pending room that still
+// has other participants must not cancel it.
+func TestRoomActor_ApplyEvent_ParticipantLeft_Pending_OthersRemaining_DoesNotCancel(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.broadcast = make(chan []byte, 4)
+	r.leaver = &spyLeaver{}
+	canceller := &spyCanceller{}
+	r.canceller = canceller
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantJoined{UserID: "user-2", DisplayName: "Bob"})
+
+	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+
+	if len(canceller.calls) != 0 {
+		t.Errorf("canceller.calls = %d, want 0 (user-2 is still in the pending room)", len(canceller.calls))
+	}
+	if r.finished {
+		t.Error("r.finished = true, want false (room still has a participant)")
+	}
+	if _, ok := r.participants["user-2"]; !ok {
+		t.Error("user-2 missing from participants after user-1 left, want still present")
+	}
+}
+
 func TestRoomActor_ApplyEvent_EvictionQuery(t *testing.T) {
 	r := newTestActor()
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})

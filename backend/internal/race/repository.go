@@ -22,6 +22,10 @@ type RaceRepository interface {
 	StartRace(ctx context.Context, raceID, promptText string) (Race, error)
 	GetRaceText(ctx context.Context, raceID string) (string, error)
 	GetRaceWithParticipants(ctx context.Context, raceID string) (RaceDetail, error)
+	// ListOpenRaces returns pending, joinable races excludeUserID hasn't
+	// already created or joined (open-races.md) — "open" means both
+	// status = 'pending' and not yet at MaxParticipants.
+	ListOpenRaces(ctx context.Context, excludeUserID string) ([]OpenRace, error)
 	// FinishRace persists a race's final results (race-completion/finish-race.md)
 	// in one transaction: races.status/ended_at, each participant's final
 	// race_participants row, and a leaderboard_alltime upsert. results uses

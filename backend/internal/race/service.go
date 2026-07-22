@@ -134,6 +134,13 @@ func (s *RaceService) GetRaceDetail(ctx context.Context, raceID string) (RaceDet
 	return s.repo.GetRaceWithParticipants(ctx, raceID)
 }
 
+// ListOpenRaces returns pending, joinable races callerID hasn't already
+// created or joined (open-races.md). Thin delegate — no validation or
+// orchestration needed, same shape as GetRaceText/GetRaceDetail.
+func (s *RaceService) ListOpenRaces(ctx context.Context, callerID string) ([]OpenRace, error) {
+	return s.repo.ListOpenRaces(ctx, callerID)
+}
+
 // FinishRace persists a race's final results. Exists specifically to
 // satisfy room.RaceFinisher (structurally — no import of internal/race from
 // internal/room is needed, avoiding the cycle that a direct room -> race

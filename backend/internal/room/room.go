@@ -341,6 +341,14 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 				if err := r.leaver.LeaveRace(r.ctx, r.id, e.UserID); err != nil {
 					log.Printf("room %s: leave race for user %s: %v", r.id, e.UserID, err)
 				}
+				// If that was the last participant, cancel the race now
+				// instead of leaving it pending until PendingTimeoutDuration
+				// elapses on its own — checkRaceFinished's !r.active branch
+				// already handles "room emptied out before starting" via
+				// expirePendingRoom, but nothing called it from this path
+				// before (unlike departParticipant, used by the active-race
+				// leave above).
+				r.checkRaceFinished()
 			}
 		}
 	case evictionQuery:

@@ -290,3 +290,48 @@ func (r *RaceRepository) CancelRace(ctx context.Context, raceID string) error {
 	}
 	return nil
 }
+
+// openRacesLimit caps the browsable list's size — a flat cap, not real
+// pagination, since a side project isn't expected to have hundreds of
+// concurrent open lobbies (open-races.md).
+const openRacesLimit = 20
+
+// ListOpenRaces returns pending, joinable races excludeUserID hasn't
+// already created or joined. Player counts for every race are computed in
+// one query (LEFT JOIN + GROUP BY) rather than one COUNT query per race.
+func (r *RaceRepository) ListOpenRaces(ctx context.Context, excludeUserID string) ([]race.OpenRace, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT r.id, r.name, r.distance_meters, u.display_name, count(rp.user_id), r.created_at
+		FROM races r
+		JOIN users u ON u.id = r.created_by
+		LEFT JOIN race_participants rp ON rp.race_id = r.id
+		WHERE r.status = 'pending'
+			AND NOT EXISTS (
+				SELECT 1 FROM race_participants mine
+				WHERE mine.race_id = r.id AND mine.user_id = $1
+			)
+		GROUP BY r.id, u.display_name
+		HAVING count(rp.user_id) < $2
+		ORDER BY r.created_at DESC
+		LIMIT $3
+	`, excludeUserID, race.MaxParticipants, openRacesLimit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list open races: %w", err)
+	}
+	defer rows.Close()
+
+	var races []race.OpenRace
+	for rows.Next() {
+		var o race.OpenRace
+		if err := rows.Scan(&o.ID, &o.Name, &o.DistanceMeters, &o.HostDisplayName, &o.PlayerCount, &o.CreatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: list open races: scan: %w", err)
+		}
+		o.MaxPlayers = race.MaxParticipants
+		races = append(races, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list open races: rows: %w", err)
+	}
+
+	return races, nil
+}

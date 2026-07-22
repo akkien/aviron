@@ -461,3 +461,49 @@ func TestRaceService_CancelRace_NoOpIfNotPending(t *testing.T) {
 		t.Errorf("race status = %q, want unchanged %q", repo.races[0].Status, "active")
 	}
 }
+
+// TestRaceService_ListOpenRaces_ExcludesOwnAndFullRaces exercises the three
+// exclusion rules together: a race the caller created (and was auto-joined
+// to), a race the caller separately joined, and a race that's full, must
+// all be absent — only a genuinely open, not-yet-joined race remains.
+func TestRaceService_ListOpenRaces_ExcludesOwnAndFullRaces(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, secret)
+	ctx := context.Background()
+
+	if _, _, _, err := svc.CreateRace(ctx, "My Own Race", 1000, "caller"); err != nil {
+		t.Fatalf("CreateRace(own) error = %v", err)
+	}
+
+	joinedRace, _, _, err := svc.CreateRace(ctx, "Joined Race", 1000, "other-creator")
+	if err != nil {
+		t.Fatalf("CreateRace(joined) error = %v", err)
+	}
+	if _, err := svc.JoinRace(ctx, joinedRace.ID, "caller"); err != nil {
+		t.Fatalf("JoinRace(joined) error = %v", err)
+	}
+
+	fullRace, _, _, err := svc.CreateRace(ctx, "Full Race", 1000, "other-creator")
+	if err != nil {
+		t.Fatalf("CreateRace(full) error = %v", err)
+	}
+	for i := 0; i < race.MaxParticipants-1; i++ {
+		if _, err := svc.JoinRace(ctx, fullRace.ID, fmt.Sprintf("filler-%d", i)); err != nil {
+			t.Fatalf("JoinRace(filler-%d) error = %v", i, err)
+		}
+	}
+
+	openRace, _, _, err := svc.CreateRace(ctx, "Genuinely Open Race", 1000, "other-creator")
+	if err != nil {
+		t.Fatalf("CreateRace(open) error = %v", err)
+	}
+
+	open, err := svc.ListOpenRaces(ctx, "caller")
+	if err != nil {
+		t.Fatalf("ListOpenRaces() error = %v", err)
+	}
+	if len(open) != 1 || open[0].ID != openRace.ID {
+		t.Errorf("ListOpenRaces() = %+v, want only %q", open, openRace.ID)
+	}
+}

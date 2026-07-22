@@ -41,6 +41,20 @@ export interface Participant {
   avg_pace_watt: number
 }
 
+export interface OpenRace {
+  id: string
+  name: string
+  distance_meters: number
+  host_display_name: string
+  player_count: number
+  max_players: number
+  created_at: string
+}
+
+export interface ListOpenRacesResponse {
+  races: OpenRace[]
+}
+
 export interface RaceStatusResponse {
   id: string
   name: string

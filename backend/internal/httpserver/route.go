@@ -34,6 +34,7 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	raceHandler := race.NewRaceHandler(raceSvc, registry, ctx)
 
 	server.Handle("POST /races", requireAuth(http.HandlerFunc(raceHandler.Create)))
+	server.Handle("GET /races", requireAuth(http.HandlerFunc(raceHandler.ListOpen)))
 	server.Handle("POST /races/{id}/join", requireAuth(http.HandlerFunc(raceHandler.Join)))
 	server.Handle("POST /races/{id}/start", requireAuth(http.HandlerFunc(raceHandler.Start)))
 	server.Handle("GET /races/{id}/text", requireAuth(http.HandlerFunc(raceHandler.Text)))
