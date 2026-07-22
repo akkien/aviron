@@ -55,15 +55,18 @@ type RoomActor struct {
 	// active is true once the race has actually started (MarkActive) — lets
 	// checkRaceFinished tell "never started" apart from "started, then
 	// emptied out" (see there).
-	active bool
-	tickCount         int64
-	inbox             chan RoomEvent
-	broadcast         chan []byte
-	ctx               context.Context
-	cancel            context.CancelFunc
+	active    bool
+	tickCount int64
+	inbox     chan RoomEvent
+	broadcast chan []byte
+	ctx       context.Context
+	cancel    context.CancelFunc
 	// finisher persists final results once the race completes
 	// (race-completion/finish-race.md) — see finish.go.
 	finisher RaceFinisher
+	// leaver persists a pending-race participant intentionally leaving
+	// (pending-connections.md) — see finish.go.
+	leaver RaceLeaver
 	// startedAt is this actor's own construction time, used as the baseline
 	// for FinishTimeMs. Not literally races.started_at (that UPDATE and this
 	// Spawn happen milliseconds apart, in the same handler) — close enough
@@ -91,7 +94,7 @@ type RoomActor struct {
 // the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
@@ -104,6 +107,7 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 		ctx:                  actorCtx,
 		cancel:               cancel,
 		finisher:             finisher,
+		leaver:               leaver,
 		startedAt:            time.Now(),
 	}
 	time.AfterFunc(noShowTimeoutDuration, func() {
@@ -246,6 +250,9 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		// with the room's broadcast fan-out by the time this event applies.
 		r.broadcastSnapshot()
 	case TelemetryReceived:
+		if !r.active {
+			return // race hasn't started yet — nothing to accumulate progress against
+		}
 		p, ok := r.participants[e.UserID]
 		if !ok || e.Seq <= p.LastSeq {
 			return // unknown participant, or stale/duplicate/out-of-order — drop silently
@@ -301,7 +308,22 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		// exactly who's expected to, so there's no DisconnectedAt guard to
 		// check. Removed immediately, no timer, no grace period.
 		if p, ok := r.participants[e.UserID]; ok {
-			r.departParticipant(e.UserID, p)
+			if r.active {
+				r.departParticipant(e.UserID, p)
+			} else {
+				// Leaving before the race started (pending-connections.md):
+				// no result to preserve, and unlike a mid-race quit this
+				// person should be free to join again — remove outright,
+				// no departedParticipants, no evicted. Removed before the
+				// Postgres call, not after: the reader goroutine closes this
+				// connection right after sending leave_race, so unlike a
+				// real disconnect no grace-period path will ever run later
+				// to clean up a participant left in place by a failed call.
+				delete(r.participants, e.UserID)
+				if err := r.leaver.LeaveRace(r.ctx, r.id, e.UserID); err != nil {
+					log.Printf("room %s: leave race for user %s: %v", r.id, e.UserID, err)
+				}
+			}
 		}
 	case evictionQuery:
 		_, evicted := r.evicted[e.UserID]

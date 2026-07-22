@@ -47,7 +47,7 @@ func TestIntegration_HandshakeJoinAndReceiveSnapshot(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{})
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
 
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
@@ -77,13 +77,55 @@ func TestIntegration_HandshakeJoinAndReceiveSnapshot(t *testing.T) {
 	conn.Close(websocket.StatusNormalClosure, "")
 }
 
+// TestIntegration_ConnectsToPendingRace documents pending-connections.md's
+// grounding finding: GET /ws's rejection rule only ever checked whether an
+// actor exists, never race status — since early-spawn.md moved Spawn to
+// race creation, a still-pending race (actor.MarkActive() deliberately never
+// called here) already has a running actor and is a valid attach target,
+// not a rejection case.
+func TestIntegration_ConnectsToPendingRace(t *testing.T) {
+	secret := []byte("test-secret")
+	server, registry := newIntegrationTestServer(t, secret)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}) // pending: MarkActive() never called
+
+	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
+	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	conn, _, err := websocket.Dial(dialCtx, url, nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v, want a pending race's WebSocket connection to be accepted", err)
+	}
+	defer conn.CloseNow()
+
+	if err := conn.Write(dialCtx, websocket.MessageText, []byte(`{"type":"join_race","race_id":"race-1"}`)); err != nil {
+		t.Fatalf("Write(join_race) error = %v", err)
+	}
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readCancel()
+	_, data, err := conn.Read(readCtx)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("received an empty race_state message")
+	}
+
+	conn.Close(websocket.StatusNormalClosure, "")
+}
+
 func TestIntegration_RejectsInvalidToken(t *testing.T) {
 	secret := []byte("test-secret")
 	server, registry := newIntegrationTestServer(t, secret)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{})
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
 
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=not-a-real-token"
 
@@ -104,7 +146,7 @@ func TestIntegration_RejectsRaceIDMismatch(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{})
+	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
 
 	// Token is valid for race-1, but the query string asks to join race-2.
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
@@ -124,7 +166,7 @@ func TestIntegration_RejectsReconnectAfterGracePeriodExpired(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	actor := registry.Spawn(ctx, "race-1", 5, fakeFinisher{})
+	actor := registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{})
 
 	// A second, still-racing participant keeps the room alive once user-1 is
 	// evicted — race-completion/finish-race.md means an empty room finishes

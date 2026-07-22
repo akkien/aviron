@@ -25,10 +25,6 @@ type joinRaceResponse struct {
 	SessionToken string `json:"session_token"`
 }
 
-type leaveRaceResponse struct {
-	RaceID string `json:"race_id"`
-}
-
 type startRaceResponse struct {
 	ID         string `json:"id"`
 	Status     string `json:"status"`

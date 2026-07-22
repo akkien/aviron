@@ -10,7 +10,7 @@
 
 - `GET /ws?race_id=...&session_token=...` — upgrades the HTTP connection using `gorilla/websocket` or `nhooyr.io/websocket` (context/project-overview.md §11, either is acceptable)
 - `session_token` is the per-race JWT `JoinRace` already issues in Phase 1 (`internal/race`, `race_id`/`user_id` claims, 6h TTL) — verified the same way `middleware.Auth` verifies the main JWT, just against this token's own claims instead of `sub`/`email`
-- Reject the upgrade (before it happens, with a plain HTTP error) if: the token is invalid/expired, `race_id` in the token doesn't match the query param, or `room-actor/room-registry.md`'s `Get(raceID)` finds no running actor (race is `pending` or already `finished`)
+- Reject the upgrade (before it happens, with a plain HTTP error) if: the token is invalid/expired, `race_id` in the token doesn't match the query param, or `room-actor/room-registry.md`'s `Get(raceID)` finds no running actor (race was never created, or has already finished and been torn down by the registry's watcher goroutine) — **updated by `room-lifecycle/pending-connections.md`**: since `room-lifecycle/early-spawn.md`, a room actor is spawned at race creation, so a `pending` race already has a running actor and is a valid attach target, not a rejection case
 - On successful upgrade, the connection is handed to the room actor found via the registry: an event is placed on its `inbox` marking this participant attached (or reattached, if `reconnection/grace-period.md` applies), and the goroutines below are started
 
 ### Connection Goroutines

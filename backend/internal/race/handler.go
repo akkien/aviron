@@ -70,7 +70,7 @@ func (h *RaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc)
+	h.registry.Spawn(h.ctx, created.ID, created.DistanceMeters, h.svc, h.svc)
 
 	httpx.WriteJSON(w, http.StatusCreated, createRaceResponse{
 		ID:             created.ID,
@@ -131,50 +131,6 @@ func (h *RaceHandler) Join(w http.ResponseWriter, r *http.Request) {
 		RaceID:       raceID,
 		SessionToken: sessionToken,
 	})
-}
-
-// Leave godoc
-// @Summary Leave a race
-// @Description Removes the caller as a participant of a still-pending race. Once the race is active, quit via the WebSocket leave_race message instead.
-// @Tags races
-// @Produce json
-// @Param id path string true "Race ID"
-// @Success 200 {object} leaveRaceResponse
-// @Failure 400 {object} map[string]string "error: invalid_race_id"
-// @Failure 401 {object} map[string]string "error: unauthorized"
-// @Failure 404 {object} map[string]string "error: race_not_found | not_participant"
-// @Failure 409 {object} map[string]string "error: race_not_pending"
-// @Router /races/{id}/leave [post]
-func (h *RaceHandler) Leave(w http.ResponseWriter, r *http.Request) {
-	userID, ok := middleware.UserIDFromContext(r.Context())
-	if !ok {
-		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
-	raceID := r.PathValue("id")
-	if !isValidRaceID(raceID) {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid_race_id")
-		return
-	}
-
-	err := h.svc.LeaveRace(r.Context(), raceID, userID)
-	switch {
-	case errors.Is(err, ErrRaceNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "race_not_found")
-		return
-	case errors.Is(err, ErrNotParticipant):
-		httpx.WriteError(w, http.StatusNotFound, "not_participant")
-		return
-	case errors.Is(err, ErrRaceNotPending):
-		httpx.WriteError(w, http.StatusConflict, "race_not_pending")
-		return
-	case err != nil:
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
-		return
-	}
-
-	httpx.WriteJSON(w, http.StatusOK, leaveRaceResponse{RaceID: raceID})
 }
 
 // Start godoc
