@@ -1,67 +1,24 @@
-# Current Feature: Open Races (Real List + Polling)
+# Current Feature
 
 ## Status
 
-In Progress
+Not Started
 
 ## Goals
 
-- `OpenRacesList.tsx` shows real, joinable pending races from Postgres instead of the hardcoded 4-row `RACE_SEED`.
-- The list updates on its own via polling while the Dashboard is visible — no manual refresh needed to see new lobbies or updated player counts.
-- Clicking "Join" actually joins the race (`POST /races/{id}/join`) and lands the player on it, same as `JoinRaceForm`'s existing flow — not the old fake local player-count increment.
+<!-- populated by /feature load -->
 
 ## Explain
 
-- Confirmed directly in code: `OpenRacesList.tsx`'s own comment says it plainly — "Hardcoded seed list — there is no GET /races browsable-list endpoint... Purely decorative: clicking Join only increments the row's local player count client-side, it never calls the real join API."
-- No list-races capability exists anywhere in the backend today: `race.RaceRepository`'s interface (`internal/race/repository.go`) only has single-race lookups (`GetRace`, `GetRaceWithParticipants`) — nothing that returns multiple rows. `project-overview.md` §8's API surface never reserved `GET /races` (no id) for anything, so it's free to use as the list endpoint.
-- Modeled the new query on two existing patterns read directly from `internal/postgres/race_repository.go`: `GetRaceWithParticipants`'s `race_participants rp JOIN users u ON u.id = rp.user_id` (for the host's `display_name`), and `CountParticipants`'s plain `count(*) ... WHERE race_id = $1` (for player counts, done here via `LEFT JOIN ... GROUP BY` instead, to get all races' counts in one query rather than N+1).
-- "Open" = `status = 'pending'` and not full. Excluding races the caller already created or joined (not just "not full") avoids a real edge case: `CreateRace` auto-joins its creator, so without this exclusion a user would see their own just-created race in the browsable list and clicking "Join" on it would 409 `already_joined` with no session token to actually enter it.
-- `race.MaxParticipants` (`internal/race/race.go`, already `10`) is the existing cap `JoinRace` enforces — reused as-is for the "not full" filter and echoed back in the response so the frontend doesn't hardcode `10` a second place (there's already a comment in `frontend/src/lib/vehicles.ts` noting `10` is tied to this same constant).
-- Poll interval: **5 seconds**. This is a passive lobby-browsing list on the Dashboard, not a race in progress — there's no WebSocket at this screen and no real-time-correctness requirement the way an active race has. 5s is frequent enough that a newly created race or an updated join count feels reasonably live without manual refresh, and infrequent enough not to hammer a plain REST endpoint for a decorative-adjacent widget. Plain `setInterval` in a `useEffect`, cleared on unmount (the interval only runs while `OpenRacesList` is actually mounted on the Dashboard) — no visibility-based pausing or backoff, which would be more machinery than this widget's importance justifies.
+<!-- populated by /feature load -->
 
 ## Plan
 
-1. **`internal/race/race.go`**: add `OpenRace` struct — `ID, Name string; DistanceMeters int; HostDisplayName string; PlayerCount, MaxPlayers int; CreatedAt time.Time`.
-
-2. **`internal/race/repository.go`**: add `ListOpenRaces(ctx context.Context, excludeUserID string) ([]OpenRace, error)` to the `RaceRepository` interface.
-
-3. **`internal/postgres/race_repository.go`**: implement `ListOpenRaces`:
-   ```sql
-   SELECT r.id, r.name, r.distance_meters, u.display_name, count(rp2.user_id), r.created_at
-   FROM races r
-   JOIN users u ON u.id = r.created_by
-   LEFT JOIN race_participants rp2 ON rp2.race_id = r.id
-   WHERE r.status = 'pending'
-     AND NOT EXISTS (
-       SELECT 1 FROM race_participants rp3
-       WHERE rp3.race_id = r.id AND rp3.user_id = $1
-     )
-   GROUP BY r.id, u.display_name
-   HAVING count(rp2.user_id) < $2
-   ORDER BY r.created_at DESC
-   LIMIT $3
-   ```
-   Params: `excludeUserID`, `race.MaxParticipants`, a local `const openRacesLimit = 20` (no real pagination need for a side project — a flat cap is enough). `MaxPlayers` on each returned `OpenRace` is just `race.MaxParticipants`, not a per-row column.
-
-4. **`internal/race/service.go`**: `RaceService.ListOpenRaces(ctx, callerID string) ([]OpenRace, error)` — thin delegate, no validation/orchestration needed (same shape as `GetRaceText`/`GetRaceDetail`).
-
-5. **`internal/race/dtos.go`**: `openRaceResponse{ID, Name string; DistanceMeters int; HostDisplayName string; PlayerCount, MaxPlayers int; CreatedAt string}` and `listOpenRacesResponse{Races []openRaceResponse}`.
-
-6. **`internal/race/handler.go`**: `RaceHandler.ListOpen(w, r)` — same `middleware.UserIDFromContext` 401 guard every authenticated handler already uses, calls the service, formats `CreatedAt` via `time.RFC3339` (matching every other timestamp in this domain), writes JSON.
-
-7. **`internal/httpserver/route.go`**: `server.Handle("GET /races", requireAuth(http.HandlerFunc(raceHandler.ListOpen)))` — confirmed no route conflict: Go 1.22's `http.ServeMux` treats `GET /races` (exact) and `GET /races/{id}` (wildcard) as distinct patterns, and `POST /races` already coexists with `GET /races/{id}` today the same way.
-
-8. **Frontend**:
-   - `frontend/src/types/race.ts`: add `OpenRace`/`ListOpenRacesResponse` interfaces mirroring the new Go DTOs.
-   - `OpenRacesList.tsx`: replace `RACE_SEED`/local state with `useEffect` fetching `GET /races` on mount, then `setInterval(..., 5000)` re-fetching on the same code path, cleared on unmount. Replace `handleJoin`'s fake increment with a real `POST /races/{id}/join` call; on success, call a new `onJoined: (raceId, sessionToken) => void` prop — `RacesPage.tsx` passes its existing `handleEnterRace` (the same handler `CreateRaceForm`/`JoinRaceForm` already use), so joining from this list lands the player on `/races/{id}` exactly like every other join path. Keep the `laneColor(index)` colored-dot treatment, keyed off array position since there's no stored per-race color.
-
-9. **Swagger**: regenerate via `make docs` after the new endpoint is annotated.
+<!-- populated by /feature load -->
 
 ## Notes
 
-- No pagination — a flat `LIMIT 20`, consistent with this being a side project and not expecting hundreds of concurrent open lobbies.
-- Does not touch `CreateRaceForm`/`JoinRaceForm` — both keep working exactly as they do today; this only replaces `OpenRacesList`'s data source and wires its Join button to the same real flow they already use.
-- No new backend tests infrastructure needed beyond what `internal/race` already has — `ListOpenRaces` gets covered the same way (`RaceService` tests against the existing fake repository in `helpers_test.go`, `RaceHandler` tests via `httptest`), per this project's standing testability convention.
+<!-- populated by /feature load -->
 
 ## History
 
@@ -102,3 +59,8 @@ In Progress
   **Real dilution bug found and explained via live DB inspection, not guesswork, after a user report of an implausible `AvgWPM`**: a 3-word race finished in 4.5s (a real ~40 WPM) showed `AvgWPM: 3`. Queried the local dev Postgres container directly (`docker exec ... psql`) rather than reasoning abstractly, and found the account's `leaderboard_alltime` row had `total_races: 41` (accumulated across this whole project's testing history, long before pace tracking existed) against `total_pace_watt_sum: 118` — 40 historical races correctly contribute `0` to the sum (since `AvgPaceWatt` really was always `0.0` before this feature), permanently diluting the average (`118/41 ≈ 2.88 → rounds to 3`). Confirmed this as expected given the data, not a bug in the new arithmetic. Per explicit user request: (1) `AvgWPM` now rounds to 2 decimal places server-side (`math.Round(x*100)/100` in `LeaderboardService.GetMyStats`, up from a raw un-rounded float), with `StatCards.tsx` switched from `Math.round(...)` (integer) to `.toFixed(2)`; (2) the local dev DB's `races`/`race_participants`/`workout_samples`/`leaderboard_alltime` tables were truncated (`users` left untouched, so existing logins still work) to clear the polluted historical test data — a one-time manual dev-environment fix, not a code or migration change.
 
   Verified after every change (both the original implementation and the two follow-up fixes): `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green including the new `internal/leaderboard` tests, `internal/room`+`internal/ws` re-run 3x with no flakiness, `yarn build`/`yarn lint` clean (same pre-existing shadcn warning as every prior frontend feature), Swagger docs regenerated for the new endpoint. Per `context/features/phase2.5/phase-2.5-plan.md`, all four Phase 2.5 specs (`theme.md`, `dashboard.md`, `race-screen.md`, `user-stats.md`) are now shipped — **this completes Phase 2.5 entirely**. Next: whichever direction is chosen from `context/project-overview.md` §12 — Phase 3 (structured logging, Prometheus metrics, pprof, load testing) or the remaining Phase 4 strong-plus items (Redis, Kafka, Kubernetes, gRPC).
+- **Open Races (Real List + Polling)** (2026-07-22) — Not part of any phase plan; an inline-described feature (`load`ed directly from a one-line request, no spec file) making `OpenRacesList.tsx` real. Grounded first: confirmed `OpenRacesList.tsx`'s own comment stated plainly it was decorative (fake local join-count, no real join call), and that `race.RaceRepository` had no list-returning method anywhere. New `GET /races` (free to use — `project-overview.md` §8 never reserved it, and Go 1.22's `http.ServeMux` doesn't conflict `GET /races` against `GET /races/{id}`/`POST /races`), backed by one `LEFT JOIN race_participants ... GROUP BY ... HAVING count(...) < MaxParticipants` query (avoids N+1 per-race count queries) that also excludes any race the caller already created or joined via `NOT EXISTS` — a real edge case reasoned through before writing code: without it, `CreateRace`'s auto-join-the-creator behavior would make a user's own just-created race show up in their own browsable list, and clicking "Join" on it would 409. Poll interval fixed at **5 seconds**, chosen and documented explicitly (no WebSocket at this screen, no real-time-correctness requirement, frequent enough to feel live without hammering a REST endpoint) — the user's own instruction was "you decide," so the reasoning was written down rather than left as an unexplained magic number. `OpenRacesList.tsx`'s Join button now calls the real `POST /races/{id}/join` and reuses `RacesPage.tsx`'s existing `handleEnterRace` (the same handler `CreateRaceForm`/`JoinRaceForm` already use) so joining from the list lands on `/races/{id}` exactly like every other join path. New `internal/race` tests (`ListOpenRaces` service test exercising all three exclusion rules together — own race, joined race, full race — plus handler tests for the 200/exclusion/401 cases) extended the existing fake-repository convention (`fakeRepository.ListOpenRaces` added to `helpers_test.go`). Verified live against the real local Postgres, not just fakes: registered two real users, created a race as one, confirmed the other saw it with correct host/counts, confirmed the creator did *not* see their own race, and confirmed it vanished from the joiner's own list immediately after joining — all via direct `curl` against a locally running server, cleaned up afterward.
+
+  **Two real bugs found and fixed mid-feature, from a direct user report of live testing** (not part of the original plan, but bundled into the same commit since both are in the same "pending race lobby visibility" area `open-races.md` itself touches): (1) A creator watching their pending lobby never saw a second player join, or a player leave, without a manual page refresh — traced to `RaceScreenSidebar.tsx`'s pending player list rendering from `raceDetail.participants`, a one-time REST snapshot, never reconciled against the live `race_state` broadcasts `useRaceSocket.ts` was already receiving over the WebSocket the whole time (confirmed the backend was already broadcasting correctly on both the immediate `ParticipantJoined` call and the unconditional 250ms ticker — this was purely a frontend rendering gap, not a missing broadcast). Fixed by comparing the live participant count against the REST snapshot's count while pending and calling the existing `onRefresh()` callback (the same one `race_started` already uses) on a mismatch, guarded by a ref so it fires once per actual change, not every tick. (2) The last participant leaving a pending race never got cancelled — traced to `applyEvent`'s `ParticipantLeft` case: the active-race branch calls `departParticipant`, which calls `checkRaceFinished()` afterward to detect "room now empty," but the pending-room branch removed the participant and persisted the leave without ever calling `checkRaceFinished()`, so an emptied pending race just sat as `status: pending` until `PendingTimeoutDuration` eventually elapsed on its own instead of cancelling immediately. Fixed with one added call; a regression test was written and confirmed to fail against the pre-fix code (via `git stash`) before confirming it passed after, plus a companion test proving a pending room with other participants still present correctly does *not* get cancelled.
+
+  Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green, `internal/room` re-run 3x with no flakiness (including the two new regression tests), `yarn build`/`yarn lint` clean (same pre-existing shadcn warning as every prior frontend feature), Swagger docs regenerated for the new endpoint. Bundled a second, unrelated commit on the same branch per explicit request: added a `pgadmin` service to `docker-compose.yml` (port 5050, pre-registered "Aviron (local)" connection via `docker/pgadmin/servers.json`) so the database can be browsed from a browser — verified live (`docker compose up -d pgadmin`, confirmed healthy, confirmed the pre-registered server loaded from the logs). Same disclosed gap as every frontend-touching feature this project: no live two-browser-tab test for the lobby live-update fix, verified by tracing the exact data flow (backend broadcast → `useRaceSocket` → `RaceScreenSidebar` render) rather than an observed browser session.
