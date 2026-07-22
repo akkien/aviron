@@ -1,24 +1,47 @@
-# Current Feature
+# Current Feature: Race Detail — Cold Visit & Spectator View
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- Reloading a race page after it finished shows the actual results, not "You were disconnected too long and have left the race." — the WebSocket must never be reattempted against a race that's provably over.
+- Visiting a race URL cold (fresh tab, no router state, never having joined) shows a normal, correct page for whatever the race's actual status is — never a permanent "Loading prompt...".
+- This holds **regardless of whether the visitor was ever a participant** — a spectator sees a correct read-only view of a pending lobby, an in-progress race, or a finished race's results, per explicit direction.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **Every claim in the spec reverified against the current code, unchanged since it was written**: `internal/race/race.go`'s `Participant` struct (line 19) still has only `UserID`/`DisplayName`/`JoinedAt`; `GetRaceWithParticipants`'s participant query (`internal/postgres/race_repository.go`) still selects only `rp.user_id, u.display_name, rp.joined_at`; `internal/race/dtos.go`'s `participantResponse` (line 39) still has no finish fields; `RaceHandler.Status` builds `participantResponse` field-by-field from `detail.Participants` (`handler.go:280-284`), so widening the domain struct and query is sufficient — no handler logic change needed beyond adding three more field assignments.
+- **The root cause is singular, not three separate bugs**: the race page only renders correctly for a client with a live, successfully-connected WebSocket. Every symptom (reload-after-finish showing `evicted`, cold-link showing permanent "Loading prompt...", a spectator getting a nonsensical interactive typing box) is the same gap surfacing in a different dispatch branch.
+- **The connection-gating fix must fail open, not closed** — this is the one design decision in the spec worth restating clearly before touching code: gate on `raceDetail?.status` being **terminal** (`finished`/`cancelled`), not on it being **known-good** (`pending`/`active`). `raceDetail` is `null` for the brief window between mount and the first `GET /races/{id}` resolving — a naive "only connect once status is confirmed pending/active" gate would delay every fresh join/create's connection by a REST round-trip, silently reintroducing the exact connection-delay unfairness `race-started-broadcast.md`/`live-lobby.md` were built to eliminate. Failing open (connect unless we positively know it's over) has no such regression.
+- **Confirmed the REST endpoints this relies on already have no participation requirement**: `apiFetch` only ever attaches the main JWT; `GET /races/{id}` and `GET /races/{id}/text` both authenticate via `middleware.Auth` alone, never a per-race `session_token`. So the backend side of "spectator can view" already works today — this feature is entirely about the frontend correctly using data that's already reachable, plus the one backend gap (finish results never being selected).
+- **`RaceTrack.tsx` and the sidebar's leaderboard block need no changes** — both already degrade to a clean 0%-for-everyone render with no live `raceState`, confirmed directly by reading `RaceTrack.tsx`'s `progressByUserId` fallback (`?? []`) and percent calculation (driven by the `distanceMeters` prop, not `raceState`). The only genuinely broken piece for a spectator is `TypingBox` being unconditionally interactive with no read-only concept at all.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/race/race.go`**: `Participant` gains `FinishRank *int`, `FinishTimeMs *int64`, `AvgPaceWatt float64` — same nullable shape as `internal/room/finish.go`'s `RaceResultJSON`.
+2. **`internal/postgres/race_repository.go`**: `GetRaceWithParticipants`'s participant query additionally selects `rp.finish_rank, rp.finish_time_ms, rp.avg_pace_watt`, scanned into the widened `Participant`.
+3. **`internal/race/dtos.go`**: `participantResponse` gains `FinishRank *int \`json:"finish_rank"\``, `FinishTimeMs *int64 \`json:"finish_time_ms"\``, `AvgPaceWatt float64 \`json:"avg_pace_watt"\`` — same JSON field names as `RaceResultJSON`.
+4. **`internal/race/handler.go`**: `RaceHandler.Status`'s `participantResponse{...}` literal passes the three new fields through from `detail.Participants[i]`.
+5. **`frontend/src/types/race.ts`**: `Participant` interface gains the matching three fields.
+6. **`frontend/src/components/race-screen/RaceScreen.tsx`**: compute `const terminal = raceDetail?.status === "finished" || raceDetail?.status === "cancelled"`; pass `terminal ? null : sessionToken` into `useRaceSocket` instead of the current unconditional `sessionToken`.
+7. **`frontend/src/components/race-screen/RaceScreenSidebar.tsx`**:
+   - `if (finished) {...}` → `if (finished || raceDetail.status === "finished") {...}`, with the ranked-results list built from `finished.results` when present, else from `raceDetail.participants`.
+   - New `isParticipant = raceDetail.participants.some(p => p.user_id === currentUserId)`.
+   - Pending view's "Leave" button only renders when `isParticipant`.
+   - New branch for `raceDetail.status === "active" && !isParticipant` (checked before the `promptText === null` fallback): render the existing leaderboard block without `TypingBox`, with a small "Spectating" label in place of the "Quit Race" button — skips every `promptText`-dependent branch entirely.
+8. **Tests**:
+   - New: `internal/race` (or wherever this project's existing fake-repository test conventions live) — a finished race's participants come back with non-nil `finish_rank`/`finish_time_ms` from `GetRaceDetail`/`RaceHandler.Status`.
+   - Frontend verification is code-level reasoning plus `yarn build`/`yarn lint`, per this project's disclosed no-browser-automation limitation — confirm by reading, not assuming: reloading a finished race's URL never re-enters the WS connect path, and a non-participant's active-race view never mounts `TypingBox`.
+9. **Verify**: `go build`/`go vet`/`gofmt -l .`/`go test ./... -race`; `yarn build`/`yarn lint`.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Not part of any existing phase plan — a standalone bug-fix feature discovered via direct report after Phase 2.6 shipped.
+- Full spec: `context/features/race-detail-cold-visit.md`.
+- No migration needed — `race_participants.finish_rank`/`finish_time_ms`/`avg_pace_watt` already exist and are already populated by `FinishRace`'s transaction; this only changes what's read back out.
+- Explicitly out of scope (per the spec): distinguishing *why* someone can't type (never joined vs. lost their session token) — both look identical server-side and should look identical here; making a spectator's view live via WebSocket without a session token — a real scope expansion this bug report didn't ask for, a spectator's view stays a refreshable REST snapshot.
 
 ## History
 

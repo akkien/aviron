@@ -524,6 +524,63 @@ func TestRaceHandler_Status_PendingRaceIncludesPendingExpiresAt(t *testing.T) {
 	}
 }
 
+// TestRaceHandler_Status_FinishedRaceIncludesFinishResults covers
+// race-detail-cold-visit.md: GET /races/{id} must expose finish results so
+// a cold visit (reload, fresh link, a spectator) can render them without
+// ever needing the live race_finished WebSocket message.
+func TestRaceHandler_Status_FinishedRaceIncludesFinishResults(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, secret)
+	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	raceID := createTestRace(t, secret, h) // creator auto-joins as "creator"
+
+	rank := 1
+	finishTimeMs := int64(45000)
+	results := []room.ParticipantResult{
+		{UserID: "creator", FinishRank: &rank, FinishTimeMs: &finishTimeMs, AvgPaceWatt: 42.5},
+	}
+	if err := svc.FinishRace(context.Background(), raceID, 1000, results); err != nil {
+		t.Fatalf("FinishRace() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID, nil)
+	req.SetPathValue("id", raceID)
+	req.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-1"))
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Status)).ServeHTTP(rec, req)
+
+	var resp struct {
+		Status       string `json:"status"`
+		Participants []struct {
+			UserID       string  `json:"user_id"`
+			FinishRank   *int    `json:"finish_rank"`
+			FinishTimeMs *int64  `json:"finish_time_ms"`
+			AvgPaceWatt  float64 `json:"avg_pace_watt"`
+		} `json:"participants"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.Status != "finished" {
+		t.Fatalf("status = %q, want %q", resp.Status, "finished")
+	}
+	if len(resp.Participants) != 1 {
+		t.Fatalf("participants = %d, want 1", len(resp.Participants))
+	}
+	p := resp.Participants[0]
+	if p.FinishRank == nil || *p.FinishRank != 1 {
+		t.Errorf("finish_rank = %v, want 1", p.FinishRank)
+	}
+	if p.FinishTimeMs == nil || *p.FinishTimeMs != 45000 {
+		t.Errorf("finish_time_ms = %v, want 45000", p.FinishTimeMs)
+	}
+	if p.AvgPaceWatt != 42.5 {
+		t.Errorf("avg_pace_watt = %v, want 42.5", p.AvgPaceWatt)
+	}
+}
+
 func TestRaceHandler_Status_ActiveRaceOmitsPendingExpiresAt(t *testing.T) {
 	secret := []byte("test-secret")
 	repo := newFakeRepository()

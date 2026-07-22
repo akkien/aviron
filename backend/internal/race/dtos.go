@@ -40,6 +40,13 @@ type participantResponse struct {
 	UserID      string `json:"user_id"`
 	DisplayName string `json:"display_name"`
 	JoinedAt    string `json:"joined_at"`
+	// FinishRank/FinishTimeMs are nil until the race finishes
+	// (race-detail-cold-visit.md) — same nullable shape as the live
+	// race_finished WebSocket message's RaceResultJSON, so a cold REST
+	// visit and a live connection can render results the same way.
+	FinishRank   *int    `json:"finish_rank"`
+	FinishTimeMs *int64  `json:"finish_time_ms"`
+	AvgPaceWatt  float64 `json:"avg_pace_watt"`
 }
 
 type raceStatusResponse struct {

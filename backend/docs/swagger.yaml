@@ -73,8 +73,19 @@ definitions:
     type: object
   internal_race.participantResponse:
     properties:
+      avg_pace_watt:
+        type: number
       display_name:
         type: string
+      finish_rank:
+        description: |-
+          FinishRank/FinishTimeMs are nil until the race finishes
+          (race-detail-cold-visit.md) — same nullable shape as the live
+          race_finished WebSocket message's RaceResultJSON, so a cold REST
+          visit and a live connection can render results the same way.
+        type: integer
+      finish_time_ms:
+        type: integer
       joined_at:
         type: string
       user_id:

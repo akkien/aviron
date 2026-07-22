@@ -20,11 +20,15 @@ type finishRaceCall struct {
 
 // participantRecord tracks a join, including which race it belongs to and
 // when it happened, so fakeRepository can both detect duplicate joins and
-// reconstruct a race's participant list.
+// reconstruct a race's participant list. finishRank/finishTimeMs/avgPaceWatt
+// stay zero-value until FinishRace populates them (race-detail-cold-visit.md).
 type participantRecord struct {
-	raceID   string
-	userID   string
-	joinedAt time.Time
+	raceID       string
+	userID       string
+	joinedAt     time.Time
+	finishRank   *int
+	finishTimeMs *int64
+	avgPaceWatt  float64
 }
 
 // fakeRepository is an in-memory race.RaceRepository used by both
@@ -174,9 +178,12 @@ func (f *fakeRepository) GetRaceWithParticipants(ctx context.Context, raceID str
 	for _, p := range f.participants {
 		if p.raceID == raceID {
 			detail.Participants = append(detail.Participants, race.Participant{
-				UserID:      p.userID,
-				DisplayName: p.userID, // fake stand-in; no real user records in this fake
-				JoinedAt:    p.joinedAt,
+				UserID:       p.userID,
+				DisplayName:  p.userID, // fake stand-in; no real user records in this fake
+				JoinedAt:     p.joinedAt,
+				FinishRank:   p.finishRank,
+				FinishTimeMs: p.finishTimeMs,
+				AvgPaceWatt:  p.avgPaceWatt,
 			})
 		}
 	}
@@ -188,6 +195,21 @@ func (f *fakeRepository) FinishRace(ctx context.Context, raceID string, distance
 	defer f.mu.Unlock()
 
 	f.finishCalls = append(f.finishCalls, finishRaceCall{raceID: raceID, distanceMeters: distanceMeters, results: results})
+
+	for i, r := range f.races {
+		if r.ID == raceID {
+			f.races[i].Status = "finished"
+		}
+	}
+	for _, res := range results {
+		for i, p := range f.participants {
+			if p.raceID == raceID && p.userID == res.UserID {
+				f.participants[i].finishRank = res.FinishRank
+				f.participants[i].finishTimeMs = res.FinishTimeMs
+				f.participants[i].avgPaceWatt = res.AvgPaceWatt
+			}
+		}
+	}
 	return nil
 }
 

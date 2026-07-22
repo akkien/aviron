@@ -37,14 +37,21 @@ export function RaceScreen({
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null)
   const isActive = raceDetail?.status === "active"
 
-  // The socket now opens as soon as a session token exists at all
-  // (live-lobby.md) — no longer gated on the race already being active.
-  // Every player holds a live connection from the moment they land on this
-  // page, pending or active, which is what lets race_started/race_expired
-  // reach everyone the instant either happens. onStarted/onRefresh are
-  // passed straight through so race_started can set promptText and
-  // re-fetch REST status the same way handleStart already does for the
-  // creator's own start action.
+  // terminal is checked instead of gating on "pending"/"active" directly:
+  // raceDetail is null for the brief window before the first
+  // GET /races/{id} resolves, and a fresh join/create must still connect
+  // immediately in that window (the fairness property
+  // race-started-broadcast.md/live-lobby.md were built to guarantee).
+  // Failing open (connect unless we positively know it's over) preserves
+  // that; only a race that's provably finished/cancelled withholds the
+  // token, since reattempting a connection to one just runs the reconnect
+  // loop against a room that no longer exists and lands on a misleading
+  // "evicted" state (race-detail-cold-visit.md).
+  const terminal = raceDetail?.status === "finished" || raceDetail?.status === "cancelled"
+
+  // onStarted/onRefresh are passed straight through so race_started can set
+  // promptText and re-fetch REST status the same way handleStart already
+  // does for the creator's own start action.
   const {
     raceState,
     finished,
@@ -55,7 +62,7 @@ export function RaceScreen({
     expired,
     sendTelemetry,
     leaveRace,
-  } = useRaceSocket(raceId, sessionToken, onStarted, onRefresh)
+  } = useRaceSocket(raceId, terminal ? null : sessionToken, onStarted, onRefresh)
 
   // Quitting mid-race (the sidebar's "Quit Race" button, via leaveRace)
   // only ever flipped this local `leaving` flag — nothing told the caller

@@ -555,8 +555,18 @@
         "internal_race.participantResponse": {
             "type": "object",
             "properties": {
+                "avg_pace_watt": {
+                    "type": "number"
+                },
                 "display_name": {
                     "type": "string"
+                },
+                "finish_rank": {
+                    "description": "FinishRank/FinishTimeMs are nil until the race finishes\n(race-detail-cold-visit.md) — same nullable shape as the live\nrace_finished WebSocket message's RaceResultJSON, so a cold REST\nvisit and a live connection can render results the same way.",
+                    "type": "integer"
+                },
+                "finish_time_ms": {
+                    "type": "integer"
                 },
                 "joined_at": {
                     "type": "string"
