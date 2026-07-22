@@ -1,10 +1,9 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 
 import { apiFetch } from "@/lib/api"
 import { laneColor } from "@/lib/colors"
 import { vehicleForUser, VEHICLES } from "@/lib/vehicles"
 import type {
-  LeaveRaceResponse,
   RaceFinishedMessage,
   RaceStateMessage,
   RaceStatusResponse,
@@ -12,6 +11,16 @@ import type {
 } from "@/types/race"
 import { Button } from "@/components/ui/button"
 import { TypingBox } from "@/components/race-screen/TypingBox"
+
+// formatCountdown renders whole seconds remaining as mm:ss, clamped to 0 —
+// pending_expires_at is a fixed deadline computed once server-side
+// (pending-expiry.md), so no server round-trip is needed per tick.
+function formatCountdown(msRemaining: number): string {
+  const totalSeconds = Math.max(0, Math.floor(msRemaining / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`
+}
 
 // Medal colors for the top 3 leaderboard ranks — separate from laneColor,
 // which is the per-player identity color and stays untouched here; this is
@@ -30,7 +39,6 @@ interface RaceScreenSidebarProps {
   promptText: string | null
   onStarted: (promptText: string) => void
   onRefresh: () => void
-  onLeftRace: () => void
   selectedVehicleId: string | null
   onSelectVehicle: (id: string) => void
   raceState: RaceStateMessage | null
@@ -39,6 +47,7 @@ interface RaceScreenSidebarProps {
   leaving: boolean
   reconnecting: boolean
   evicted: boolean
+  expired: boolean
   sendTelemetry: (seq: number, wordsCorrect: number, paceWatt: number) => void
   leaveRace: () => void
 }
@@ -53,7 +62,6 @@ export function RaceScreenSidebar({
   promptText,
   onStarted,
   onRefresh,
-  onLeftRace,
   selectedVehicleId,
   onSelectVehicle,
   raceState,
@@ -62,13 +70,22 @@ export function RaceScreenSidebar({
   leaving,
   reconnecting,
   evicted,
+  expired,
   sendTelemetry,
   leaveRace,
 }: RaceScreenSidebarProps) {
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
-  const [leavingPending, setLeavingPending] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
+
+  // Ticks once a second so the pending countdown re-renders — only runs
+  // while there's actually a deadline to count down to.
+  useEffect(() => {
+    if (raceDetail?.status !== "pending" || !raceDetail.pending_expires_at) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [raceDetail?.status, raceDetail?.pending_expires_at])
 
   if (raceDetail === null) {
     return <p className="text-sm text-muted-foreground">Loading...</p>
@@ -99,18 +116,6 @@ export function RaceScreenSidebar({
     }
   }
 
-  async function handleLeavePending() {
-    setError(null)
-    setLeavingPending(true)
-    try {
-      await apiFetch<LeaveRaceResponse>(`/races/${raceId}/leave`, { method: "POST" })
-      onLeftRace()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "failed to leave race")
-      setLeavingPending(false)
-    }
-  }
-
   // Only "pending" gets the pre-race sidebar — "active"/"finished"/
   // "cancelled" all fall through to the state tree below, which already
   // branches correctly on leaving/evicted/finished/promptText. Guarding on
@@ -126,17 +131,21 @@ export function RaceScreenSidebar({
             Race Room
           </div>
           <div className="font-heading text-2xl font-bold">{raceDetail.name}</div>
+          {raceDetail.pending_expires_at && (
+            <div className="text-xs text-muted-foreground">
+              Closes in{" "}
+              <span className="font-mono font-bold text-foreground">
+                {formatCountdown(new Date(raceDetail.pending_expires_at).getTime() - now)}
+              </span>{" "}
+              if nobody starts it
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-              Players ({raceDetail.participants.length})
-            </span>
-            <Button variant="ghost" size="sm" onClick={onRefresh}>
-              Refresh
-            </Button>
-          </div>
+          <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+            Players ({raceDetail.participants.length})
+          </span>
           {raceDetail.participants.map((p, i) => (
             <div
               key={p.user_id}
@@ -204,8 +213,8 @@ export function RaceScreenSidebar({
               {starting ? "Starting..." : "Start Race"}
             </Button>
           )}
-          <Button variant="secondary" onClick={handleLeavePending} disabled={leavingPending}>
-            {leavingPending ? "Leaving..." : "Leave"}
+          <Button variant="secondary" onClick={leaveRace}>
+            Leave
           </Button>
         </div>
       </div>
@@ -224,6 +233,14 @@ export function RaceScreenSidebar({
     return (
       <p className="text-sm text-muted-foreground">
         You were disconnected too long and have left the race.
+      </p>
+    )
+  }
+
+  if (expired) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This race wasn't started in time and has been closed.
       </p>
     )
   }
