@@ -416,3 +416,48 @@ func TestRaceService_FinishRace_DelegatesToRepository(t *testing.T) {
 		t.Errorf("results = %+v, want the one user-1 result passed in", call.results)
 	}
 }
+
+func TestRaceService_CancelRace_DelegatesToRepository(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, secret)
+	created, _, _, err := svc.CreateRace(context.Background(), "Morning Sprint", 1000, "creator")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+
+	if err := svc.CancelRace(context.Background(), created.ID); err != nil {
+		t.Fatalf("CancelRace() error = %v", err)
+	}
+
+	if len(repo.cancelCalls) != 1 || repo.cancelCalls[0] != created.ID {
+		t.Errorf("cancelCalls = %v, want [%q]", repo.cancelCalls, created.ID)
+	}
+	if repo.races[0].Status != "cancelled" {
+		t.Errorf("race status = %q, want %q", repo.races[0].Status, "cancelled")
+	}
+}
+
+// TestRaceService_CancelRace_NoOpIfNotPending confirms the repository's
+// status = 'pending' guard: cancelling a race that already moved on (e.g.
+// a real race that finished around the same time a stray cancel arrived)
+// must not clobber its real status, and must not error either — it's a
+// no-op, not a failure.
+func TestRaceService_CancelRace_NoOpIfNotPending(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, secret)
+	created, _, _, err := svc.CreateRace(context.Background(), "Morning Sprint", 1000, "creator")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	repo.races[0].Status = "active"
+
+	if err := svc.CancelRace(context.Background(), created.ID); err != nil {
+		t.Fatalf("CancelRace() error = %v", err)
+	}
+
+	if repo.races[0].Status != "active" {
+		t.Errorf("race status = %q, want unchanged %q", repo.races[0].Status, "active")
+	}
+}

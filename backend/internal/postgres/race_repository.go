@@ -252,3 +252,19 @@ func (r *RaceRepository) FinishRace(ctx context.Context, raceID string, distance
 	}
 	return nil
 }
+
+// CancelRace persists a pending race's cancellation
+// (room-lifecycle/cancelled-race-status.md). The status = 'pending' guard
+// means this is a no-op (RowsAffected == 0, not an error) if the race
+// already transitioned away from pending by the time this runs — the caller
+// (RoomActor.expirePendingRoom) is already guaranteed !r.active, so this is
+// defense-in-depth, not load-bearing.
+func (r *RaceRepository) CancelRace(ctx context.Context, raceID string) error {
+	if _, err := r.pool.Exec(ctx, `
+		UPDATE races SET status = 'cancelled', ended_at = now()
+		WHERE id = $1 AND status = 'pending'
+	`, raceID); err != nil {
+		return fmt.Errorf("postgres: cancel race: %w", err)
+	}
+	return nil
+}

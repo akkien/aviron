@@ -67,6 +67,10 @@ type RoomActor struct {
 	// leaver persists a pending-race participant intentionally leaving
 	// (pending-connections.md) — see finish.go.
 	leaver RaceLeaver
+	// canceller persists a pending race's cancellation once the room tears
+	// down before ever going active (room-lifecycle/cancelled-race-status.md)
+	// — see finish.go.
+	canceller RaceCanceller
 	// startedAt is this actor's own construction time, used as the baseline
 	// for FinishTimeMs. Not literally races.started_at (that UPDATE and this
 	// Spawn happen milliseconds apart, in the same handler) — close enough
@@ -94,7 +98,7 @@ type RoomActor struct {
 // the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
@@ -108,6 +112,7 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 		cancel:               cancel,
 		finisher:             finisher,
 		leaver:               leaver,
+		canceller:            canceller,
 		startedAt:            time.Now(),
 	}
 	time.AfterFunc(noShowTimeoutDuration, func() {
@@ -383,7 +388,18 @@ func (r *RoomActor) broadcastRaceStarted(promptText string) {
 // participants are exactly the room's live WebSocket connections
 // (pending-connections.md), an empty pending room already has nobody
 // attached to hear it anyway.
+//
+// Persists races.status = 'cancelled' before broadcasting or tearing down
+// (room-lifecycle/cancelled-race-status.md) — mirrors finishRace's own
+// persist-before-notify order exactly: on failure, log and return without
+// broadcasting or cancelling, so the room stays running rather than
+// silently vanishing on a Postgres hiccup, the same no-retry gap finishRace
+// already accepts.
 func (r *RoomActor) expirePendingRoom() {
+	if err := r.canceller.CancelRace(r.ctx, r.id); err != nil {
+		log.Printf("room %s: cancel race: %v", r.id, err)
+		return
+	}
 	r.broadcastRaceExpired()
 	r.finished = true
 	r.cancel()

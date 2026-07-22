@@ -40,6 +40,28 @@ func (noopLeaver) LeaveRace(ctx context.Context, raceID, userID string) error {
 	return nil
 }
 
+// noopCanceller satisfies RaceCanceller without touching Postgres, for tests
+// that don't care about room-lifecycle/cancelled-race-status.md's
+// persistence step.
+type noopCanceller struct{}
+
+func (noopCanceller) CancelRace(ctx context.Context, raceID string) error {
+	return nil
+}
+
+// spyCanceller records every CancelRace call, and can be made to fail on
+// request, for tests asserting expirePendingRoom's persist-before-broadcast
+// ordering and its no-teardown-on-failure guard.
+type spyCanceller struct {
+	calls []string // raceIDs
+	err   error
+}
+
+func (s *spyCanceller) CancelRace(ctx context.Context, raceID string) error {
+	s.calls = append(s.calls, raceID)
+	return s.err
+}
+
 // spyLeaver records every LeaveRace call, and can be made to fail on
 // request, for tests asserting exactly what a pending leave hands off to be
 // persisted (and that a failure is logged, not retried or panicked on).
@@ -79,6 +101,7 @@ func newTestActor() *RoomActor {
 		distanceMeters:       1_000_000,
 		finisher:             noopFinisher{},
 		leaver:               noopLeaver{},
+		canceller:            noopCanceller{},
 		active:               true,
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -532,6 +555,61 @@ func TestRoomActor_ApplyEvent_PendingExpired_AlreadyFinished_NoOp(t *testing.T) 
 	select {
 	case body := <-r.broadcast:
 		t.Errorf("unexpected broadcast for an already-finished room: %s", body)
+	default:
+	}
+}
+
+// TestRoomActor_ExpirePendingRoom_CallsCancellerWithRaceID covers
+// room-lifecycle/cancelled-race-status.md: expirePendingRoom must persist
+// the cancellation, identified by this room's own raceID.
+func TestRoomActor_ExpirePendingRoom_CallsCancellerWithRaceID(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.broadcast = make(chan []byte, 4)
+	canceller := &spyCanceller{}
+	r.canceller = canceller
+
+	r.applyEvent(pendingExpired{})
+
+	if len(canceller.calls) != 1 {
+		t.Fatalf("canceller.calls = %d, want 1", len(canceller.calls))
+	}
+	if canceller.calls[0] != r.id {
+		t.Errorf("canceller called with raceID = %q, want %q", canceller.calls[0], r.id)
+	}
+	if !r.finished {
+		t.Error("r.finished = false after a successful cancel, want true")
+	}
+}
+
+// TestRoomActor_ExpirePendingRoom_CancellerFailure_LeavesRoomRunning mirrors
+// finishRace's own already-accepted no-retry precedent: a failed persist
+// must not broadcast race_expired, must not set r.finished, and must not
+// cancel r.ctx — the room stays running rather than silently vanishing on a
+// Postgres hiccup.
+func TestRoomActor_ExpirePendingRoom_CancellerFailure_LeavesRoomRunning(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.broadcast = make(chan []byte, 4)
+	canceller := &spyCanceller{err: errors.New("db unavailable")}
+	r.canceller = canceller
+
+	r.applyEvent(pendingExpired{})
+
+	if len(canceller.calls) != 1 {
+		t.Fatalf("canceller.calls = %d, want 1", len(canceller.calls))
+	}
+	if r.finished {
+		t.Error("r.finished = true after a failed cancel, want false")
+	}
+	select {
+	case <-r.ctx.Done():
+		t.Error("r.ctx was cancelled after a failed cancel, want untouched")
+	default:
+	}
+	select {
+	case body := <-r.broadcast:
+		t.Errorf("unexpected race_expired broadcast after a failed cancel: %s", body)
 	default:
 	}
 }

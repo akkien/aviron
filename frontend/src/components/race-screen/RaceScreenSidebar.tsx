@@ -228,6 +228,14 @@ export function RaceScreenSidebar({
     )
   }
 
+  if (raceDetail.status === "cancelled") {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This race was cancelled — it wasn't started in time.
+      </p>
+    )
+  }
+
   if (finished) {
     return (
       <div className="flex flex-col gap-3">

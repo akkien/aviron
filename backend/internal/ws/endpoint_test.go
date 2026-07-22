@@ -19,7 +19,7 @@ func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -68,7 +68,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -106,7 +106,7 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -153,7 +153,7 @@ func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 	actor.MarkActive("") // a pending race can't legitimately finish (pending-connections.md)
 
@@ -239,7 +239,7 @@ func TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 	// Never MarkActive()'d: the race stays pending until the (shortened)
 	// PendingTimeoutDuration elapses.
@@ -279,7 +279,7 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -336,7 +336,7 @@ func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
 	go actor.Run()
 
 	h := newTestWSHandler()

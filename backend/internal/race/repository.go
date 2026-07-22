@@ -29,4 +29,10 @@ type RaceRepository interface {
 	// exists specifically to satisfy room.RaceFinisher — internal/race already
 	// imports internal/room, so this introduces no new dependency direction.
 	FinishRace(ctx context.Context, raceID string, distanceMeters int, results []room.ParticipantResult) error
+	// CancelRace persists a pending race's cancellation
+	// (room-lifecycle/cancelled-race-status.md) — a no-op (not an error) if
+	// the race is no longer pending, since a room actor's own !r.active guard
+	// already means this should only ever be called for a genuinely pending
+	// race, and a Postgres-level guard is defense-in-depth, not load-bearing.
+	CancelRace(ctx context.Context, raceID string) error
 }
