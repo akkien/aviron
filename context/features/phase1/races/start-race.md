@@ -13,6 +13,7 @@ The race creator starts the typing race once enough players have joined: this ge
 - `403` if the caller isn't the race's creator
 - `404` if the race doesn't exist
 - `409` if the race isn't `pending` (already started, finished, or cancelled)
+- **No minimum-participant count required to start** — decided, not an open question (see Notes). `CreateRace` already auto-joins the creator, so a race can start with just them.
 
 ### Text Endpoint
 
@@ -46,4 +47,5 @@ The race creator starts the typing race once enough players have joined: this ge
 
 - This is new REST-only scope that didn't exist in the original Phase 1 plan (which assumed race status only ever changes via Phase 2's room actor) — `pending` → `active` now happens here, over plain REST. Finishing a race (typing all words, ranking, `finished` status) still depends on Phase 2's live progress tracking, so that part is unchanged.
 - A separate `prompt_text` fetch endpoint (instead of returning it from Race Status) keeps the potentially large word blob out of a response that's otherwise small and gets polled/refreshed frequently
+- **Minimum-participant guard, resolved:** originally left as an open design question ("should `start` require more than just the creator?"), revisited later and decided against adding one — a solo race (creator only) is intentionally allowed, not a gap to close. Confirmed no bug scenario by tracing every path a participant count feeds into: `checkRaceFinished` (`internal/room/room.go`) treats "zero live participants remaining" identically regardless of how many there ever were, so a solo race finishing, DNFing via grace-period eviction, or getting cancelled while still pending all already work exactly like the N-participant case, just with N=1 — no code anywhere assumes participant count ≥ 2. `buildParticipantResult`'s non-finisher rank (`= totalParticipants`) and the leaderboard's win-detection (`FinishRank == 1`) both degrade correctly to the trivial case: a solo finisher is rank 1 of 1 and correctly counts as a win, a solo DNF is also rank 1 of 1 but distinguished from a real finish by `finish_time_ms` being `null` (already how the frontend renders "DNF", not by rank). No frontend code assumes multiple lanes/participants either. Nothing to fix.
 - See context/project-overview.md §13 for the full typing-race mechanic and why field names like `distance_meters`/`prompt_text` are shaped the way they are
