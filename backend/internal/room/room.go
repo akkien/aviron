@@ -113,6 +113,9 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 	time.AfterFunc(noShowTimeoutDuration, func() {
 		r.Send(noShowTimeout{})
 	})
+	time.AfterFunc(PendingTimeoutDuration, func() {
+		r.Send(pendingExpired{})
+	})
 	return r
 }
 
@@ -341,6 +344,15 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 	case activated:
 		r.active = true
 		r.broadcastRaceStarted(e.PromptText)
+	case pendingExpired:
+		// A no-op if the race already started (r.active) or the room has
+		// already torn down for some other reason (r.finished) — the timer
+		// firing concurrently with a real start must never tear down a race
+		// that's actually running.
+		if r.active || r.finished {
+			return
+		}
+		r.expirePendingRoom()
 	}
 }
 
@@ -357,6 +369,41 @@ func (r *RoomActor) broadcastRaceStarted(promptText string) {
 	case r.broadcast <- body:
 	default:
 		// Same non-blocking rule as broadcastSnapshot/finishRace — a full or
+		// nonexistent listener must never stall the actor.
+	}
+}
+
+// expirePendingRoom tears down a room that's still pending — either because
+// PendingTimeoutDuration elapsed (pendingExpired) or because it emptied out
+// without ever starting (checkRaceFinished's noShowTimeout/departed-to-empty
+// paths, room-lifecycle/pending-expiry.md). Broadcasting race_expired from
+// both callers is safe, not just convenient: by the time the empty-room path
+// reaches this method, r.participants is provably empty (unlike active telemetry,
+// nothing while pending can ever set a FinishRank), and since pending
+// participants are exactly the room's live WebSocket connections
+// (pending-connections.md), an empty pending room already has nobody
+// attached to hear it anyway.
+func (r *RoomActor) expirePendingRoom() {
+	r.broadcastRaceExpired()
+	r.finished = true
+	r.cancel()
+}
+
+// broadcastRaceExpired sends race_expired to every connection still attached
+// to this room, before it's torn down — same marshal-then-non-blocking-send
+// shape broadcastRaceStarted/finishRace already use, riding the existing hub
+// fan-out with no new delivery path. Called before r.cancel() in
+// expirePendingRoom, relying on the same hub-drains-before-done/writeLoop-
+// drains-off-hub.closed guarantee already proven for race_finished.
+func (r *RoomActor) broadcastRaceExpired() {
+	body, err := json.Marshal(RaceExpiredMessage{Type: "race_expired"})
+	if err != nil {
+		return // can't happen with this field type, but must not panic the actor loop
+	}
+	select {
+	case r.broadcast <- body:
+	default:
+		// Same non-blocking rule as every other broadcast site — a full or
 		// nonexistent listener must never stall the actor.
 	}
 }
@@ -405,8 +452,7 @@ func (r *RoomActor) checkRaceFinished() {
 		// to persist: no started_at, no participant who actually raced.
 		// Tear down with zero Postgres writes rather than calling
 		// finisher.FinishRace with an empty or meaningless result set.
-		r.finished = true
-		r.cancel()
+		r.expirePendingRoom()
 		return
 	}
 

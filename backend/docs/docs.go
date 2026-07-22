@@ -594,6 +594,10 @@ const docTemplate = `{
                         "$ref": "#/definitions/internal_race.participantResponse"
                     }
                 },
+                "pending_expires_at": {
+                    "description": "PendingExpiresAt is nil once the race is no longer pending (active,\nfinished, or cancelled) — there's no expiry concept once a race has\nactually started (room-lifecycle/pending-expiry.md).",
+                    "type": "string"
+                },
                 "status": {
                     "type": "string"
                 }

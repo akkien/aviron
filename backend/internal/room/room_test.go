@@ -451,3 +451,87 @@ func TestRoomActor_ApplyEvent_Activated_SetsActiveAndBroadcastsRaceStarted(t *te
 		t.Fatal("no race_started message broadcast")
 	}
 }
+
+// TestRoomActor_ApplyEvent_PendingExpired_WhilePending_BroadcastsAndTearsDown
+// covers room-lifecycle/pending-expiry.md's core case: a room that's still
+// pending when its timer fires must broadcast race_expired and tear down
+// with zero Postgres writes, even with participants still attached — the
+// gap that didn't exist before this feature (checkRaceFinished's own
+// !r.active teardown only ever fired for an empty room).
+func TestRoomActor_ApplyEvent_PendingExpired_WhilePending_BroadcastsAndTearsDown(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.broadcast = make(chan []byte, 4)
+	spy := &spyFinisher{}
+	r.finisher = spy
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	<-r.broadcast // drain the immediate join snapshot
+
+	r.applyEvent(pendingExpired{})
+
+	if !r.finished {
+		t.Error("r.finished = false after pendingExpired, want true")
+	}
+	select {
+	case <-r.ctx.Done():
+	default:
+		t.Error("r.ctx not cancelled after pendingExpired")
+	}
+	if len(spy.calls) != 0 {
+		t.Errorf("finisher.calls = %d, want 0 — a room that never went active has no real race to persist", len(spy.calls))
+	}
+	select {
+	case body := <-r.broadcast:
+		var msg RaceExpiredMessage
+		if err := json.Unmarshal(body, &msg); err != nil {
+			t.Fatalf("unmarshal broadcast: %v", err)
+		}
+		if msg.Type != "race_expired" {
+			t.Errorf("Type = %q, want %q", msg.Type, "race_expired")
+		}
+	default:
+		t.Fatal("no race_expired message broadcast")
+	}
+}
+
+// TestRoomActor_ApplyEvent_PendingExpired_WhileActive_NoOp is the spec's own
+// explicitly-required race-vs-real-start test: the timer firing concurrently
+// with a real start must never tear down a race that's actually running.
+func TestRoomActor_ApplyEvent_PendingExpired_WhileActive_NoOp(t *testing.T) {
+	r := newTestActor() // active: true by default
+	r.broadcast = make(chan []byte, 4)
+
+	r.applyEvent(pendingExpired{})
+
+	if r.finished {
+		t.Error("r.finished = true after pendingExpired while active, want false")
+	}
+	select {
+	case <-r.ctx.Done():
+		t.Error("r.ctx was cancelled after pendingExpired while active, want untouched")
+	default:
+	}
+	select {
+	case body := <-r.broadcast:
+		t.Errorf("unexpected broadcast while active: %s", body)
+	default:
+	}
+}
+
+// TestRoomActor_ApplyEvent_PendingExpired_AlreadyFinished_NoOp confirms the
+// timer firing after the room already tore down for some other reason
+// (e.g. everyone quit) doesn't double-broadcast or re-cancel.
+func TestRoomActor_ApplyEvent_PendingExpired_AlreadyFinished_NoOp(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.finished = true
+	r.broadcast = make(chan []byte, 4)
+
+	r.applyEvent(pendingExpired{})
+
+	select {
+	case body := <-r.broadcast:
+		t.Errorf("unexpected broadcast for an already-finished room: %s", body)
+	default:
+	}
+}

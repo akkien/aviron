@@ -94,6 +94,12 @@ definitions:
         items:
           $ref: '#/definitions/internal_race.participantResponse'
         type: array
+      pending_expires_at:
+        description: |-
+          PendingExpiresAt is nil once the race is no longer pending (active,
+          finished, or cancelled) — there's no expiry concept once a race has
+          actually started (room-lifecycle/pending-expiry.md).
+        type: string
       status:
         type: string
     type: object

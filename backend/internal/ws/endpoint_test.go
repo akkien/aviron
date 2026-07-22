@@ -223,6 +223,58 @@ loop:
 	}
 }
 
+// TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing is
+// room-lifecycle/pending-expiry.md / websocket/race-expired-broadcast.md's
+// own explicitly-called-for regression test, mirroring
+// TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing's exact shape:
+// a still-pending room (MarkActive never called) must deliver race_expired
+// to an attached connection before that connection closes, once
+// PendingTimeoutDuration elapses — relying on the same hub-drains-before-
+// done/writeLoop-drains-off-hub.closed guarantee already proven there.
+func TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing(t *testing.T) {
+	original := room.PendingTimeoutDuration
+	room.PendingTimeoutDuration = 50 * time.Millisecond
+	t.Cleanup(func() { room.PendingTimeoutDuration = original })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	go actor.Run()
+	// Never MarkActive()'d: the race stays pending until the (shortened)
+	// PendingTimeoutDuration elapses.
+
+	conn := newFakeConn()
+	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+	// No further queued reads: once the room expires and tears down, this
+	// connection is expected to close on its own, not wait on the client.
+
+	h := newTestWSHandler()
+
+	done := make(chan struct{})
+	go func() {
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveConn did not return after the room expired — goroutine leak")
+	}
+
+	select {
+	case <-conn.closed:
+	default:
+		t.Error("conn.Close was never called")
+	}
+
+	msg := awaitMessageType(t, conn, "race_expired", time.Second)
+	if msg["type"] != "race_expired" {
+		t.Errorf("Type = %v, want %q", msg["type"], "race_expired")
+	}
+}
+
 func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

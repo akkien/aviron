@@ -1,24 +1,49 @@
-# Current Feature
+# Current Feature: Pending Expiry & race_expired Broadcast
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- A room that sits `pending` for 5 minutes without the creator starting it tears itself down — no Postgres write (there was never a real race), regardless of how many players are still sitting in the lobby with live WebSocket connections.
+- Every connection still attached at that moment receives `{"type":"race_expired"}` before the connection disappears, so the client can show "this race expired" instead of silently looking like a dropped connection.
+- `GET /races/{id}` exposes `pending_expires_at` (RFC3339, `nil` once no longer pending) so the frontend can render a countdown without hardcoding the 5-minute duration or computing it client-side from `created_at` (clock-skew risk). A `create`/`join` addition was considered during `load` and reverted (see Explain) — every client path renders via `RaceDetailPage`'s unconditional `GET /races/{id}` call regardless of how it arrived (create, join, or a raw reconnect/refresh with neither), and that response is the only one carrying the full participant list/name/distance/`created_by` the race screen actually needs, so `create`/`join` returning the deadline too would be a redundant round-trip with no reduction in required calls.
+- Bundled deliberately as one feature, not two: `race-expired-broadcast.md` has no independent trigger — its only call site is the shared teardown method `pending-expiry.md` itself introduces, so building them apart would mean writing that method once and reopening it moments later just to add a broadcast call.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **Both specs' `r.status`/`roomPending`/`roomActive` references are stale, same drift already found and corrected twice this phase** (`early-spawn.md`, `pending-connections.md`): there is no status enum — `RoomActor.active bool` already covers pending/active, `r.finished` already covers everything else. Read as: "no-op if `r.status` is `roomActive`" → `if r.active`; "if `r.status` is still `roomPending`" → `if !r.active`.
+- **The existing "no Postgres write" teardown path is *not* already reachable from a non-empty pending lobby — confirmed by reading `checkRaceFinished` directly, not assumed**: `room.go:392-411`'s `if !r.active { r.finished = true; r.cancel(); return }` block only runs after a loop confirms every entry in `r.participants` already has a `FinishRank` — and since `TelemetryReceived` is dropped outright while `!r.active` (`pending-connections.md`), no pending participant can ever get a `FinishRank`. So that loop only clears when `r.participants` is *empty* — i.e. only `noShowTimeout` (nobody ever joined) or a `departParticipant` call that empties an already-sparse pending room ever reach it today. A full or partial lobby sitting pending is never torn down by anything that exists right now — this is the actual, previously-nonexistent gap `pendingExpired` closes, not a small extension of an existing path.
+- **The shared `expirePendingRoom()` method the spec asks for is a clean extraction, and broadcasting `race_expired` from both its callers is safe, not just convenient**: refactor the `!r.active` block above into `expirePendingRoom()` (broadcast `race_expired`, then `r.finished = true`, then `r.cancel()`), called both from `checkRaceFinished`'s existing site and from the new `pendingExpired` case. The `noShowTimeout`/empty-room path broadcasting `race_expired` too is harmless, not a semantic stretch: by the time that branch is reached, `r.participants` is provably empty, and since pending participants *are* live WebSocket connections (`pending-connections.md`), an empty-and-pending room has zero attached connections left to hear anything anyway.
+- **Confirmed the exact broadcast pattern and ordering to mirror**: `finishRace` and the just-shipped `broadcastRaceStarted` both marshal a room-defined message and non-blocking-send it on `r.broadcast` before any teardown; `race_expired` follows the same shape, broadcast *before* `r.cancel()` inside `expirePendingRoom()`. The safety of that ordering isn't new reasoning — it's the exact `hub.run`-drains-before-`done`/`writeLoop`-drains-off-`hub.closed` guarantee already read directly and relied on for `race-started-broadcast.md`, applied to a second teardown path rather than re-derived.
+- **`PendingTimeoutDuration` being exported (per the spec's own "exported as `PendingTimeoutDuration`" note) solves two needs with one identifier, confirmed by checking who needs it**: `internal/race/handler.go` needs it read-only to compute `pending_expires_at` (`internal/race` already imports `internal/room` via `*room.Registry`, so no new import direction). `internal/ws`'s own regression test — mirroring `TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing`'s precedent exactly, per the spec's explicit instruction — needs to *shorten* it to avoid a real 5-minute wait; since `internal/ws` is a different package than `internal/room`, it can only reach a var to reassign it if that var is exported, so the single exported `room.PendingTimeoutDuration` (not a second unexported var plus a `withShortXxx` helper confined to `internal/room`, unlike `noShowTimeoutDuration`/`gracePeriodDuration`) serves both call sites.
+- **Confirmed `raceStatusResponse` has no `CreatedAt` field at all today, but the data is already there for free**: `RaceDetail` (embedded `Race`) already carries `CreatedAt` from Postgres (`GetRaceWithParticipants`'s existing query) — no new query needed, just `detail.CreatedAt.Add(room.PendingTimeoutDuration)` computed in the handler, set only when `detail.Status == "pending"`.
+- **The internal/ws-level regression test the spec calls for can't inject `pendingExpired` directly the way earlier reconnection tests inject `ParticipantEvicted`**: the spec's own Data section keeps `pendingExpired` unexported (lowercase), consistent with `noShowTimeout`/`activated` staying unexported since nothing outside `internal/room` constructs them directly. `TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing` itself doesn't inject an event either — it drives a real `telemetry` message through the normal decode path to trigger a genuine finish. The equivalent here is a real (but shortened via the exported `PendingTimeoutDuration`) timer actually firing, not a direct `Send`.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/room/finish.go`**: add `var PendingTimeoutDuration = 5 * time.Minute` (exported, unlike `noShowTimeoutDuration`/`gracePeriodDuration` — see Explain for why) and `type pendingExpired struct{}` + `func (pendingExpired) isRoomEvent() {}`. Add `type RaceExpiredMessage struct { Type string \`json:"type"\` }` alongside `RaceFinishedMessage`/`RaceStartedMessage`.
+2. **`internal/room/room.go`'s `NewRoomActor`**: alongside the existing `time.AfterFunc(noShowTimeoutDuration, func() { r.Send(noShowTimeout{}) })`, add `time.AfterFunc(PendingTimeoutDuration, func() { r.Send(pendingExpired{}) })` — same anchor-to-construction pattern, not reset by any activity.
+3. **`internal/room/room.go`'s `checkRaceFinished`**: replace the existing `if !r.active { r.finished = true; r.cancel(); return }` block with `if !r.active { r.expirePendingRoom(); return }`.
+4. **`internal/room/room.go` — new `expirePendingRoom()`**: broadcasts `RaceExpiredMessage{Type: "race_expired"}` (marshal + non-blocking-send on `r.broadcast`, same shape as `broadcastRaceStarted`), then `r.finished = true`, then `r.cancel()`.
+5. **`internal/room/room.go`'s `applyEvent`**: new `case pendingExpired:` — no-op if `r.active` or `r.finished` (race already started, or already torn down some other way), otherwise `r.expirePendingRoom()`.
+6. **`internal/race/dtos.go`**: `raceStatusResponse` gains `PendingExpiresAt *string \`json:"pending_expires_at"\`` — `createRaceResponse`/`joinRaceResponse` are untouched (see Goals/Explain for why).
+7. **`internal/race/handler.go`'s `RaceHandler.Status`**: compute `pendingExpiresAt` from `detail.CreatedAt.Add(room.PendingTimeoutDuration)` (RFC3339), only when `detail.Status == "pending"`; leave nil otherwise. Pass into the response.
+8. **Tests**:
+    - New: `internal/room` — `applyEvent(pendingExpired{})` while pending broadcasts `race_expired`, sets `r.finished`, cancels `r.ctx`; while active is a genuine no-op (no broadcast, not finished, ctx not cancelled) — the spec's own explicitly-required race-vs-real-start test; while already finished (for an unrelated reason) is also a no-op.
+    - New: `internal/room` — a real-timer test (shortened `PendingTimeoutDuration`, `go r.Run()`) confirming a still-pending room *with participants attached* (not just empty) actually tears down — proving the previously-nonexistent gap identified above is now closed.
+    - New: `internal/ws` — mirrors `TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing`'s exact shape: shorten `room.PendingTimeoutDuration`, attach a fake connection to a pending room, let the real timer fire, assert `race_expired` is received before the connection closes.
+    - New: `internal/race` — `RaceHandler.Status` sets `pending_expires_at` correctly for a pending race and omits/nils it for an active one.
+9. **Verify**: `go build`/`go vet`/`gofmt -l .`/`go test ./... -race`.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on `room-lifecycle/early-spawn.md` and `room-lifecycle/pending-connections.md` (both done) for the shared teardown path and the `active bool`/live-pending-connections model this reuses.
+- Full specs: `context/features/phase2.6/room-lifecycle/pending-expiry.md`, `context/features/phase2.6/websocket/race-expired-broadcast.md`.
+- `frontend/live-lobby.md` (last spec in the phase) is the consumer of both the countdown (`pending_expires_at`) and the `race_expired` message/redirect — not touched here, per both specs' own scope notes.
+- Adding `pending_expires_at` to `create`/`join` was considered and explicitly reverted this session (not left as a silent no-op): `RaceScreenSidebar` only ever reads race metadata — `name`, `participants`, `distance_meters`, `created_by` — from `raceDetail` (i.e. `GET /races/{id}`), never from the join/create response, and `RaceDetailPage` calls `GET /races/{id}` unconditionally on every mount regardless of entry path. Since that call is never skippable, returning the deadline from `create`/`join` too would save nothing.
+- Fifth and sixth of six Phase 2.6 specs; only `frontend/live-lobby.md` remains after this.
 
 ## History
 

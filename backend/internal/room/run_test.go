@@ -27,6 +27,43 @@ func withShortNoShowTimeout(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { noShowTimeoutDuration = original })
 }
 
+// withShortPendingTimeout temporarily shortens PendingTimeoutDuration so
+// tests don't have to wait a real 5 minutes, restoring it afterward.
+// Exported (unlike gracePeriodDuration/noShowTimeoutDuration) since
+// internal/race's handler and internal/ws's own regression test both need
+// to reach it from a different package — this helper just reuses that same
+// exported identifier for consistency with the other two.
+func withShortPendingTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	original := PendingTimeoutDuration
+	PendingTimeoutDuration = d
+	t.Cleanup(func() { PendingTimeoutDuration = original })
+}
+
+// awaitMessageType drains broadcast until it sees a message with the given
+// "type" field (skipping any race_state ticks that land first — the room
+// actor broadcasts on a 250ms ticker independently of a test's own timers)
+// or fails the test after timeout.
+func awaitMessageType(t *testing.T, broadcast <-chan []byte, wantType string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case body := <-broadcast:
+			var envelope map[string]any
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("unmarshal message: %v", err)
+			}
+			if envelope["type"] == wantType {
+				return envelope
+			}
+		case <-deadline:
+			t.Fatalf("never received a %q message", wantType)
+			return nil
+		}
+	}
+}
+
 func TestRoomActor_Run_NoShowTimeout_NeverActiveEmptyRoom_TearsDownWithoutFinishing(t *testing.T) {
 	withShortNoShowTimeout(t, 50*time.Millisecond)
 
@@ -76,6 +113,41 @@ func TestRoomActor_Run_NoShowTimeout_NoopIfSomeoneJoined(t *testing.T) {
 	case <-r.Context().Done():
 		t.Error("room was torn down despite an active, unfinished participant")
 	default:
+	}
+}
+
+// TestRoomActor_Run_PendingTimeoutExpiry_TearsDownRoomWithParticipants proves
+// room-lifecycle/pending-expiry.md's actual gap is closed: unlike
+// noShowTimeout (which only ever tears down an empty room), a still-pending
+// room with a participant genuinely attached must tear down once
+// PendingTimeoutDuration elapses, broadcasting race_expired first.
+func TestRoomActor_Run_PendingTimeoutExpiry_TearsDownRoomWithParticipants(t *testing.T) {
+	withShortPendingTimeout(t, 50*time.Millisecond)
+
+	broadcast := make(chan []byte, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	spy := &spyFinisher{}
+
+	r := NewRoomActor(ctx, "race-1", 5, broadcast, spy, noopLeaver{})
+	go r.Run()
+
+	r.Send(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	<-broadcast // drain the immediate join snapshot
+
+	msg := awaitMessageType(t, broadcast, "race_expired", 2*time.Second)
+	if msg["type"] != "race_expired" {
+		t.Errorf("Type = %v, want %q", msg["type"], "race_expired")
+	}
+
+	select {
+	case <-r.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("room was not torn down after the pending timeout fired")
+	}
+
+	if len(spy.calls) != 0 {
+		t.Fatalf("finisher.calls = %d, want 0 — a room that never went active has no real race to persist", len(spy.calls))
 	}
 }
 
