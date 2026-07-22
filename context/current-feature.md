@@ -1,77 +1,24 @@
-# Current Feature: Idempotent Join / Session Token Recovery
+# Current Feature
 
 ## Status
 
-In Progress
+Not Started
 
 ## Goals
 
-- `POST /races/{id}/join` no longer 409s `already_joined` for someone who's already a participant — it hands back a fresh `session_token` instead.
-- The same recovery works for an **active** race too, not just pending — today `JoinRace` rejects anything non-`pending` outright, so there was never a way to recover a token for a race already in progress.
-- The frontend actually uses this: reloading the race page (or opening it in a new tab) no longer strands a real participant in permanent read-only spectator mode — it silently recovers a working session and reconnects.
+<!-- populated by /feature load -->
 
 ## Explain
 
-- Traced end-to-end, not assumed: `session_token` only ever comes from `Create`/`Join` and is never persisted — it travels through React Router navigation state only (`RaceDetailPage.tsx:25`, `location.state`). Any reload, or opening the race URL fresh, loses it. `RaceScreen.tsx` then passes `sessionToken: null` into `useRaceSocket`, whose connection effect does `if (!raceId || !sessionToken) return` — no WebSocket is even attempted. The user silently degrades to read-only spectator mode (`race-detail-cold-visit.md`'s fallback), even though `raceDetail.participants` still lists them as real.
-- Confirmed the only way to get a new token — calling `POST /races/{id}/join` again — currently fails two different ways depending on race status:
-  - **Pending**: `AddParticipant`'s unique-constraint violation maps to `ErrAlreadyJoined` → `409 already_joined`, no token returned. This was the originally-scoped, explicitly-deferred gap from `reconnection/grace-period.md`'s History entry.
-  - **Active**: `JoinRace` (`internal/race/service.go`) checks `r.Status != "pending"` unconditionally before ever reaching the participant-add logic → `409 race_not_pending`. This is a bigger gap than the original note implied — it made recovering a token for an in-progress race *impossible*, not just unfriendly.
-- Fix is symmetric for both: check participation *before* checking status. If the caller is already in `race_participants` for this race — pending, active, finished, or cancelled, doesn't matter — just sign and return a fresh token. A token for a finished/cancelled race is harmless: `RaceScreen.tsx`'s `terminal` check already withholds the token from `useRaceSocket` client-side, and even if it didn't, the room actor for a finished/cancelled race has already torn itself down and been removed from the registry, so a WS handshake attempt would fail at the registry lookup regardless of token validity. No extra status-specific guard needed.
-- The backend fix alone doesn't fix the actual user-visible symptom — nothing on the frontend currently re-attempts `join` after a reload. The frontend half is what actually closes the loop: `RaceDetailPage.tsx` needs to try recovering a token once `raceDetail` loads, if it doesn't already have one and the current user turns out to be a real participant.
+<!-- populated by /feature load -->
 
 ## Plan
 
-1. **`internal/race/repository.go`**: add `IsParticipant(ctx context.Context, raceID, userID string) (bool, error)` to the `RaceRepository` interface.
-
-2. **`internal/postgres/race_repository.go`**: implement via `SELECT EXISTS(SELECT 1 FROM race_participants WHERE race_id = $1 AND user_id = $2)` — a single targeted query, not reusing `GetRaceWithParticipants` (which fetches every participant + display names, wasteful for a boolean check).
-
-3. **`internal/race/service.go`**: reorder `JoinRace`:
-
-   ```go
-   func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sessionToken string, err error) {
-       r, err := s.repo.GetRace(ctx, raceID)
-       if err != nil {
-           return "", err
-       }
-
-       alreadyIn, err := s.repo.IsParticipant(ctx, raceID, userID)
-       if err != nil {
-           return "", err
-       }
-       if alreadyIn {
-           return s.signSessionToken(raceID, userID)
-       }
-
-       if r.Status != "pending" {
-           return "", ErrRaceNotPending
-       }
-       count, err := s.repo.CountParticipants(ctx, raceID)
-       if err != nil {
-           return "", err
-       }
-       if count >= MaxParticipants {
-           return "", ErrRaceFull
-       }
-       if err := s.repo.AddParticipant(ctx, raceID, userID); err != nil {
-           return "", err
-       }
-       return s.signSessionToken(raceID, userID)
-   }
-   ```
-
-   `ErrAlreadyJoined`/`AddParticipant`'s unique-violation mapping stays as-is — now only reachable via the TOCTOU window between the `IsParticipant` check and the `INSERT` (two concurrent first-time joins from the same user), the same accepted count-then-insert race-condition class this codebase already accepts elsewhere (`MaxParticipants`'s own count-then-insert gap, `race.go`'s comment on it).
-
-4. **`internal/race/handler.go`**: no changes needed — `Join`'s existing switch/case error mapping is untouched, just less likely to hit the `ErrAlreadyJoined`/`ErrRaceNotPending` branches for this specific scenario now.
-
-5. **Frontend `RaceDetailPage.tsx`**: convert `sessionToken` from a plain `const` derived once from `location.state` into `useState`, seeded with the same initial value. Add a recovery `useEffect`: once `raceDetail` is loaded, if `sessionToken` is still `null` and `getUserID()` is found in `raceDetail.participants` and status isn't `finished`/`cancelled`, call `POST /races/{id}/join` and `setSessionToken` from the response. Best-effort — a failure just leaves the user in today's existing spectator fallback, not a new error state. Re-fires on every subsequent `raceDetail` update (e.g. from `onRefresh`) as long as `sessionToken` is still null, so recovery isn't limited to one attempt at mount.
-
-6. **Tests**: extend `internal/race`'s existing fake repository (`helpers_test.go`) with `IsParticipant`; add service tests (idempotent join while pending returns a token without a duplicate `AddParticipant`/error, idempotent join while active succeeds where it previously 409'd, a genuinely new joiner still goes through the normal add-participant path) and a handler test for the active-race recovery case specifically, since that's the actual gap.
+<!-- populated by /feature load -->
 
 ## Notes
 
-- No wire/DTO changes — `JoinRaceResponse`'s `{race_id, session_token}` shape and `200 OK` status already fit both "newly joined" and "reconnected" outcomes identically; no need for the client to tell them apart.
-- No Swagger regeneration needed for the same reason — the endpoint's documented contract doesn't change, only its internal behavior.
-- Deliberately not adding any persistence for `session_token` (e.g. localStorage) to avoid this class of bug more broadly — that's a bigger design change (token lifetime vs. storage security tradeoffs) than this fix's scope; this fix makes losing it *recoverable*, not impossible to lose in the first place.
+<!-- populated by /feature load -->
 
 ## History
 
@@ -117,3 +64,4 @@ In Progress
   **Two real bugs found and fixed mid-feature, from a direct user report of live testing** (not part of the original plan, but bundled into the same commit since both are in the same "pending race lobby visibility" area `open-races.md` itself touches): (1) A creator watching their pending lobby never saw a second player join, or a player leave, without a manual page refresh — traced to `RaceScreenSidebar.tsx`'s pending player list rendering from `raceDetail.participants`, a one-time REST snapshot, never reconciled against the live `race_state` broadcasts `useRaceSocket.ts` was already receiving over the WebSocket the whole time (confirmed the backend was already broadcasting correctly on both the immediate `ParticipantJoined` call and the unconditional 250ms ticker — this was purely a frontend rendering gap, not a missing broadcast). Fixed by comparing the live participant count against the REST snapshot's count while pending and calling the existing `onRefresh()` callback (the same one `race_started` already uses) on a mismatch, guarded by a ref so it fires once per actual change, not every tick. (2) The last participant leaving a pending race never got cancelled — traced to `applyEvent`'s `ParticipantLeft` case: the active-race branch calls `departParticipant`, which calls `checkRaceFinished()` afterward to detect "room now empty," but the pending-room branch removed the participant and persisted the leave without ever calling `checkRaceFinished()`, so an emptied pending race just sat as `status: pending` until `PendingTimeoutDuration` eventually elapsed on its own instead of cancelling immediately. Fixed with one added call; a regression test was written and confirmed to fail against the pre-fix code (via `git stash`) before confirming it passed after, plus a companion test proving a pending room with other participants still present correctly does *not* get cancelled.
 
   Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green, `internal/room` re-run 3x with no flakiness (including the two new regression tests), `yarn build`/`yarn lint` clean (same pre-existing shadcn warning as every prior frontend feature), Swagger docs regenerated for the new endpoint. Bundled a second, unrelated commit on the same branch per explicit request: added a `pgadmin` service to `docker-compose.yml` (port 5050, pre-registered "Aviron (local)" connection via `docker/pgadmin/servers.json`) so the database can be browsed from a browser — verified live (`docker compose up -d pgadmin`, confirmed healthy, confirmed the pre-registered server loaded from the logs). Same disclosed gap as every frontend-touching feature this project: no live two-browser-tab test for the lobby live-update fix, verified by tracing the exact data flow (backend broadcast → `useRaceSocket` → `RaceScreenSidebar` render) rather than an observed browser session.
+- **Idempotent Join / Session Token Recovery** (2026-07-22) — Not a phase-plan spec; closes out two of the three "leftover items from previous phases" surfaced during an explicit audit requested before starting Phase 3 (the third, the minimum-participant question, was resolved as "no fix needed" and documented directly in `context/features/phase1/races/start-race.md`; the ranked public leaderboard remains open, not picked up here). The audit re-read every phase-plan spec and cross-referenced against current code rather than trusting History alone, surfacing: `POST /races/{id}/join` still 409ing `already_joined` for an already-pending participant (originally deferred in `reconnection/grace-period.md`'s own History entry, never revisited), and — found only by tracing the actual reload path, not from the original note — `JoinRace` rejecting anything non-`pending` unconditionally, meaning there was **no way at all**, not just an unfriendly one, to recover a lost `session_token` for a race already in progress. Traced end-to-end before writing any code: `session_token` only ever travels through React Router navigation state (`RaceDetailPage.tsx`), never persisted, so any reload loses it; `RaceScreen.tsx` then withholds the WebSocket connection entirely (`useRaceSocket`'s `if (!raceId || !sessionToken) return`), silently degrading a real participant into permanent read-only spectator mode with no error shown. Fixed symmetrically: `RaceService.JoinRace` now checks a new `IsParticipant` (`internal/race/repository.go` → `postgres.RaceRepository`, a single `SELECT EXISTS(...)`) *before* checking race status — an already-joined caller (pending, active, finished, or cancelled, doesn't matter) gets a freshly signed token instead of an error; a genuinely new joiner still goes through the unchanged status/count/insert path. Reasoned explicitly, not assumed, that issuing a token for a finished/cancelled race is harmless: `RaceScreen.tsx`'s existing `terminal` check already withholds it client-side, and even without that, the room actor behind a finished/cancelled race has already torn down and been removed from the registry, so a WS handshake would fail at the registry lookup regardless of token validity — no extra status guard needed. `ErrAlreadyJoined`/`AddParticipant`'s unique-violation mapping stays as a defensive fallback, now only reachable via the TOCTOU window between the `IsParticipant` check and the insert (two concurrent first-time joins from the same user) — the same accepted count-then-insert race class this codebase already accepts for `MaxParticipants`. Frontend: `RaceDetailPage.tsx`'s `sessionToken` became `useState` (was a plain `const` derived once from `location.state`), with a best-effort recovery `useEffect` that re-joins once `raceDetail` confirms the current user really is a participant of a non-terminal race — a failure just leaves the existing spectator fallback in place, not a new error state. **One test-writing correction caught before it shipped**: an initial service test asserted a recovered token must differ from the first one issued; failed immediately because `signSessionToken`'s `exp` is truncated to whole seconds and HS256 signing has no nonce, so two calls within the same wall-clock second legitimately produce a byte-identical JWT — not a bug, a wrong test assumption, fixed by asserting a token comes back at all rather than that it differs. Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green (new/updated service and handler tests covering both the pending-idempotency and previously-impossible active-race-recovery cases), `yarn build`/`yarn lint` clean, and — beyond the usual disclosed no-browser-automation gap — a full live end-to-end run against the real local server/Postgres reproducing every scenario directly: repeat join while pending → `200` with a token (was `409`); recovering a token on an active race → `200` (was `409`, previously impossible); a genuinely new user hitting an active race → still correctly `409`. No wire/DTO or Swagger changes — the endpoint's documented contract is unchanged, only its internal behavior. Bundled two small unrelated commits on the same branch history (not this feature's own commit): a `docs:` commit resolving the minimum-participant open question directly in `start-race.md`, done just before this feature started. Of the original three leftover items, only the full ranked/windowed `GET /leaderboard?window=alltime|weekly` remains genuinely open — still unclaimed by any phase, not picked up here, a candidate to fold into Phase 3 or address separately.
