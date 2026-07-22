@@ -278,9 +278,12 @@ func (h *RaceHandler) Status(w http.ResponseWriter, r *http.Request) {
 	participants := make([]participantResponse, len(detail.Participants))
 	for i, p := range detail.Participants {
 		participants[i] = participantResponse{
-			UserID:      p.UserID,
-			DisplayName: p.DisplayName,
-			JoinedAt:    p.JoinedAt.Format(time.RFC3339),
+			UserID:       p.UserID,
+			DisplayName:  p.DisplayName,
+			JoinedAt:     p.JoinedAt.Format(time.RFC3339),
+			FinishRank:   p.FinishRank,
+			FinishTimeMs: p.FinishTimeMs,
+			AvgPaceWatt:  p.AvgPaceWatt,
 		}
 	}
 

@@ -28,10 +28,17 @@ export interface GetRaceTextResponse {
   prompt_text: string
 }
 
+// finish_rank/finish_time_ms are null until the race finishes
+// (race-detail-cold-visit.md) — same nullable shape as RaceResultJSON
+// below, so a cold REST visit and a live connection can render results the
+// same way.
 export interface Participant {
   user_id: string
   display_name: string
   joined_at: string
+  finish_rank: number | null
+  finish_time_ms: number | null
+  avg_pace_watt: number
 }
 
 export interface RaceStatusResponse {

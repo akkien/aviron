@@ -172,7 +172,8 @@ func (r *RaceRepository) GetRaceWithParticipants(ctx context.Context, raceID str
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT rp.user_id, u.display_name, rp.joined_at
+		SELECT rp.user_id, u.display_name, rp.joined_at,
+			rp.finish_rank, rp.finish_time_ms, rp.avg_pace_watt
 		FROM race_participants rp
 		JOIN users u ON u.id = rp.user_id
 		WHERE rp.race_id = $1
@@ -185,8 +186,16 @@ func (r *RaceRepository) GetRaceWithParticipants(ctx context.Context, raceID str
 
 	for rows.Next() {
 		var p race.Participant
-		if err := rows.Scan(&p.UserID, &p.DisplayName, &p.JoinedAt); err != nil {
+		// avg_pace_watt is NULL until a race finishes (race-detail-cold-visit.md)
+		// — scanned into a pointer, then coalesced to 0, matching
+		// RaceResultJSON's own always-a-real-float64 shape.
+		var avgPaceWatt *float64
+		if err := rows.Scan(&p.UserID, &p.DisplayName, &p.JoinedAt,
+			&p.FinishRank, &p.FinishTimeMs, &avgPaceWatt); err != nil {
 			return race.RaceDetail{}, fmt.Errorf("postgres: scan participant: %w", err)
+		}
+		if avgPaceWatt != nil {
+			p.AvgPaceWatt = *avgPaceWatt
 		}
 		detail.Participants = append(detail.Participants, p)
 	}

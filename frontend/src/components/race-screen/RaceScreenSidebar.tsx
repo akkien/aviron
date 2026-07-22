@@ -4,6 +4,7 @@ import { apiFetch } from "@/lib/api"
 import { laneColor } from "@/lib/colors"
 import { vehicleForUser, VEHICLES } from "@/lib/vehicles"
 import type {
+  Participant,
   RaceFinishedMessage,
   RaceStateMessage,
   RaceStatusResponse,
@@ -30,6 +31,56 @@ function rankTextColor(rank: number): string {
   if (rank === 2) return "text-gray-400"
   if (rank === 3) return "text-amber-700"
   return "text-muted-foreground"
+}
+
+// Leaderboard needs no live raceState to render correctly — every distance
+// falls back to 0, same as a race that hasn't moved yet — so it's shared
+// as-is between a participant's active view and a spectator's read-only
+// one (race-detail-cold-visit.md), not duplicated.
+function Leaderboard({
+  participants,
+  raceState,
+  distanceMeters,
+}: {
+  participants: Participant[]
+  raceState: RaceStateMessage | null
+  distanceMeters: number
+}) {
+  const ranked = [...participants].sort((a, b) => {
+    const da = raceState?.participants.find((p) => p.user_id === a.user_id)?.distance_m ?? 0
+    const db = raceState?.participants.find((p) => p.user_id === b.user_id)?.distance_m ?? 0
+    return db - da
+  })
+  return (
+    <div className="flex flex-col gap-2 rounded-2xl border-2 bg-card p-3.5">
+      <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+        Leaderboard
+      </div>
+      {ranked.map((p, i) => {
+        const distanceM = raceState?.participants.find((rp) => rp.user_id === p.user_id)?.distance_m ?? 0
+        const percent = distanceMeters > 0 ? Math.min(100, (distanceM / distanceMeters) * 100) : 0
+        const color = laneColor(participants.findIndex((rp) => rp.user_id === p.user_id))
+        return (
+          <div key={p.user_id} className="flex items-center gap-2.5">
+            <span className={`w-4 font-heading text-xs font-bold ${rankTextColor(i + 1)}`}>
+              {i + 1}
+            </span>
+            <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+            <span className="flex-1 truncate text-xs font-semibold">{p.display_name}</span>
+            <span className="h-1.5 w-14 overflow-hidden rounded-full bg-secondary">
+              <span
+                className="block h-full rounded-full transition-[width] duration-400"
+                style={{ width: `${percent}%`, backgroundColor: color }}
+              />
+            </span>
+            <span className="w-8 text-right font-mono text-[11px] font-bold text-muted-foreground">
+              {Math.round(percent)}%
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 interface RaceScreenSidebarProps {
@@ -93,6 +144,7 @@ export function RaceScreenSidebar({
 
   const isCreator = raceDetail.created_by === currentUserId
   const canStart = isCreator && raceDetail.status === "pending"
+  const isParticipant = raceDetail.participants.some((p) => p.user_id === currentUserId)
 
   async function handleCopyRaceId() {
     await navigator.clipboard.writeText(raceId)
@@ -213,9 +265,11 @@ export function RaceScreenSidebar({
               {starting ? "Starting..." : "Start Race"}
             </Button>
           )}
-          <Button variant="secondary" onClick={leaveRace}>
-            Leave
-          </Button>
+          {isParticipant && (
+            <Button variant="secondary" onClick={leaveRace}>
+              Leave
+            </Button>
+          )}
         </div>
       </div>
     )
@@ -253,12 +307,25 @@ export function RaceScreenSidebar({
     )
   }
 
-  if (finished) {
+  // Renders from the live race_finished message when present (freshest —
+  // already correct for a client connected at the exact moment of
+  // finishing), else from raceDetail.participants (REST, populated by the
+  // same finish_rank/finish_time_ms columns for a cold visit — reload,
+  // fresh link, a spectator — race-detail-cold-visit.md). One rendering
+  // path, two data sources.
+  if (finished || raceDetail.status === "finished") {
+    const results = finished
+      ? finished.results
+      : raceDetail.participants.map((p) => ({
+          user_id: p.user_id,
+          finish_rank: p.finish_rank,
+          finish_time_ms: p.finish_time_ms,
+        }))
     return (
       <div className="flex flex-col gap-3">
         <div className="font-heading text-xl font-bold">Race finished</div>
         <ul className="flex flex-col gap-1.5 text-sm">
-          {[...finished.results]
+          {[...results]
             .sort((a, b) => (a.finish_rank ?? Infinity) - (b.finish_rank ?? Infinity))
             .map((r) => {
               const p = raceDetail.participants.find((p) => p.user_id === r.user_id)
@@ -282,17 +349,33 @@ export function RaceScreenSidebar({
     )
   }
 
+  // A visitor who never joined has no session token, so no live updates
+  // are possible — a fully interactive TypingBox would silently do nothing
+  // for them, so they get a read-only view instead and never need
+  // promptText at all (race-detail-cold-visit.md).
+  if (raceDetail.status === "active" && !isParticipant) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="font-heading text-xl font-bold">{raceDetail.name}</div>
+          <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+            Spectating
+          </span>
+        </div>
+        <Leaderboard
+          participants={raceDetail.participants}
+          raceState={raceState}
+          distanceMeters={raceDetail.distance_meters}
+        />
+      </div>
+    )
+  }
+
   if (promptText === null) {
     return (
       <p className="text-sm text-muted-foreground">{connectionError ?? "Loading prompt..."}</p>
     )
   }
-
-  const rankedParticipants = [...raceDetail.participants].sort((a, b) => {
-    const da = raceState?.participants.find((p) => p.user_id === a.user_id)?.distance_m ?? 0
-    const db = raceState?.participants.find((p) => p.user_id === b.user_id)?.distance_m ?? 0
-    return db - da
-  })
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
@@ -306,37 +389,11 @@ export function RaceScreenSidebar({
       {reconnecting && <p className="text-sm text-muted-foreground">Reconnecting...</p>}
       {connectionError && <p className="text-sm text-destructive">{connectionError}</p>}
 
-      <div className="flex flex-col gap-2 rounded-2xl border-2 bg-card p-3.5">
-        <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-          Leaderboard
-        </div>
-        {rankedParticipants.map((p, i) => {
-          const distanceM = raceState?.participants.find((rp) => rp.user_id === p.user_id)?.distance_m ?? 0
-          const percent =
-            raceDetail.distance_meters > 0
-              ? Math.min(100, (distanceM / raceDetail.distance_meters) * 100)
-              : 0
-          const color = laneColor(raceDetail.participants.findIndex((rp) => rp.user_id === p.user_id))
-          return (
-            <div key={p.user_id} className="flex items-center gap-2.5">
-              <span className={`w-4 font-heading text-xs font-bold ${rankTextColor(i + 1)}`}>
-                {i + 1}
-              </span>
-              <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-              <span className="flex-1 truncate text-xs font-semibold">{p.display_name}</span>
-              <span className="h-1.5 w-14 overflow-hidden rounded-full bg-secondary">
-                <span
-                  className="block h-full rounded-full transition-[width] duration-400"
-                  style={{ width: `${percent}%`, backgroundColor: color }}
-                />
-              </span>
-              <span className="w-8 text-right font-mono text-[11px] font-bold text-muted-foreground">
-                {Math.round(percent)}%
-              </span>
-            </div>
-          )
-        })}
-      </div>
+      <Leaderboard
+        participants={raceDetail.participants}
+        raceState={raceState}
+        distanceMeters={raceDetail.distance_meters}
+      />
 
       <TypingBox
         promptText={promptText}

@@ -20,6 +20,12 @@ type Participant struct {
 	UserID      string
 	DisplayName string
 	JoinedAt    time.Time
+	// FinishRank/FinishTimeMs/AvgPaceWatt are nil/zero until the race
+	// finishes — same nullable shape as room.RaceResultJSON
+	// (race-detail-cold-visit.md), populated by FinishRace's transaction.
+	FinishRank   *int
+	FinishTimeMs *int64
+	AvgPaceWatt  float64
 }
 
 type RaceDetail struct {
