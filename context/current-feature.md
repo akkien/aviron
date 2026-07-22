@@ -1,4 +1,4 @@
-# Current Feature
+# Current Feature: Pending Connections
 
 ## Status
 
@@ -6,19 +6,50 @@ Not Started
 
 ## Goals
 
-<!-- populated by /feature load -->
+- `TelemetryReceived` events are dropped while a room hasn't gone active yet — confirmed a real, currently-live gap (see Explain), not the "defense in depth, should never trigger" the spec's wording implies.
+- `GET /ws` already accepts a connection to a still-`pending` race today, as an unverified side effect of `early-spawn.md` — this feature's job is to recognize and document that, add test coverage for it, and fix the now-stale spec text describing the old rejection rule, not to write new rejection-relaxing code.
+- The existing `active bool` (`early-spawn.md`) is reused as-is for pending/active status — no new `roomStatus` enum type, since the bool already fully captures it (see Explain).
+- **`POST /races/{id}/leave` is removed entirely, per explicit user direction** — leaving a race, pending or active, goes through the WebSocket `leave_race` message exclusively, with the room actor deciding internally (via its own `active` field) whether that means an immediate Postgres delete or the existing deferred/in-memory quit. This is a change from this feature's own earlier "leaning toward: yes, unchanged" resolution — superseded after direct discussion, not silently reversed.
+- Grace-period/reconnection behavior confirmed to need zero changes — carried forward as an explicit "no-op, verified" outcome, not silently skipped.
+- Close out `early-spawn.md`'s disclosed debt as part of this feature's own verification pass: fix the two known-failing tests and actually run `go vet`/`gofmt`/`go test ./... -race` clean, since this feature touches the same `active` field and test fixtures directly.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **The spec's proposed `roomStatus`/`roomPending`/`roomActive` enum is now redundant, confirmed by reading the actual shipped code**: `early-spawn.md` already added `active bool` to `RoomActor` (`room.go:58`), used exactly the way this spec's enum would be — and the spec itself says `finished`/`cancelled` stay handled separately by `r.finished`+`cancel()`, meaning there's no third state a bool can't express. Reusing `active` avoids a type churn (rename + every call site) that would add zero expressiveness over what's already shipped.
+- **`GET /ws`'s rejection rule has already silently changed, with no test coverage confirming it's safe**: `internal/ws/endpoint.go:63-67` only ever checked `registry.Get(raceID)` succeeding — never an explicit race-status check. Before `early-spawn.md`, that was equivalent to "reject pending races" because a pending race's room actor didn't exist yet. Now that `Spawn` happens at `POST /races` (creation), a pending race's actor **already exists**, so `GET /ws` for a pending race already succeeds today, in master, right now — an untested behavior change nobody explicitly verified. This spec's "relax `GET /ws`'s rejection rule" framing describes work that turns out to already be done; what's actually needed is test coverage proving it, not new rejection logic.
+- **Directly confirms the "Telemetry while pending" requirement is a live, currently-exploitable gap, not a hypothetical**: `applyEvent`'s `TelemetryReceived` case (`room.go:248-260`) has zero active-gating today. Combined with the finding above — since a pending race's WS connection is already accepted — a client that connects to a still-pending race **can already send telemetry today and have it accepted**, updating `WordsCorrect` and even potentially triggering a finish, before the race has legitimately started. The spec undersold this as "defense in depth... should never actually trigger in practice"; grounding shows it's reachable right now with the code as it currently stands.
+- Confirmed `RaceScreenSidebar.handleLeavePending` (`RaceScreenSidebar.tsx:102-111`) is REST-only exactly as the spec claims, calling `POST /races/{id}/leave` directly — this is the code path that goes away.
+- **Direction changed after explicit discussion, not a silent reversal**: this feature's own earlier load pass resolved the "does REST leave stay?" open question as "yes, unchanged, REST as a fallback." Asked directly whether to keep both REST and WS or unify, the answer was unify onto WS for both cases with the backend deciding internally — a real, deliberate architecture change, not a refinement of the original plan. Confirmed `RaceService.LeaveRace(ctx, raceID, userID) error` (`internal/race/service.go:100`) already has the exact signature needed to satisfy a new `RaceLeaver` interface structurally (mirroring `RaceFinisher`'s existing pattern) — no `internal/race` changes needed, only `internal/room` gains the new interface and `NewRoomActor`/`Registry.Spawn` gain a `leaver` parameter.
+- Confirmed `internal/ws/protocol.go`'s `leave_race` → `ParticipantLeft` decoding already doesn't care about race status — the entire new pending-vs-active branch lives in `applyEvent`'s `ParticipantLeft` case (`room.go`), nowhere else.
+- **A real design question resolved during this update, not left implicit**: should a pending leave go through the existing `departParticipant` (→ `departedParticipants`, `evicted`) like an active quit does? No — confirmed that would incorrectly block a legitimate `POST /races/{id}/join` rejoin after leaving a lobby (unlike quitting mid-race, which should be permanent). Pending leave removes from `r.participants` directly, no `departedParticipants`, no `evicted`.
+- **A real ordering/failure-handling decision, reasoned through explicitly**: remove from `r.participants` *before* calling `leaver.LeaveRace`, not after — because the reader goroutine closes the connection immediately after sending `leave_race` (`leave-race.md`'s existing behavior), so unlike a real disconnect, no grace-period path will ever run to clean up a participant left in place after a failed Postgres call. Failure is logged, not retried — matching `finishRace`'s already-accepted no-retry precedent, not a new gap. Flagged explicitly, not silently accepted: this trades away the HTTP error feedback REST gave a failed leave, since `leave_race` is fire-and-forget — a real (if rare) UX regression worth the user knowing about.
+- Removing `POST /races/{id}/leave` touches two other spec files, both updated alongside this one rather than left to drift: `context/features/phase2/leave-race/leave-race.md` (already-shipped Phase 2 spec — added a "Superseded" note, its REST section marked historical, its WS-quit/rank-assignment sections confirmed still accurate) and `context/features/phase2.6/frontend/live-lobby.md` (its own "Leave button reconciliation" section previously assumed a "prefer WS, fall back to REST" pattern — corrected to reflect there's no REST to fall back to).
+- `early-spawn.md`'s History entry disclosed two known-failing tests and a skipped `go vet`/`gofmt`/`go test` run. Both failing tests are directly adjacent to what this feature touches (`internal/room`'s active-gating, `internal/ws`'s room-actor construction in tests) — fixing them as part of this feature's own verification pass is more honest than letting the debt sit untouched while building more on top of the same field.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/room/room.go`**: add `if !r.active { return }` as the first line of `applyEvent`'s `TelemetryReceived` case — dropped silently, same pattern already used for stale/duplicate telemetry (`Seq <= LastSeq`) directly below it.
+2. **`internal/room` — new `RaceLeaver` interface** (new small file or alongside `RaceFinisher` in `finish.go` — pick whichever reads better at `start`): `LeaveRace(ctx context.Context, raceID, userID string) error`, matching `RaceService.LeaveRace`'s existing signature exactly so it's satisfied structurally with zero `internal/race` changes.
+3. **`internal/room/room.go`'s `applyEvent`'s `ParticipantLeft` case**: branch on `r.active`. `true` → unchanged, existing `departParticipant`. `false` → remove from `r.participants` directly (no `departedParticipants`, no `evicted`), then call `r.leaver.LeaveRace(r.ctx, r.id, e.UserID)` synchronously, logging (not retrying) on failure — matching `finishRace`'s existing accepted-gap precedent.
+4. **`internal/room/room.go` / `registry.go`**: `RoomActor` gains a `leaver RaceLeaver` field; `NewRoomActor`/`Registry.Spawn` gain a `leaver RaceLeaver` parameter alongside the existing `finisher`.
+5. **`internal/race/handler.go`**: `RaceHandler.Create`'s `registry.Spawn(...)` call passes `h.svc` for both `finisher` and the new `leaver` param (same concrete value, two structural roles) — no other change.
+6. **Remove `POST /races/{id}/leave` entirely**: `RaceHandler.Leave` (handler method + its Swagger annotations), the route registration in `internal/httpserver/route.go`, and `leaveRaceResponse`/related DTOs in `internal/race/dtos.go` if nothing else uses them. `RaceService.LeaveRace` **stays** — it's now what `RaceLeaver` calls structurally, just no longer exposed over REST. Regenerate Swagger docs to drop the removed endpoint.
+7. **`internal/ws/endpoint.go`**: no rejection-logic change (already correct). Add a short comment at the `registry.Get`/`ok` check clarifying that a `pending` room actor is intentionally a valid attach target.
+8. **Spec drift fixes** (both already applied to the spec files themselves during this `load`, confirm they match at `start`): `context/features/phase2/websocket/ws-endpoint.md`'s stale pending-rejection line, and `context/features/phase2/leave-race/leave-race.md`'s new "Superseded (Phase 2.6)" section.
+9. **Tests**:
+   - New: `internal/room` — `TelemetryReceived` while `!r.active` is dropped silently; `ParticipantLeft` while `!r.active` removes from `r.participants` without touching `departedParticipants`/`evicted`, and calls the (fake) `RaceLeaver`; a `RaceLeaver` failure is logged and doesn't panic/block the actor.
+   - New: `internal/ws` — a `GET /ws` connection to a `pending` room actor succeeds (documents the already-shipped behavior found during grounding).
+   - Removed: any `internal/race` test exercising `RaceHandler.Leave`/`POST /races/{id}/leave` directly (the handler is gone) — confirm `RaceService.LeaveRace`'s own service-level tests stay, since that method itself is unchanged.
+   - Fix carried over from `early-spawn.md`: `internal/room`'s no-show-timeout test and `internal/ws`'s `TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing` (needs `actor.MarkActive()` called before the race can legitimately finish).
+10. **Verify**: `go build`/`go vet`/`gofmt -l .`/`go test ./... -race` — the full bar this time, explicitly closing out `early-spawn.md`'s disclosed gap, not just this feature's own new work.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on `room-lifecycle/early-spawn.md` (done, though with disclosed debt this feature closes out — see Plan step 10).
+- Full spec: `context/features/phase2.6/room-lifecycle/pending-connections.md`.
+- Next spec per the phase plan: `websocket/race-started-broadcast.md` — the actual fairness-fixing broadcast, which needs pending connections (this feature) to already exist and behave correctly.
+- `frontend/live-lobby.md` (last spec in the phase) is where the frontend actually starts holding a pending-race WebSocket connection, and where `RaceScreenSidebar.handleLeavePending` actually gets rewired to call `leaveRace()` instead of the now-removed REST endpoint — not here. This feature only removes the REST endpoint and makes the backend correct for whenever that frontend change lands.
+- The REST-vs-WS leave decision was made via direct discussion this session, not assumed — worth remembering if `live-lobby.md`'s own load ever seems to contradict it: WS wins, REST is gone, backend decides internally.
 
 ## History
 

@@ -1,5 +1,22 @@
 # Leave Race
 
+## Superseded (Phase 2.6)
+
+**`POST /races/{id}/leave`, this spec's REST mechanism for leaving before a
+race starts, was removed by
+`context/features/phase2.6/room-lifecycle/pending-connections.md`.** Once a
+room actor exists before a race starts and a WebSocket connection can
+attach to it while pending, there was no longer a reason for two separate
+leave mechanisms — leaving now goes through the WebSocket `leave_race`
+message / `ParticipantLeft` event exclusively, for both pending and active
+races, with the room actor deciding internally (based on its own `active`
+field) whether that means an immediate `DELETE FROM race_participants` or
+the deferred, in-memory quit this spec's "Leaving During an Active Race"
+section already describes. That section, the rank-assignment rule, and the
+`ParticipantLeft`/`ParticipantEvicted` naming below are all still accurate
+and unchanged — only "Leaving Before Start (REST)" below is now historical,
+describing what this project built first before Phase 2.6 unified it.
+
 ## Overview
 
 Not part of `context/project-overview.md`'s original spec or Phase 2's original roadmap — added by explicit request after Phase 2's backend was otherwise complete. Every path into a race currently only ever adds a participant; there's no way to voluntarily back out. This covers two distinct scenarios that need different mechanisms:
@@ -14,6 +31,10 @@ It also changes `race-completion/finish-race.md`'s rank-assignment rule: today, 
 ## Requirements
 
 ### Leaving Before Start (REST)
+
+**Historical — see "Superseded (Phase 2.6)" above.** `POST /races/{id}/leave`
+was removed; this section describes what shipped first, not current
+behavior.
 
 - New endpoint on `internal/race`: removes the caller as a participant. **Open question for `start`**: HTTP verb/path. `DELETE /races/{id}/leave` is more REST-correct for "remove myself," but this project's existing `POST /races/{id}/join` (a POST for what's arguably a sub-resource creation) sets a "verb over pure REST-correctness" precedent worth staying consistent with — `POST /races/{id}/leave` is the other reasonable option. Pick one at `start`, not both.
 - Only valid while `race.status == 'pending'` — mirrors `JoinRace`'s own pending-only rule. Once active, leaving must go through the WebSocket path below; `409 race_not_pending` otherwise (reusing the existing sentinel error, not a new one).

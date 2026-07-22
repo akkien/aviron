@@ -83,11 +83,19 @@ reusing that same callback rather than inventing a second redirect path.
 
 ### Leave button reconciliation
 
-Pending "Leave" (`RaceScreenSidebar.handleLeavePending`) switches from its
-current REST-only `POST /races/{id}/leave` call to sending `leave_race` over
-the now-open socket — the same `leaveRace()` the active-race Quit button
-already calls from `useRaceSocket` — per
-`room-lifecycle/pending-connections.md`'s reconciliation decision.
+`POST /races/{id}/leave` no longer exists —
+`room-lifecycle/pending-connections.md` removed it entirely, unifying
+leave onto the WebSocket `leave_race` message for both pending and active
+races, with the room actor deciding server-side what that means. There's
+no "prefer WS, fall back to REST" — REST isn't an option anymore.
+
+Pending "Leave" (`RaceScreenSidebar.handleLeavePending`) becomes a call to
+the same `leaveRace()` the active-race Quit button already calls from
+`useRaceSocket` — at that point the two buttons' handlers are functionally
+identical, so `handleLeavePending` as a separate function may not need to
+exist at all (an implementation detail for `start`, not specified here).
+`LeaveRaceResponse` (`types/race.ts`) and the `apiFetch` call it backed
+become dead code, removed alongside this.
 
 ### The "Refresh" button
 
