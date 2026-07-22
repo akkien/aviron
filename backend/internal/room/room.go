@@ -179,19 +179,22 @@ func (r *RoomActor) IsEvicted(userID string) bool {
 	}
 }
 
-// activated carries no data — MarkActive is the only place that sends it,
-// and there's nothing for applyEvent to do beyond setting r.active.
-// Event-through-inbox rather than MarkActive mutating r.active directly,
-// consistent with every other piece of room state (room-actor-core.md's
-// single-writer principle).
-type activated struct{}
+// activated carries the race's prompt text so applyEvent can broadcast
+// race_started (websocket/race-started-broadcast.md) — MarkActive is the
+// only place that sends it. Event-through-inbox rather than MarkActive
+// mutating r.active directly, consistent with every other piece of room
+// state (room-actor-core.md's single-writer principle).
+type activated struct {
+	PromptText string
+}
 
 func (activated) isRoomEvent() {}
 
-// MarkActive tells the room actor its race has started. Called by
+// MarkActive tells the room actor its race has started and broadcasts
+// race_started to every already-attached connection. Called by
 // RaceHandler.Start once RaceService.StartRace succeeds.
-func (r *RoomActor) MarkActive() {
-	r.Send(activated{})
+func (r *RoomActor) MarkActive(promptText string) {
+	r.Send(activated{PromptText: promptText})
 }
 
 // Run is the room actor's single-writer loop: participants is only ever
@@ -337,6 +340,24 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		r.checkRaceFinished()
 	case activated:
 		r.active = true
+		r.broadcastRaceStarted(e.PromptText)
+	}
+}
+
+// broadcastRaceStarted sends race_started to every connection already
+// attached to this room (websocket/race-started-broadcast.md) — same
+// marshal-then-non-blocking-send shape finishRace already uses for
+// race_finished, riding the existing hub fan-out with no new delivery path.
+func (r *RoomActor) broadcastRaceStarted(promptText string) {
+	body, err := json.Marshal(RaceStartedMessage{Type: "race_started", PromptText: promptText})
+	if err != nil {
+		return // can't happen with these field types, but must not panic the actor loop
+	}
+	select {
+	case r.broadcast <- body:
+	default:
+		// Same non-blocking rule as broadcastSnapshot/finishRace — a full or
+		// nonexistent listener must never stall the actor.
 	}
 }
 

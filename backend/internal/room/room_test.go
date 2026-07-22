@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -414,5 +415,39 @@ func TestRoomActor_ApplyEvent_EvictionQuery(t *testing.T) {
 	r.applyEvent(evictionQuery{UserID: "user-2", Reply: notEvictedReply})
 	if evicted := <-notEvictedReply; evicted {
 		t.Error("evictionQuery reported user-2 as evicted, want not evicted")
+	}
+}
+
+// TestRoomActor_ApplyEvent_Activated_SetsActiveAndBroadcastsRaceStarted covers
+// websocket/race-started-broadcast.md: MarkActive's activated event must both
+// flip r.active (already covered by pending-connections.md's own gating
+// tests) and broadcast race_started carrying the race's prompt text, so
+// already-connected pending clients learn the race started without a
+// separate GET /races/{id}/text round-trip.
+func TestRoomActor_ApplyEvent_Activated_SetsActiveAndBroadcastsRaceStarted(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.broadcast = make(chan []byte, 4)
+
+	r.applyEvent(activated{PromptText: "the quick brown fox"})
+
+	if !r.active {
+		t.Error("r.active = false after activated, want true")
+	}
+
+	select {
+	case body := <-r.broadcast:
+		var msg RaceStartedMessage
+		if err := json.Unmarshal(body, &msg); err != nil {
+			t.Fatalf("unmarshal broadcast: %v", err)
+		}
+		if msg.Type != "race_started" {
+			t.Errorf("Type = %q, want %q", msg.Type, "race_started")
+		}
+		if msg.PromptText != "the quick brown fox" {
+			t.Errorf("PromptText = %q, want %q", msg.PromptText, "the quick brown fox")
+		}
+	default:
+		t.Fatal("no race_started message broadcast")
 	}
 }

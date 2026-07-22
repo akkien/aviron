@@ -80,3 +80,16 @@ type RaceResultJSON struct {
 	FinishTimeMs *int64  `json:"finish_time_ms"`
 	AvgPaceWatt  float64 `json:"avg_pace_watt"`
 }
+
+// RaceStartedMessage is broadcast the instant a room goes active
+// (websocket/race-started-broadcast.md), reaching every connection already
+// attached to the pending lobby. Lives here rather than internal/ws for the
+// same reason RaceFinishedMessage/RaceStateMessage do: RoomActor broadcasts
+// it directly (see broadcastRaceStarted in room.go), so a duplicate
+// definition in internal/ws would be unused dead code. PromptText is carried
+// directly so a client can start typing without a separate
+// GET /races/{id}/text round-trip.
+type RaceStartedMessage struct {
+	Type       string `json:"type"`
+	PromptText string `json:"prompt_text"`
+}

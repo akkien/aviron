@@ -155,7 +155,7 @@ func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
 
 	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
 	go actor.Run()
-	actor.MarkActive() // a pending race can't legitimately finish (pending-connections.md)
+	actor.MarkActive("") // a pending race can't legitimately finish (pending-connections.md)
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
@@ -248,5 +248,94 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("serveConn did not return after a write error — reader goroutine left blocked forever")
+	}
+}
+
+// awaitMessageType drains c.writes until it sees a message with the given
+// "type" field (skipping any race_state ticks that land first — the room
+// actor broadcasts on a 250ms ticker independently of this test) or fails
+// the test after timeout.
+func awaitMessageType(t *testing.T, c *fakeConn, wantType string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case body := <-c.writes:
+			var envelope map[string]any
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("unmarshal message: %v", err)
+			}
+			if envelope["type"] == wantType {
+				return envelope
+			}
+		case <-deadline:
+			t.Fatalf("never received a %q message", wantType)
+			return nil
+		}
+	}
+}
+
+// TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections is
+// websocket/race-started-broadcast.md's own explicitly-called-for regression
+// test: every connection already attached to a still-pending room must
+// receive race_started once the race starts — not staggered, not missing
+// for any connection that was already attached.
+func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
+	go actor.Run()
+
+	h := newTestWSHandler()
+
+	connA := newFakeConn()
+	connA.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+	doneA := make(chan struct{})
+	go func() {
+		h.serveConn(actor, connA, "race-1", "user-a", "user-a")
+		close(doneA)
+	}()
+
+	connB := newFakeConn()
+	connB.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+	doneB := make(chan struct{})
+	go func() {
+		h.serveConn(actor, connB, "race-1", "user-b", "user-b")
+		close(doneB)
+	}()
+
+	// Both connections must actually be attached (registered with the hub)
+	// before MarkActive fires, or this test wouldn't prove anything about
+	// already-connected clients — their immediate join_race snapshot is
+	// proof of that, same as TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak.
+	for name, c := range map[string]*fakeConn{"A": connA, "B": connB} {
+		select {
+		case <-c.writes:
+		case <-time.After(time.Second):
+			t.Fatalf("conn %s never received its initial race_state snapshot", name)
+		}
+	}
+
+	actor.MarkActive("the quick brown fox")
+
+	for name, c := range map[string]*fakeConn{"A": connA, "B": connB} {
+		msg := awaitMessageType(t, c, "race_started", time.Second)
+		if promptText, _ := msg["prompt_text"].(string); promptText != "the quick brown fox" {
+			t.Errorf("conn %s: prompt_text = %q, want %q", name, promptText, "the quick brown fox")
+		}
+	}
+
+	connA.queueRead(nil, io.EOF)
+	connB.queueRead(nil, io.EOF)
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn for conn A did not return")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn for conn B did not return")
 	}
 }
