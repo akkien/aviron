@@ -190,7 +190,7 @@ func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	actor.MarkActive()
+	actor.MarkActive(promptText)
 
 	httpx.WriteJSON(w, http.StatusOK, startRaceResponse{
 		ID:         started.ID,

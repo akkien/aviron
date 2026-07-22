@@ -1,24 +1,43 @@
-# Current Feature
+# Current Feature: race_started Broadcast
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- The instant `POST /races/{id}/start` succeeds, every connection already attached to that room's pending lobby receives a `race_started` message (`{"type":"race_started","prompt_text":"..."}`) at essentially the same moment — fixing the fairness gap this whole phase exists for, instead of each client discovering the transition independently via a `Refresh` click or a `GET /races/{id}/text` poll.
+- The spec's own "open question for `load`" (direct method call vs. event-through-inbox) is already answered by shipped code, not actually open: `pending-connections.md` already added `MarkActive()`/`activated{}` going through the existing `Send`/`inbox` path, and `RaceHandler.Start` already calls it. This feature's job is narrower than the spec implies — extend that existing event with a `PromptText` field and make `applyEvent`'s `activated` case broadcast, not build a new trigger mechanism from scratch.
+- No new delivery path: broadcast the marshaled message directly over `r.broadcast`, the same channel/pattern `finishRace` already uses for `race_finished` — `internal/ws/hub.go` needs zero changes, exactly as the spec states.
+- `GET /races/{id}/text` stays untouched — still the fallback for a client that loads or reconnects after `start` already happened.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- **The spec's "Trigger" section describes work that's already partly done, confirmed by reading the shipped code, not assumed**: `room-lifecycle/pending-connections.md` already added `RoomActor.active bool`, the `activated{}` event, and `MarkActive()` (`room.go:187-194`) — `RaceHandler.Start` (`handler.go:193`) already calls `actor.MarkActive()` right after a successful `RaceService.StartRace`. The spec's phrasing ("tells the room actor to transition to `roomActive`... a new `RoomEvent` variant sent through `Send`/`inbox`") is describing that same mechanism as if it were still to be built. Nothing about *triggering* the transition is new here — only broadcasting on it is.
+- **The spec's own "open question for `load`" is answered by the code, not a real design choice left to make**: event-through-inbox already won — `activated{}` already exists and already goes through `Send`. The only real decision this feature makes is *how the event carries `prompt_text` to the broadcast site*, since `activated{}` today carries no data (`room.go:183`) and `NewRoomActor`/`Registry.Spawn` no longer even hold a `promptText` field (dropped by `early-spawn.md`, confirmed unused via grep at the time). Simplest fix: give `activated` a `PromptText string` field, sourced from `RaceHandler.Start`'s already-computed local `promptText` (`handler.go:178-181`) — no need to thread it through `NewRoomActor`/`Registry.Spawn`'s constructor at all, since it only ever needs to exist at the one moment `MarkActive` fires.
+- **Confirmed the exact broadcast pattern to mirror**: `finishRace` (`room.go`, `RaceFinishedMessage`) already does "marshal a room-defined message struct, non-blocking-send the bytes on `r.broadcast`" for `race_finished`. `RaceStartedMessage` should live in `internal/room` for the identical reason `RaceFinishedMessage`/`RaceStateMessage` already do (established twice now, in `finish-race.md` and `websocket/protocol.md`'s history): the room actor marshals and broadcasts it directly, so a duplicate definition in `internal/ws` would be unused dead code from the moment it existed.
+- **Confirmed no new concurrency pattern is needed, not just assumed from the spec's own claim**: read `hub.go:45-96` directly — `hub.run`'s `case msg := <-broadcast` iterates every registered connection's channel in one loop pass per message, which is already "fan out one message to N already-attached connections near-simultaneously," exactly what this feature needs. The spec's own note that `docs/concurrency.md`'s drain-before-shutdown fix isn't relevant here is confirmed too: that fix only matters for the `case <-done` teardown branch, and `activated` triggers no teardown — it flows through the ordinary `case msg := <-broadcast` path, same as any `race_state` tick.
+- Confirmed via grep: `RaceStartedMessage`/`race_started` don't exist anywhere in the codebase yet — this is genuinely new, unlike the trigger mechanism.
+- Confirmed the only two real call sites of `MarkActive()` needing a signature update: `internal/race/handler.go:193` (production) and `internal/ws/endpoint_test.go:158` (a test that only needs the race to *go* active, not caring what `prompt_text` it broadcasts).
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/room/room.go`**: `activated` struct gains `PromptText string`. `MarkActive(promptText string)` sends `activated{PromptText: promptText}` instead of the current no-arg `activated{}`.
+2. **`internal/room` — new `RaceStartedMessage`** (alongside `RaceFinishedMessage` in `finish.go`, or wherever reads best at `start` — same reasoning either way): `type RaceStartedMessage struct { Type string; PromptText string }` with `json:"type"`/`json:"prompt_text"` tags, matching the spec's wire shape exactly.
+3. **`internal/room/room.go`'s `applyEvent`'s `activated` case**: set `r.active = true` (unchanged), then marshal `RaceStartedMessage{Type: "race_started", PromptText: e.PromptText}` and non-blocking-send the bytes on `r.broadcast` — same shape as `finishRace`'s existing marshal-then-select-send block.
+4. **`internal/race/handler.go`**: `RaceHandler.Start`'s `actor.MarkActive()` call becomes `actor.MarkActive(promptText)`, reusing the local `promptText` already computed a few lines above it (`handler.go:178-181`) — no other change to that handler.
+5. **Tests**:
+   - New: `internal/room` — `applyEvent(activated{PromptText: "..."})` sets `r.active = true` *and* broadcasts a `race_started` message carrying that exact `prompt_text`.
+   - New: `internal/ws` — the regression test the spec explicitly calls for: spawn a room, attach 2+ fake connections while pending (mirroring `endpoint_test.go`'s existing fake-conn patterns), call `actor.MarkActive(promptText)`, and assert every attached connection receives `race_started` with the right `prompt_text` — proving simultaneous delivery to already-connected pending clients, not just one arbitrary connection.
+   - Updated: `internal/ws/endpoint_test.go:158`'s existing `actor.MarkActive()` call gains an argument (empty string is fine — that test doesn't exercise `race_started` content).
+6. **Verify**: `go build`/`go vet`/`gofmt -l .`/`go test ./... -race`.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on `room-lifecycle/pending-connections.md` (done) and transitively `room-lifecycle/early-spawn.md` (done) — both already shipped, confirmed above.
+- Full spec: `context/features/phase2.6/websocket/race-started-broadcast.md`.
+- `frontend/live-lobby.md` (last spec in the phase) is the consumer of this message — not touched here, per the spec's own scope note.
+- No `internal/ws` production code changes are needed at all, only the room package plus one call-site update in `internal/race/handler.go` — `hub.go`'s fan-out already handles this for free, confirmed during grounding above.
 
 ## History
 
