@@ -49,13 +49,32 @@ func (s *RaceService) CreateRace(ctx context.Context, name string, distanceMeter
 }
 
 // JoinRace adds userID as a participant of raceID and returns a signed
-// per-race session token. ErrRaceNotFound, ErrRaceNotPending, ErrRaceFull,
-// and ErrAlreadyJoined pass through as-is for the handler to map to
-// responses.
+// per-race session token. Idempotent for a caller who's already a
+// participant — pending, active, finished, or cancelled, it doesn't matter
+// — they get a fresh token instead of an error, since the only way to
+// recover a lost session_token (e.g. a page reload) is calling this again
+// (idempotent-join.md). A token for a finished/cancelled race is harmless:
+// the room actor behind it has already torn down and been removed from the
+// registry, so a WS handshake attempt fails there regardless of token
+// validity — no extra status guard needed for that case.
+// ErrRaceNotFound, ErrRaceNotPending, and ErrRaceFull pass through as-is for
+// the handler to map to responses; ErrAlreadyJoined is now only reachable
+// via the TOCTOU window between the IsParticipant check below and
+// AddParticipant's own insert (two concurrent first-time joins from the
+// same user) — the same accepted count-then-insert race class this
+// codebase already accepts for MaxParticipants.
 func (s *RaceService) JoinRace(ctx context.Context, raceID, userID string) (sessionToken string, err error) {
 	r, err := s.repo.GetRace(ctx, raceID)
 	if err != nil {
 		return "", err
+	}
+
+	alreadyIn, err := s.repo.IsParticipant(ctx, raceID, userID)
+	if err != nil {
+		return "", err
+	}
+	if alreadyIn {
+		return s.signSessionToken(raceID, userID)
 	}
 
 	if r.Status != "pending" {

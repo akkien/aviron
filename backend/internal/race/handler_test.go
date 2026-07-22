@@ -200,7 +200,11 @@ func TestRaceHandler_Join_NotFound(t *testing.T) {
 	}
 }
 
-func TestRaceHandler_Join_AlreadyJoined(t *testing.T) {
+// TestRaceHandler_Join_AlreadyJoinedPending_ReturnsFreshTokenNotConflict
+// covers idempotent-join.md: a repeat join for a still-pending race (e.g. a
+// client recovering a lost session_token after a reload) now gets 200 +
+// a fresh token instead of a 409.
+func TestRaceHandler_Join_AlreadyJoinedPending_ReturnsFreshTokenNotConflict(t *testing.T) {
 	secret := []byte("test-secret")
 	h := newTestHandler()
 	raceID := createTestRace(t, secret, h)
@@ -220,8 +224,54 @@ func TestRaceHandler_Join_AlreadyJoined(t *testing.T) {
 	}
 
 	rec := join()
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second join status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp["session_token"] == "" || resp["session_token"] == nil {
+		t.Error("second join response has no session_token")
+	}
+}
+
+// TestRaceHandler_Join_AlreadyJoinedActive_RecoversToken is the actual gap
+// this feature exists to close: recovering a session_token for a race
+// already in progress, which previously 409'd race_not_pending
+// unconditionally with no way around it.
+func TestRaceHandler_Join_AlreadyJoinedActive_RecoversToken(t *testing.T) {
+	secret := []byte("test-secret")
+	h := newTestHandler()
+	raceID := createTestRace(t, secret, h)
+
+	joinReq := httptest.NewRequest(http.MethodPost, "/races/"+raceID+"/join", nil)
+	joinReq.SetPathValue("id", raceID)
+	joinReq.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-2"))
+	joinRec := httptest.NewRecorder()
+	middleware.Auth(secret)(http.HandlerFunc(h.Join)).ServeHTTP(joinRec, joinReq)
+	if joinRec.Code != http.StatusOK {
+		t.Fatalf("join status = %d, want %d, body = %s", joinRec.Code, http.StatusOK, joinRec.Body.String())
+	}
+
+	startReq := httptest.NewRequest(http.MethodPost, "/races/"+raceID+"/start", nil)
+	startReq.SetPathValue("id", raceID)
+	startReq.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "creator"))
+	startRec := httptest.NewRecorder()
+	middleware.Auth(secret)(http.HandlerFunc(h.Start)).ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start status = %d, want %d, body = %s", startRec.Code, http.StatusOK, startRec.Body.String())
+	}
+
+	rejoinReq := httptest.NewRequest(http.MethodPost, "/races/"+raceID+"/join", nil)
+	rejoinReq.SetPathValue("id", raceID)
+	rejoinReq.Header.Set("Authorization", "Bearer "+signTestToken(t, secret, "user-2"))
+	rejoinRec := httptest.NewRecorder()
+	middleware.Auth(secret)(http.HandlerFunc(h.Join)).ServeHTTP(rejoinRec, rejoinReq)
+
+	if rejoinRec.Code != http.StatusOK {
+		t.Fatalf("rejoin (active race) status = %d, want %d, body = %s", rejoinRec.Code, http.StatusOK, rejoinRec.Body.String())
 	}
 }
 

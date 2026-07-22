@@ -14,6 +14,12 @@ type RaceRepository interface {
 	GetRace(ctx context.Context, raceID string) (Race, error)
 	AddParticipant(ctx context.Context, raceID, userID string) error
 	CountParticipants(ctx context.Context, raceID string) (int, error)
+	// IsParticipant reports whether userID already has a race_participants
+	// row for raceID, regardless of the race's status — JoinRace checks this
+	// first so a caller who's already in (pending, active, finished, or
+	// cancelled) gets a fresh session token instead of an error
+	// (idempotent-join.md).
+	IsParticipant(ctx context.Context, raceID, userID string) (bool, error)
 	// RemoveParticipant deletes the race_participants row for raceID/userID
 	// (leave-race.md's REST leave path, pending races only — an active
 	// race's participant list lives in the room actor, not here). Returns

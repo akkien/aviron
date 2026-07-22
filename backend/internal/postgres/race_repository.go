@@ -122,6 +122,19 @@ func (r *RaceRepository) CountParticipants(ctx context.Context, raceID string) (
 	return count, nil
 }
 
+func (r *RaceRepository) IsParticipant(ctx context.Context, raceID, userID string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM race_participants WHERE race_id = $1 AND user_id = $2)
+	`, raceID, userID).Scan(&exists)
+
+	if err != nil {
+		return false, fmt.Errorf("postgres: is participant: %w", err)
+	}
+
+	return exists, nil
+}
+
 func (r *RaceRepository) StartRace(ctx context.Context, raceID, promptText string) (race.Race, error) {
 	var rc race.Race
 

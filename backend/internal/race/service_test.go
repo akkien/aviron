@@ -94,7 +94,12 @@ func TestRaceService_JoinRace_RaceNotFound(t *testing.T) {
 	}
 }
 
-func TestRaceService_JoinRace_AlreadyJoined(t *testing.T) {
+// TestRaceService_JoinRace_AlreadyJoinedPending_ReturnsTokenIdempotently
+// covers idempotent-join.md's fix: a second join from someone already in a
+// still-pending race (e.g. recovering a lost session_token after a page
+// reload) now gets a fresh token instead of ErrAlreadyJoined, and doesn't
+// add a duplicate participant row.
+func TestRaceService_JoinRace_AlreadyJoinedPending_ReturnsTokenIdempotently(t *testing.T) {
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, []byte("test-secret"))
 	ctx := context.Background()
@@ -107,9 +112,57 @@ func TestRaceService_JoinRace_AlreadyJoined(t *testing.T) {
 		t.Fatalf("first JoinRace() error = %v", err)
 	}
 
-	_, err = svc.JoinRace(ctx, created.ID, "user-2")
-	if !errors.Is(err, race.ErrAlreadyJoined) {
-		t.Errorf("err = %v, want ErrAlreadyJoined", err)
+	// A second call within the same wall-clock second produces a
+	// byte-identical JWT to the first (signSessionToken's exp is truncated
+	// to whole seconds, and HS256 signing has no nonce) — that's expected,
+	// not a bug, so this only asserts a token comes back, not that it
+	// differs from the first.
+	secondToken, err := svc.JoinRace(ctx, created.ID, "user-2")
+	if err != nil {
+		t.Fatalf("second JoinRace() error = %v, want a fresh token, not an error", err)
+	}
+	if secondToken == "" {
+		t.Error("second JoinRace() returned an empty token")
+	}
+
+	count := 0
+	for _, p := range repo.participants {
+		if p.raceID == created.ID && p.userID == "user-2" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("participant rows for user-2 = %d, want 1 (no duplicate insert)", count)
+	}
+}
+
+// TestRaceService_JoinRace_AlreadyJoinedActive_RecoversToken is the bigger
+// gap idempotent-join.md actually exists to close: before this fix,
+// JoinRace rejected anything non-pending unconditionally, so there was no
+// way at all to recover a lost session_token for a race already in
+// progress — not just an unfriendly error, an impossible one.
+func TestRaceService_JoinRace_AlreadyJoinedActive_RecoversToken(t *testing.T) {
+	repo := newFakeRepository()
+	svc := race.NewRaceService(repo, []byte("test-secret"))
+	ctx := context.Background()
+
+	created, _, _, err := svc.CreateRace(ctx, "Morning Sprint", 1000, "user-1")
+	if err != nil {
+		t.Fatalf("CreateRace() error = %v", err)
+	}
+	if _, err := svc.JoinRace(ctx, created.ID, "user-2"); err != nil {
+		t.Fatalf("JoinRace() error = %v", err)
+	}
+	if _, err := svc.StartRace(ctx, created.ID, "user-1"); err != nil {
+		t.Fatalf("StartRace() error = %v", err)
+	}
+
+	token, err := svc.JoinRace(ctx, created.ID, "user-2")
+	if err != nil {
+		t.Fatalf("JoinRace() on an active race for an existing participant error = %v, want a fresh token", err)
+	}
+	if token == "" {
+		t.Error("JoinRace() returned an empty token")
 	}
 }
 

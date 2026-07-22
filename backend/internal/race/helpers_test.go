@@ -129,6 +129,18 @@ func (f *fakeRepository) CountParticipants(ctx context.Context, raceID string) (
 	return count, nil
 }
 
+func (f *fakeRepository) IsParticipant(ctx context.Context, raceID, userID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, p := range f.participants {
+		if p.raceID == raceID && p.userID == userID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeRepository) StartRace(ctx context.Context, raceID, promptText string) (race.Race, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
