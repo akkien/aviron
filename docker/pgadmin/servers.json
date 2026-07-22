@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Aviron (local)",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "aviron",
+      "Username": "aviron",
+      "SSLMode": "prefer"
+    }
+  }
+}

@@ -10,5 +10,28 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
 
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@aviron.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      # Skips pgAdmin's own login screen — fine for a local-only dev tool,
+      # matching this project's already-low-security local Postgres
+      # credentials (aviron/aviron).
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      # Pre-registers the "Aviron (local)" server connection so it shows up
+      # in the tree on first load — pgAdmin still prompts for the Postgres
+      # password once (aviron/aviron) since servers.json can't embed it
+      # without a mounted pgpass file; check "Save Password" to skip that
+      # prompt on future logins.
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      - postgres
+
 volumes:
   pgdata:
+  pgadmin_data:
