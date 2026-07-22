@@ -60,6 +60,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only checks that an actor exists, not its status — a pending room
+	// actor (spawned at race creation, early-spawn.md) is an intentionally
+	// valid attach target, not an oversight: it's what lets every
+	// participant hold a live connection before the race starts
+	// (pending-connections.md).
 	actor, ok := h.registry.Get(raceID)
 	if !ok {
 		http.Error(w, "race not found", http.StatusNotFound)

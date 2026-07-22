@@ -18,6 +18,14 @@ func (fakeFinisher) FinishRace(ctx context.Context, raceID string, distanceMeter
 	return nil
 }
 
+// fakeLeaver satisfies room.RaceLeaver without touching Postgres, same
+// reasoning as fakeFinisher.
+type fakeLeaver struct{}
+
+func (fakeLeaver) LeaveRace(ctx context.Context, raceID, userID string) error {
+	return nil
+}
+
 // fakeConn is a wsConn test double: Read returns pre-queued results (or
 // blocks on ctx like a real connection would once queued reads run out),
 // and Write records what was sent (or fails, if writeErr is set). This lets

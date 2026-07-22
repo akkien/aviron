@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -30,6 +31,32 @@ func (s *spyFinisher) FinishRace(ctx context.Context, raceID string, distanceMet
 	return nil
 }
 
+// noopLeaver satisfies RaceLeaver without touching Postgres, for tests that
+// don't care about pending-connections.md's persistence step.
+type noopLeaver struct{}
+
+func (noopLeaver) LeaveRace(ctx context.Context, raceID, userID string) error {
+	return nil
+}
+
+// spyLeaver records every LeaveRace call, and can be made to fail on
+// request, for tests asserting exactly what a pending leave hands off to be
+// persisted (and that a failure is logged, not retried or panicked on).
+type spyLeaver struct {
+	calls []leaveCall
+	err   error
+}
+
+type leaveCall struct {
+	raceID string
+	userID string
+}
+
+func (s *spyLeaver) LeaveRace(ctx context.Context, raceID, userID string) error {
+	s.calls = append(s.calls, leaveCall{raceID: raceID, userID: userID})
+	return s.err
+}
+
 // newTestActor builds a RoomActor with no running goroutine — applyEvent is
 // exercised directly, exactly the "pure-ish, no goroutine needed" testing
 // approach room-actor-core.md calls for. distanceMeters defaults high enough
@@ -50,6 +77,7 @@ func newTestActor() *RoomActor {
 		departedParticipants: make(map[string]*ParticipantState),
 		distanceMeters:       1_000_000,
 		finisher:             noopFinisher{},
+		leaver:               noopLeaver{},
 		active:               true,
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -88,6 +116,26 @@ func TestRoomActor_ApplyEvent_TelemetryReceived(t *testing.T) {
 	}
 	if p.LastSeq != 1 {
 		t.Errorf("LastSeq = %d, want 1", p.LastSeq)
+	}
+}
+
+// TestRoomActor_ApplyEvent_TelemetryReceived_DroppedWhilePending covers
+// pending-connections.md's gap: a client connected to a still-pending race
+// (already possible since early-spawn.md spawns the actor at creation) must
+// not be able to accumulate progress before the race legitimately starts.
+func TestRoomActor_ApplyEvent_TelemetryReceived_DroppedWhilePending(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	r.applyEvent(TelemetryReceived{UserID: "user-1", Seq: 1, WordsCorrect: 5})
+
+	p := r.participants["user-1"]
+	if p.WordsCorrect != 0 {
+		t.Errorf("WordsCorrect = %d, want 0 (telemetry must be dropped while the race is still pending)", p.WordsCorrect)
+	}
+	if p.LastSeq != 0 {
+		t.Errorf("LastSeq = %d, want 0 (telemetry must be dropped while the race is still pending)", p.LastSeq)
 	}
 }
 
@@ -266,7 +314,7 @@ func TestRoomActor_ApplyEvent_ParticipantEvicted_UnknownParticipant(t *testing.T
 	}
 }
 
-func TestRoomActor_ApplyEvent_ParticipantLeft_RemovesAndEvictsImmediately(t *testing.T) {
+func TestRoomActor_ApplyEvent_ParticipantLeft_ActiveRace_RemovesAndEvictsImmediately(t *testing.T) {
 	r := newTestActor()
 	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
 
@@ -293,6 +341,60 @@ func TestRoomActor_ApplyEvent_ParticipantLeft_UnknownParticipant(t *testing.T) {
 
 	if len(r.evicted) != 0 {
 		t.Errorf("evicted = %v, want empty", r.evicted)
+	}
+}
+
+// TestRoomActor_ApplyEvent_ParticipantLeft_Pending_RemovesWithoutDepartedOrEvicted
+// covers pending-connections.md's new branch: leaving before the race is
+// active goes through r.leaver, not departParticipant — no
+// departedParticipants entry, no evicted mark, since someone who backed out
+// of a lobby should be free to join again.
+func TestRoomActor_ApplyEvent_ParticipantLeft_Pending_RemovesWithoutDepartedOrEvicted(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	leaver := &spyLeaver{}
+	r.leaver = leaver
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+
+	if _, ok := r.participants["user-1"]; ok {
+		t.Error("participant still present after pending ParticipantLeft, want removed")
+	}
+	if _, ok := r.departedParticipants["user-1"]; ok {
+		t.Error("user-1 tracked in departedParticipants after a pending leave, want not tracked (no race result to preserve)")
+	}
+	if _, ok := r.evicted["user-1"]; ok {
+		t.Error("user-1 marked evicted after a pending leave, want not evicted (must be free to rejoin)")
+	}
+	if len(leaver.calls) != 1 {
+		t.Fatalf("leaver.calls = %d, want 1", len(leaver.calls))
+	}
+	if leaver.calls[0].raceID != r.id || leaver.calls[0].userID != "user-1" {
+		t.Errorf("leaver call = %+v, want raceID=%q userID=%q", leaver.calls[0], r.id, "user-1")
+	}
+}
+
+// TestRoomActor_ApplyEvent_ParticipantLeft_Pending_LeaverFailureIsLoggedNotFatal
+// confirms a failed Postgres delete doesn't panic or block the single-writer
+// loop — matching finishRace's already-accepted no-retry precedent
+// (pending-connections.md). The participant is still removed from the live
+// room regardless of the failure, since the connection is already gone by
+// the time this runs.
+func TestRoomActor_ApplyEvent_ParticipantLeft_Pending_LeaverFailureIsLoggedNotFatal(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	leaver := &spyLeaver{err: errors.New("db unavailable")}
+	r.leaver = leaver
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+
+	r.applyEvent(ParticipantLeft{UserID: "user-1"}) // must not panic
+
+	if _, ok := r.participants["user-1"]; ok {
+		t.Error("participant still present after pending ParticipantLeft, want removed even though LeaveRace failed")
+	}
+	if len(leaver.calls) != 1 {
+		t.Fatalf("leaver.calls = %d, want 1", len(leaver.calls))
 	}
 }
 

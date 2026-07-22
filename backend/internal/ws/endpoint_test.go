@@ -19,7 +19,7 @@ func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -68,7 +68,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -106,7 +106,7 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -153,8 +153,9 @@ func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{})
+	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
 	go actor.Run()
+	actor.MarkActive() // a pending race can't legitimately finish (pending-connections.md)
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
@@ -226,7 +227,7 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{})
 	go actor.Run()
 
 	conn := newFakeConn()

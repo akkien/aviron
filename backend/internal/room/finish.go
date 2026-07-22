@@ -35,6 +35,15 @@ type ParticipantResult struct {
 	DisconnectedCount int
 }
 
+// RaceLeaver persists a participant intentionally leaving a still-pending
+// race (pending-connections.md). Mirrors RaceFinisher exactly, for the same
+// import-cycle reason: internal/race already imports internal/room, so the
+// concrete implementation (RaceService.LeaveRace) satisfies this interface
+// structurally rather than internal/room importing internal/race.
+type RaceLeaver interface {
+	LeaveRace(ctx context.Context, raceID, userID string) error
+}
+
 // noShowTimeoutDuration bounds how long a room waits for a first participant
 // to ever connect before treating it as abandoned. Deliberately a separate
 // var from reconnection/grace-period.md's gracePeriodDuration — despite
