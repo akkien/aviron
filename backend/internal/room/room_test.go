@@ -6,12 +6,22 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 // testLogger discards output — these tests assert on room state and
 // side-effect calls, not log lines, but RoomActor.logger must still be
 // non-nil for the error-logging call sites to be safe to hit.
 var testLogger = slog.New(slog.DiscardHandler)
+
+// noopTickObserver discards tick-latency observations — these tests assert
+// on room state and side-effect calls, not metrics, but RoomActor.tickObserver
+// must still be non-nil for Run()'s ticker branch to be safe to hit.
+type noopTickObserver struct{}
+
+func (noopTickObserver) ObserveTick(d time.Duration) {}
+
+var testTickObserver = noopTickObserver{}
 
 // noopFinisher satisfies RaceFinisher without touching Postgres, for tests
 // that don't care about race-completion/finish-race.md's persistence step.
@@ -112,6 +122,7 @@ func newTestActor() *RoomActor {
 		ctx:                  ctx,
 		cancel:               cancel,
 		logger:               testLogger,
+		tickObserver:         testTickObserver,
 	}
 }
 

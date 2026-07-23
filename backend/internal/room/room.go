@@ -38,6 +38,16 @@ type ParticipantState struct {
 	FinishRank *int
 }
 
+// TickObserver receives the wall-clock duration of a single
+// broadcastSnapshot() call, once per tick (prometheus-metrics.md). Defined
+// here, next to RoomActor, so internal/metrics can depend on internal/room
+// without internal/room ever needing to import internal/metrics —
+// *metrics.Metrics satisfies this structurally, the same one-directional
+// shape as RaceFinisher/RaceLeaver/RaceCanceller (finish.go).
+type TickObserver interface {
+	ObserveTick(d time.Duration)
+}
+
 type RoomActor struct {
 	id           string
 	participants map[string]*ParticipantState
@@ -100,6 +110,9 @@ type RoomActor struct {
 	// the tagging, once, before construction) so call sites below don't
 	// need to repeat it.
 	logger *slog.Logger
+	// tickObserver receives each tick's broadcastSnapshot() duration
+	// (prometheus-metrics.md) — see TickObserver.
+	tickObserver TickObserver
 }
 
 // NewRoomActor constructs a room actor for race id, seeded with the race
@@ -108,7 +121,7 @@ type RoomActor struct {
 // the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, logger *slog.Logger) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, logger *slog.Logger, tickObserver TickObserver) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
@@ -125,6 +138,7 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 		canceller:            canceller,
 		startedAt:            time.Now(),
 		logger:               logger,
+		tickObserver:         tickObserver,
 	}
 	time.AfterFunc(noShowTimeoutDuration, func() {
 		r.Send(noShowTimeout{})
@@ -149,6 +163,18 @@ func (r *RoomActor) Broadcast() <-chan []byte {
 // cut loose the moment its room goes away.
 func (r *RoomActor) Context() context.Context {
 	return r.ctx
+}
+
+// InboxLen and BroadcastLen report how many messages are currently queued
+// in this room's inbox/broadcast channels (prometheus-metrics.md). len(ch)
+// is documented-safe to call from any goroutine, so these need no
+// synchronization beyond what the channels themselves already provide.
+func (r *RoomActor) InboxLen() int {
+	return len(r.inbox)
+}
+
+func (r *RoomActor) BroadcastLen() int {
+	return len(r.broadcast)
 }
 
 // Send enqueues ev onto the actor's inbox for its single-writer Run loop to
@@ -227,7 +253,9 @@ func (r *RoomActor) Run() {
 		case ev := <-r.inbox:
 			r.applyEvent(ev)
 		case <-ticker.C:
+			start := time.Now()
 			r.broadcastSnapshot()
+			r.tickObserver.ObserveTick(time.Since(start))
 		case <-r.ctx.Done():
 			return
 		}

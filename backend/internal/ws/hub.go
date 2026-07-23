@@ -23,9 +23,10 @@ const connBufferSize = 8
 // mutator of its connection set, driven by channels rather than a mutex —
 // consistent with this project's single-writer concurrency style.
 type hub struct {
-	register   chan chan []byte
-	unregister chan chan []byte
-	closed     chan struct{}
+	register    chan chan []byte
+	unregister  chan chan []byte
+	bufferQuery chan chan<- int
+	closed      chan struct{}
 }
 
 // newHub starts fanning broadcast out to registered connections until done
@@ -34,9 +35,10 @@ type hub struct {
 // forget this hub instead of leaking a map entry for a room that's gone.
 func newHub(broadcast <-chan []byte, done <-chan struct{}, onClose func()) *hub {
 	h := &hub{
-		register:   make(chan chan []byte),
-		unregister: make(chan chan []byte),
-		closed:     make(chan struct{}),
+		register:    make(chan chan []byte),
+		unregister:  make(chan chan []byte),
+		bufferQuery: make(chan chan<- int),
+		closed:      make(chan struct{}),
 	}
 	go h.run(broadcast, done, onClose)
 	return h
@@ -63,6 +65,12 @@ func (h *hub) run(broadcast <-chan []byte, done <-chan struct{}, onClose func())
 			conns[c] = struct{}{}
 		case c := <-h.unregister:
 			delete(conns, c)
+		case reply := <-h.bufferQuery:
+			total := 0
+			for c := range conns {
+				total += len(c)
+			}
+			reply <- total
 		case <-done:
 			// broadcast is buffered (room.broadcastBufferSize) and the room
 			// actor's finishRace sends its final race_state/race_finished
@@ -113,6 +121,28 @@ func (h *hub) unregisterConn(c chan []byte) {
 	}
 }
 
+// queryBufferUsage sums len(c) over every connection currently registered
+// with this hub (prometheus-metrics.md — channel buffer usage). conns is a
+// local variable inside run()'s closure, not a struct field, so this is the
+// only way to read it from outside that goroutine — mirrors RoomActor's
+// evictionQuery request/reply-channel pattern (internal/room/room.go). A
+// closed hub (room gone) has nothing left to sum, same as
+// registerConn/unregisterConn's closed-hub guard.
+func (h *hub) queryBufferUsage() int {
+	reply := make(chan int, 1)
+	select {
+	case h.bufferQuery <- reply:
+	case <-h.closed:
+		return 0
+	}
+	select {
+	case total := <-reply:
+		return total
+	case <-h.closed:
+		return 0
+	}
+}
+
 // hubRegistry lazily creates one hub per race_id and hands out the same one
 // to every connection that attaches to that race, cleaning up once the
 // room's hub closes. Kept separate from room.Registry (which only ever maps
@@ -142,4 +172,23 @@ func (hr *hubRegistry) getOrCreate(raceID string, actor *room.RoomActor) *hub {
 	})
 	hr.hubs[raceID] = h
 	return h
+}
+
+// totalConnBufferUsage sums queryBufferUsage across every hub currently
+// registered (prometheus-metrics.md). Copies the hub list under the lock,
+// then queries each hub outside it, so a slow or contended hub round trip
+// never holds up hr.mu for every other room.
+func (hr *hubRegistry) totalConnBufferUsage() int {
+	hr.mu.Lock()
+	hubs := make([]*hub, 0, len(hr.hubs))
+	for _, h := range hr.hubs {
+		hubs = append(hubs, h)
+	}
+	hr.mu.Unlock()
+
+	total := 0
+	for _, h := range hubs {
+		total += h.queryBufferUsage()
+	}
+	return total
 }

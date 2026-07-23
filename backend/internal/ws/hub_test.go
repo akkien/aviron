@@ -121,12 +121,76 @@ func TestHub_ClosesAndCallsOnCloseWhenDone(t *testing.T) {
 	}
 }
 
+func TestHub_QueryBufferUsage_SumsAcrossRegisteredConns(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	done := make(chan struct{})
+	defer close(done)
+
+	h := newHub(broadcast, done, func() {})
+
+	connA := make(chan []byte, connBufferSize)
+	connB := make(chan []byte, connBufferSize)
+	h.registerConn(connA)
+	h.registerConn(connB)
+
+	connA <- []byte("1")
+	connA <- []byte("2")
+	connB <- []byte("3")
+
+	if got := h.queryBufferUsage(); got != 3 {
+		t.Errorf("queryBufferUsage() = %d, want 3", got)
+	}
+}
+
+func TestHub_QueryBufferUsage_ZeroAfterClose(t *testing.T) {
+	broadcast := make(chan []byte, 4)
+	done := make(chan struct{})
+
+	h := newHub(broadcast, done, func() {})
+	close(done)
+
+	select {
+	case <-h.closed:
+	case <-time.After(time.Second):
+		t.Fatal("hub never closed after done fired")
+	}
+
+	if got := h.queryBufferUsage(); got != 0 {
+		t.Errorf("queryBufferUsage() after close = %d, want 0", got)
+	}
+}
+
+func TestHubRegistry_TotalConnBufferUsage_SumsAcrossHubs(t *testing.T) {
+	hr := newHubRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+
+	h1 := hr.getOrCreate("race-1", actor1)
+	h2 := hr.getOrCreate("race-2", actor2)
+
+	connA := make(chan []byte, connBufferSize)
+	connB := make(chan []byte, connBufferSize)
+	h1.registerConn(connA)
+	h2.registerConn(connB)
+
+	connA <- []byte("1")
+	connB <- []byte("2")
+	connB <- []byte("3")
+
+	if got := hr.totalConnBufferUsage(); got != 3 {
+		t.Errorf("totalConnBufferUsage() = %d, want 3", got)
+	}
+}
+
 func TestHubRegistry_GetOrCreate_ReturnsSameHubForSameRace(t *testing.T) {
 	hr := newHubRegistry()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 
 	h1 := hr.getOrCreate("race-1", actor)
 	h2 := hr.getOrCreate("race-1", actor)
@@ -140,8 +204,8 @@ func TestHubRegistry_GetOrCreate_DifferentRacesGetDifferentHubs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
-	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 
 	h1 := hr.getOrCreate("race-1", actor1)
 	h2 := hr.getOrCreate("race-2", actor2)
@@ -154,7 +218,7 @@ func TestHubRegistry_CleansUpAfterRoomContextCancelled(t *testing.T) {
 	hr := newHubRegistry()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	hr.getOrCreate("race-1", actor)
 
 	cancel()

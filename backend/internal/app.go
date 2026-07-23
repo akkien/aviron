@@ -10,6 +10,7 @@ import (
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/db"
 	"github.com/akkien/aviron/internal/httpserver"
+	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/room"
 )
@@ -29,10 +30,11 @@ func Run(cfg *config.Config) {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	registry := room.NewRegistry(logger)
+	m := metrics.NewMetrics()
+	registry := room.NewRegistry(logger, m)
 
 	server := httpserver.NewServer()
-	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger)
+	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger, m)
 
 	handler := middleware.RequestID()(middleware.RequestLog(logger)(middleware.Cors(cfg.CORSAllowedOrigin)(server)))
 

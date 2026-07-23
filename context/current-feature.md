@@ -1,24 +1,151 @@
-# Current Feature
+# Current Feature: Prometheus Metrics
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- `GET /metrics` (Prometheus text format, via `promhttp.Handler`), exposing
+  exactly the 5 metrics `context/project-overview.md` §9 names: active room
+  count, connection count, broadcast tick latency, goroutine count, channel
+  buffer usage — plus the standard Go process/runtime collectors.
+- No new locks or goroutines: every metric reads state that's already
+  synchronized (a mutex, a documented-safe builtin, or a new plain atomic).
+- Keep `internal/room`/`internal/ws` free of any `prometheus`/HTTP import —
+  metrics wiring lives entirely in a new `internal/metrics` package,
+  consistent with `room-actor-core.md`'s existing "zero HTTP/WebSocket
+  imports" layering rule.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- `context/project-overview.md` §9 names these 5 metrics explicitly:
+  "active room count, connection count, broadcast tick latency, goroutine
+  count, channel buffer usage" — direct visibility into goroutine/memory
+  leaks. This spec is the dependency `load-testing/k6-load-test.md` needs
+  to turn "the room actor got slow" into "tick latency p99 crossed 200ms
+  right as goroutine count crossed 5,000" rather than only observing
+  external symptoms.
+- `github.com/prometheus/client_golang` is a brand-new dependency —
+  confirmed via `grep` against `go.mod`, not present today.
+- Depends on `structured-logging.md` only loosely (no hard technical
+  dependency, just sequenced after it).
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **New dependency**: `go get github.com/prometheus/client_golang`, then
+   `go mod tidy`.
+2. **`internal/metrics` package** (new, matches the spec's own sketch) —
+   owns a private `*prometheus.Registry` (not the global
+   `prometheus.DefaultRegisterer`, to stay consistent with this project's
+   explicit constructor-threaded/no-hidden-globals convention rather than
+   mutable package-level state), registering:
+   - `collectors.NewGoCollector()` / `collectors.NewProcessCollector(...)`
+     for the standard runtime collectors (`go_goroutines`,
+     `go_memstats_*`, `process_cpu_seconds_total`, etc).
+   - `aviron_rooms_active` (`GaugeFunc` → `room.Registry.Count()`).
+   - `aviron_connections_active` (`GaugeFunc` → a new
+     `ws.WSHandler.ConnectionCount()`).
+   - `aviron_tick_latency_seconds` (`Histogram`, `Observe()`d from inside
+     `RoomActor.Run()`).
+   - `aviron_channel_buffer_used{channel="inbox"|"broadcast"|"conn"}` —
+     three `GaugeFunc`s with a `ConstLabels: prometheus.Labels{"channel":
+     ...}` each (not a hand-rolled `Collector`), reading
+     `room.Registry.InboxBufferUsage()` / `.BroadcastBufferUsage()` and a
+     new `ws.WSHandler.ConnBufferUsage()`.
+   - `NewMetrics(registry *room.Registry, wsHandler *ws.WSHandler) *Metrics`
+     — the only place that imports both `internal/room` and `internal/ws`
+     for wiring; `Metrics` itself is what gets passed *into* `internal/room`
+     as a `TickObserver` (see decision 3 below), keeping that particular
+     dependency one-directional the same way `RaceFinisher`/`RaceLeaver`/
+     `RaceCanceller` already do.
+3. **`GET /metrics`** registered directly on the mux in
+   `internal/httpserver/route.go`, alongside `GET /healthz` — **not**
+   wrapped in `requireAuth` (a scraper carries no JWT) and **not** wrapped
+   in `middleware.Cors` (never called from a browser), via
+   `promhttp.HandlerFor(reg, promhttp.HandlerOpts{})` bound to the custom
+   registry from step 2, not `promhttp.Handler()`'s implicit global one.
+4. **Decision (resolved, not left open) — tick latency**: new
+   `TickObserver` interface defined in `internal/room` (next to its
+   consumer, same structural-interface convention as `RaceFinisher`), one
+   method `ObserveTick(d time.Duration)`. `RoomActor` gains a
+   `tickObserver TickObserver` field, threaded through
+   `NewRoomActor`/`Registry.Spawn` the same way `logger` was just added —
+   continuing the already-accepted constructor-signature-growth cost.
+   `Run()`'s `case <-ticker.C:` branch times `broadcastSnapshot()`'s own
+   execution (not the inter-tick interval) and calls
+   `r.tickObserver.ObserveTick(elapsed)`. `*metrics.Metrics` satisfies this
+   structurally; tests use a no-op stub, same shape as `noopFinisher`.
+5. **Decision (resolved, not left open) — connection count**: **not** a
+   package-level `atomic.Int64` as the spec's option (a) literally
+   suggests — this project explicitly moved away from package-level
+   globals during `structured-logging.md` ("Thread a single process-wide
+   `*slog.Logger` explicitly through constructors... no-hidden-globals
+   convention"), and a bare package var would contradict that just one
+   feature later. Instead: an `atomic.Int64` **field on `WSHandler`**
+   (there is exactly one `WSHandler` in the process, so it's the natural
+   owner), incremented/decremented directly in `serveConn`
+   (`internal/ws/endpoint.go`) around `wg.Wait()` — not inside `hub.run`'s
+   `register`/`unregister` map mutations as the spec's phrasing implies.
+   That distinction matters for correctness, not just style: once a room
+   finishes, `hub.closed` closes and every connection's deferred
+   `hub.unregisterConn` call becomes a no-op (its `select` short-circuits
+   on `<-h.closed`), so the map mutation — and any counter tied to it —
+   would never actually fire for that connection, permanently leaking its
+   count. Counting in `serveConn` instead (one increment when the
+   connection starts being served, one deferred decrement when `wg.Wait()`
+   returns) is unconditional and can't leak, and sidesteps `hub`'s
+   internals entirely. No per-room labels (confirmed against the spec's
+   own Notes: a label set growing with every race ever created is exactly
+   the cardinality mistake to avoid).
+6. **Decision (resolved, not left open) — channel buffer usage seam**:
+   - `internal/room`: `RoomActor` already has `inbox`/`broadcast` as plain
+     fields; `len(ch)` is documented-safe from any goroutine, so
+     `Registry.InboxBufferUsage()` / `Registry.BroadcastBufferUsage()` can
+     just `RLock`, iterate `reg.rooms`, and sum `len(r.inbox)`/
+     `len(r.broadcast)` — no new synchronization.
+   - `internal/ws`: harder, because each hub's `conns map[chan []byte]struct{}`
+     is a **local variable inside `hub.run()`'s closure**, not a struct
+     field — there's no existing way to read it from outside that
+     goroutine at all. Add a `bufferUsageQuery` event through `hub.run`'s
+     own `select`, mirroring `RoomActor`'s existing `evictionQuery`
+     request/reply-channel pattern exactly: `hub.queryBufferUsage(ctx)
+     int` sums `len(c)` over every registered `c` and replies. `hubRegistry`
+     gets `TotalConnBufferUsage() int`, iterating its own hubs (under its
+     existing mutex) and summing each hub's query result; `WSHandler.ConnBufferUsage()`
+     delegates to it.
+   - Sum (not max) across connections/rooms for every one of these —
+     consistent, simple, and still operationally meaningful as "how much
+     is queued up right now across the whole process."
+7. **Decision (resolved, not left open) — metric #4, goroutine count**: no
+   custom `aviron_goroutines` gauge. `client_golang`'s auto-registered
+   `go_goroutines` (from `collectors.NewGoCollector()`, already being
+   registered in step 2 for the other runtime collectors) already satisfies
+   §9's "goroutine count" requirement — a duplicate custom gauge measuring
+   the exact same `runtime.NumGoroutine()` value would be pure redundancy,
+   not a second data point.
+8. **Naming**: `aviron_` prefix throughout, per Prometheus's own
+   `<namespace>_<subsystem>_<name>_<unit>` convention — see the exact names
+   listed in steps 2-6 above.
+9. **Swagger**: `GET /metrics` is a scrape endpoint, not part of the
+   client-facing REST API `backend/docs/` documents — no `@Router`
+   annotation, `make docs` not expected to change.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- New dependency: `github.com/prometheus/client_golang` — first
+  third-party dependency added specifically for Phase 3.
+- `load-testing/k6-load-test.md` is this spec's actual consumer.
+- Explicitly avoid `race_id`-labeled metrics anywhere (confirmed already
+  in the Plan's decisions above) — a label set that grows with every race
+  ever created is a real Prometheus cardinality mistake, not a
+  hypothetical one.
+- Every metric read here is either already-synchronized (`Registry`'s
+  mutex), a documented-safe builtin (`len(ch)`, `runtime.NumGoroutine()`
+  via the auto-collector), a plain atomic (`WSHandler.connectionCount`),
+  or a `prometheus.Histogram.Observe()` call from a single room's own
+  goroutine (safe for concurrent use across many rooms sharing one
+  histogram by design) — no new locks anywhere.
 
 ## History
 

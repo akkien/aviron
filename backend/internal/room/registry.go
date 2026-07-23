@@ -18,17 +18,21 @@ const broadcastBufferSize = 16
 // for this single-instance phase; the Redis-backed cross-instance registry
 // is Phase 4's concern, not this one's.
 type Registry struct {
-	mu     sync.RWMutex
-	rooms  map[string]*RoomActor
-	logger *slog.Logger
+	mu           sync.RWMutex
+	rooms        map[string]*RoomActor
+	logger       *slog.Logger
+	tickObserver TickObserver
 }
 
 // NewRegistry constructs an empty Registry. logger is the process-wide
 // logger; Spawn tags a race_id-scoped child logger off it for each room
 // actor it constructs, rather than threading race_id through every log call
-// site inside internal/room.
-func NewRegistry(logger *slog.Logger) *Registry {
-	return &Registry{rooms: make(map[string]*RoomActor), logger: logger}
+// site inside internal/room. tickObserver, unlike logger, is passed to
+// every room actor unchanged (not per-race-tagged): it's a single
+// process-wide metrics sink (prometheus-metrics.md), not something that
+// needs a race_id attribute the way a log line does.
+func NewRegistry(logger *slog.Logger, tickObserver TickObserver) *Registry {
+	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver}
 }
 
 // Spawn constructs a RoomActor for raceID seeded with the race's
@@ -47,7 +51,7 @@ func NewRegistry(logger *slog.Logger) *Registry {
 func (reg *Registry) Spawn(ctx context.Context, raceID string, distanceMeters int, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller) *RoomActor {
 	broadcast := make(chan []byte, broadcastBufferSize)
 	roomLogger := reg.logger.With(slog.String("race_id", raceID))
-	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, roomLogger)
+	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, roomLogger, reg.tickObserver)
 
 	reg.mu.Lock()
 	reg.rooms[raceID] = actor
@@ -81,6 +85,41 @@ func (reg *Registry) Get(raceID string) (*RoomActor, bool) {
 	defer reg.mu.RUnlock()
 	actor, ok := reg.rooms[raceID]
 	return actor, ok
+}
+
+// Count returns the number of rooms currently running (prometheus-metrics.md
+// — active room count). Safe to call from the metrics scrape goroutine: it
+// only takes the same RLock every other read-only Registry method already
+// does.
+func (reg *Registry) Count() int {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	return len(reg.rooms)
+}
+
+// InboxBufferUsage and BroadcastBufferUsage sum how many messages are
+// currently queued in every live room's inbox/broadcast channel
+// (prometheus-metrics.md — channel buffer usage). A snapshot at scrape
+// time, not a running total: RLock only guards reg.rooms itself, not each
+// RoomActor's channels, which len() already reads safely without it.
+func (reg *Registry) InboxBufferUsage() int {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	total := 0
+	for _, actor := range reg.rooms {
+		total += actor.InboxLen()
+	}
+	return total
+}
+
+func (reg *Registry) BroadcastBufferUsage() int {
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	total := 0
+	for _, actor := range reg.rooms {
+		total += actor.BroadcastLen()
+	}
+	return total
 }
 
 // Remove stops raceID's RoomActor and deregisters it. A raceID with no

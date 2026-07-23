@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -36,6 +37,16 @@ type WSHandler struct {
 	hubs          *hubRegistry
 	allowedOrigin string
 	logger        *slog.Logger
+	// connectionCount tracks how many connections serveConn currently has
+	// in flight, process-wide (prometheus-metrics.md — connection count).
+	// Incremented/decremented directly in serveConn, not inside hub.run's
+	// register/unregister map mutations: once a room finishes, hub.closed
+	// closes and every connection's deferred hub.unregisterConn call
+	// becomes a no-op (its select short-circuits on <-h.closed), so a
+	// counter tied to that map mutation would never decrement for that
+	// connection and leak. Counting unconditionally in serveConn instead
+	// can't leak, and doesn't need any of hub's internals.
+	connectionCount atomic.Int64
 }
 
 // NewWSHandler constructs a WSHandler. allowedOrigin is reused from the same
@@ -50,6 +61,20 @@ func NewWSHandler(registry *room.Registry, jwtSecret []byte, allowedOrigin strin
 		allowedOrigin: allowedOrigin,
 		logger:        logger,
 	}
+}
+
+// ConnectionCount reports how many WebSocket connections are currently
+// being served, process-wide (prometheus-metrics.md).
+func (h *WSHandler) ConnectionCount() int64 {
+	return h.connectionCount.Load()
+}
+
+// ConnBufferUsage sums how many messages are currently queued across every
+// connection's own outbound channel, across every room (prometheus-metrics.md
+// — channel buffer usage). Delegates to hubs since each hub's connection set
+// is only reachable from inside its own run() goroutine — see hub.go.
+func (h *WSHandler) ConnBufferUsage() int {
+	return h.hubs.totalConnBufferUsage()
 }
 
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +127,9 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the reader and writer goroutines have actually exited, not just been told
 // to.
 func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID, displayName string, logger *slog.Logger) {
+	h.connectionCount.Add(1)
+	defer h.connectionCount.Add(-1)
+
 	hub := h.hubs.getOrCreate(raceID, actor)
 
 	// Deliberately NOT context.WithCancel(actor.Context()): that would fire

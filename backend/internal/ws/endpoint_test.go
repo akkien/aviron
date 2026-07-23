@@ -12,14 +12,14 @@ import (
 )
 
 func newTestWSHandler() *WSHandler {
-	return NewWSHandler(room.NewRegistry(testLogger), []byte("test-secret"), "http://localhost:5173", testLogger)
+	return NewWSHandler(room.NewRegistry(testLogger, testTickObserver), []byte("test-secret"), "http://localhost:5173", testLogger)
 }
 
 func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -68,7 +68,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -106,7 +106,7 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -153,7 +153,7 @@ func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 	actor.MarkActive("") // a pending race can't legitimately finish (pending-connections.md)
 
@@ -239,7 +239,7 @@ func TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 	// Never MarkActive()'d: the race stays pending until the (shortened)
 	// PendingTimeoutDuration elapses.
@@ -279,7 +279,7 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -336,7 +336,7 @@ func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
 	go actor.Run()
 
 	h := newTestWSHandler()
@@ -389,5 +389,89 @@ func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *tes
 	case <-doneB:
 	case <-time.After(time.Second):
 		t.Fatal("serveConn for conn B did not return")
+	}
+}
+
+func TestWSHandler_ConnectionCount_TracksInFlightConnections(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	go actor.Run()
+
+	h := newTestWSHandler()
+	if got := h.ConnectionCount(); got != 0 {
+		t.Fatalf("ConnectionCount() = %d, want 0 before any connection", got)
+	}
+
+	conn := newFakeConn()
+	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+
+	done := make(chan struct{})
+	go func() {
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+		close(done)
+	}()
+
+	// Wait for the join_race snapshot, proving serveConn is actually
+	// mid-flight (registered with the hub, reader goroutine blocked on the
+	// next Read) before asserting the count.
+	select {
+	case <-conn.writes:
+	case <-time.After(time.Second):
+		t.Fatal("connection never received its initial race_state snapshot")
+	}
+
+	if got := h.ConnectionCount(); got != 1 {
+		t.Errorf("ConnectionCount() = %d, want 1 while a connection is in flight", got)
+	}
+
+	conn.queueRead(nil, io.EOF) // abrupt disconnect
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn did not return after an abrupt disconnect")
+	}
+
+	if got := h.ConnectionCount(); got != 0 {
+		t.Errorf("ConnectionCount() = %d, want 0 after serveConn returned", got)
+	}
+}
+
+// TestWSHandler_ConnBufferUsage_DelegatesToHubs proves the wiring, not the
+// summation logic — hub_test.go's TestHub_QueryBufferUsage_* and
+// TestHubRegistry_TotalConnBufferUsage_SumsAcrossHubs already cover the
+// actual arithmetic deterministically (by writing directly into raw conn
+// channels, not racing a live writeLoop that actively drains them, which a
+// serveConn-level test can't avoid). This only confirms ConnBufferUsage()
+// reflects a connection genuinely attached through the real handler path.
+func TestWSHandler_ConnBufferUsage_DelegatesToHubs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	go actor.Run()
+
+	h := newTestWSHandler()
+	if got := h.ConnBufferUsage(); got != 0 {
+		t.Fatalf("ConnBufferUsage() = %d, want 0 before any connection", got)
+	}
+
+	conn := newFakeConn()
+	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+	go h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+
+	select {
+	case <-conn.writes:
+	case <-time.After(time.Second):
+		t.Fatal("connection never received its initial race_state snapshot")
+	}
+
+	// Not asserting a specific nonzero value — writeLoop actively drains
+	// connCh, so its buffer usage is inherently racy from the test's
+	// perspective. Only that the call succeeds against a real hub/conn
+	// wired through serveConn, without panicking or blocking.
+	if got := h.ConnBufferUsage(); got < 0 {
+		t.Errorf("ConnBufferUsage() = %d, want >= 0", got)
 	}
 }

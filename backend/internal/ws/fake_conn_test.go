@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -13,6 +14,14 @@ import (
 // testLogger discards output — this package's tests assert on connection
 // plumbing and delivered messages, not log lines.
 var testLogger = slog.New(slog.DiscardHandler)
+
+// testTickObserver discards tick-latency observations — this package's
+// tests assert on connection plumbing and delivered messages, not metrics.
+type testTickObserverType struct{}
+
+func (testTickObserverType) ObserveTick(d time.Duration) {}
+
+var testTickObserver = testTickObserverType{}
 
 // fakeFinisher satisfies room.RaceFinisher without touching Postgres — this
 // package's tests exercise connection plumbing, not

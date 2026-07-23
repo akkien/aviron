@@ -16,6 +16,15 @@ import (
 // fake-repository state, not log lines.
 var testLogger = slog.New(slog.DiscardHandler)
 
+// testTickObserver discards tick-latency observations — this package's
+// tests never construct a real RoomActor, but room.NewRegistry still
+// requires a non-nil room.TickObserver.
+type testTickObserverType struct{}
+
+func (testTickObserverType) ObserveTick(d time.Duration) {}
+
+var testTickObserver = testTickObserverType{}
+
 // finishRaceCall records one FinishRace invocation, so tests can assert what
 // the service actually delegated to the repository.
 type finishRaceCall struct {

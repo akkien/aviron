@@ -11,7 +11,7 @@ import (
 func TestRegistry_CleansUpWhenActorSelfCancels(t *testing.T) {
 	withShortNoShowTimeout(t, 50*time.Millisecond)
 
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -32,7 +32,7 @@ func TestRegistry_CleansUpWhenActorSelfCancels(t *testing.T) {
 }
 
 func TestRegistry_SpawnThenGet(t *testing.T) {
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -48,7 +48,7 @@ func TestRegistry_SpawnThenGet(t *testing.T) {
 }
 
 func TestRegistry_Get_UnknownRace(t *testing.T) {
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 
 	_, ok := reg.Get("nonexistent-race")
 	if ok {
@@ -57,7 +57,7 @@ func TestRegistry_Get_UnknownRace(t *testing.T) {
 }
 
 func TestRegistry_Remove_StopsActorAndDeregisters(t *testing.T) {
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -80,14 +80,14 @@ func TestRegistry_Remove_StopsActorAndDeregisters(t *testing.T) {
 }
 
 func TestRegistry_Remove_UnknownRace_NoOp(t *testing.T) {
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 
 	// Must not panic when removing a race_id that was never spawned.
 	reg.Remove("nonexistent-race")
 }
 
 func TestRegistry_ConcurrentGetDuringSpawn(t *testing.T) {
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -118,7 +118,7 @@ func TestRegistry_ConcurrentGetDuringSpawn(t *testing.T) {
 }
 
 func TestRegistry_RemoveRacingGet(t *testing.T) {
-	reg := NewRegistry(testLogger)
+	reg := NewRegistry(testLogger, testTickObserver)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -148,5 +148,58 @@ func TestRegistry_RemoveRacingGet(t *testing.T) {
 		if _, ok := reg.Get(raceID); ok {
 			t.Errorf("Get(%s) ok = true after Remove, want false", raceID)
 		}
+	}
+}
+
+func TestRegistry_Count(t *testing.T) {
+	reg := NewRegistry(testLogger, testTickObserver)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if got := reg.Count(); got != 0 {
+		t.Fatalf("Count() = %d, want 0 before any Spawn", got)
+	}
+
+	reg.Spawn(ctx, "race-1", 5, noopFinisher{}, noopLeaver{}, noopCanceller{})
+	reg.Spawn(ctx, "race-2", 5, noopFinisher{}, noopLeaver{}, noopCanceller{})
+
+	if got := reg.Count(); got != 2 {
+		t.Fatalf("Count() = %d, want 2 after two Spawns", got)
+	}
+
+	reg.Remove("race-1")
+	if got := reg.Count(); got != 1 {
+		t.Fatalf("Count() = %d, want 1 after Remove", got)
+	}
+}
+
+// TestRegistry_ChannelBufferUsage_SumsAcrossRooms constructs rooms directly
+// (bypassing Spawn/Run, the same "no running goroutine" approach
+// newTestActor uses) so inbox/broadcast channel contents are exact and
+// deterministic, rather than racing a real Run() loop that would drain them.
+func TestRegistry_ChannelBufferUsage_SumsAcrossRooms(t *testing.T) {
+	a1 := newTestActor()
+	a1.inbox = make(chan RoomEvent, 4)
+	a1.inbox <- ParticipantJoined{UserID: "u1"}
+	a1.broadcast = make(chan []byte, 4)
+	a1.broadcast <- []byte("x")
+	a1.broadcast <- []byte("y")
+
+	a2 := newTestActor()
+	a2.inbox = make(chan RoomEvent, 4)
+	a2.broadcast = make(chan []byte, 4)
+	a2.broadcast <- []byte("z")
+
+	reg := &Registry{
+		rooms:        map[string]*RoomActor{"race-1": a1, "race-2": a2},
+		logger:       testLogger,
+		tickObserver: testTickObserver,
+	}
+
+	if got := reg.InboxBufferUsage(); got != 1 {
+		t.Errorf("InboxBufferUsage() = %d, want 1", got)
+	}
+	if got := reg.BroadcastBufferUsage(); got != 3 {
+		t.Errorf("BroadcastBufferUsage() = %d, want 3", got)
 	}
 }

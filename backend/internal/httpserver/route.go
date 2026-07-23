@@ -8,6 +8,7 @@ import (
 	"github.com/akkien/aviron/internal/auth"
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/leaderboard"
+	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/postgres"
 	"github.com/akkien/aviron/internal/race"
@@ -17,9 +18,14 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
-func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry, logger *slog.Logger) {
+func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry, logger *slog.Logger, m *metrics.Metrics) {
 	healthzHandler := NewHealthzHandler(pool)
 	server.HandleFunc("GET /healthz", healthzHandler)
+
+	m.RegisterRoomGauges(registry)
+	// Not wrapped in requireAuth or middleware.Cors: a Prometheus scraper
+	// carries no JWT and is never called from a browser.
+	server.Handle("GET /metrics", m.Handler())
 
 	authRepo := postgres.NewAuthRepository(pool)
 	authSvc := auth.NewAuthService(authRepo, []byte(cfg.JWTSecret))
@@ -51,6 +57,7 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	// query-string session_token (websocket/ws-endpoint.md), not the
 	// Authorization header middleware.Auth expects.
 	wsHandler := ws.NewWSHandler(registry, []byte(cfg.JWTSecret), cfg.CORSAllowedOrigin, logger)
+	m.RegisterWSGauges(wsHandler)
 	server.Handle("GET /ws", wsHandler)
 
 	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
