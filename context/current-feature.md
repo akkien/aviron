@@ -1,151 +1,24 @@
-# Current Feature: Prometheus Metrics
+# Current Feature
 
 ## Status
 
-In Progress
+Not Started
 
 ## Goals
 
-- `GET /metrics` (Prometheus text format, via `promhttp.Handler`), exposing
-  exactly the 5 metrics `context/project-overview.md` §9 names: active room
-  count, connection count, broadcast tick latency, goroutine count, channel
-  buffer usage — plus the standard Go process/runtime collectors.
-- No new locks or goroutines: every metric reads state that's already
-  synchronized (a mutex, a documented-safe builtin, or a new plain atomic).
-- Keep `internal/room`/`internal/ws` free of any `prometheus`/HTTP import —
-  metrics wiring lives entirely in a new `internal/metrics` package,
-  consistent with `room-actor-core.md`'s existing "zero HTTP/WebSocket
-  imports" layering rule.
+<!-- populated by /feature load -->
 
 ## Explain
 
-- `context/project-overview.md` §9 names these 5 metrics explicitly:
-  "active room count, connection count, broadcast tick latency, goroutine
-  count, channel buffer usage" — direct visibility into goroutine/memory
-  leaks. This spec is the dependency `load-testing/k6-load-test.md` needs
-  to turn "the room actor got slow" into "tick latency p99 crossed 200ms
-  right as goroutine count crossed 5,000" rather than only observing
-  external symptoms.
-- `github.com/prometheus/client_golang` is a brand-new dependency —
-  confirmed via `grep` against `go.mod`, not present today.
-- Depends on `structured-logging.md` only loosely (no hard technical
-  dependency, just sequenced after it).
+<!-- populated by /feature load -->
 
 ## Plan
 
-1. **New dependency**: `go get github.com/prometheus/client_golang`, then
-   `go mod tidy`.
-2. **`internal/metrics` package** (new, matches the spec's own sketch) —
-   owns a private `*prometheus.Registry` (not the global
-   `prometheus.DefaultRegisterer`, to stay consistent with this project's
-   explicit constructor-threaded/no-hidden-globals convention rather than
-   mutable package-level state), registering:
-   - `collectors.NewGoCollector()` / `collectors.NewProcessCollector(...)`
-     for the standard runtime collectors (`go_goroutines`,
-     `go_memstats_*`, `process_cpu_seconds_total`, etc).
-   - `aviron_rooms_active` (`GaugeFunc` → `room.Registry.Count()`).
-   - `aviron_connections_active` (`GaugeFunc` → a new
-     `ws.WSHandler.ConnectionCount()`).
-   - `aviron_tick_latency_seconds` (`Histogram`, `Observe()`d from inside
-     `RoomActor.Run()`).
-   - `aviron_channel_buffer_used{channel="inbox"|"broadcast"|"conn"}` —
-     three `GaugeFunc`s with a `ConstLabels: prometheus.Labels{"channel":
-     ...}` each (not a hand-rolled `Collector`), reading
-     `room.Registry.InboxBufferUsage()` / `.BroadcastBufferUsage()` and a
-     new `ws.WSHandler.ConnBufferUsage()`.
-   - `NewMetrics(registry *room.Registry, wsHandler *ws.WSHandler) *Metrics`
-     — the only place that imports both `internal/room` and `internal/ws`
-     for wiring; `Metrics` itself is what gets passed *into* `internal/room`
-     as a `TickObserver` (see decision 3 below), keeping that particular
-     dependency one-directional the same way `RaceFinisher`/`RaceLeaver`/
-     `RaceCanceller` already do.
-3. **`GET /metrics`** registered directly on the mux in
-   `internal/httpserver/route.go`, alongside `GET /healthz` — **not**
-   wrapped in `requireAuth` (a scraper carries no JWT) and **not** wrapped
-   in `middleware.Cors` (never called from a browser), via
-   `promhttp.HandlerFor(reg, promhttp.HandlerOpts{})` bound to the custom
-   registry from step 2, not `promhttp.Handler()`'s implicit global one.
-4. **Decision (resolved, not left open) — tick latency**: new
-   `TickObserver` interface defined in `internal/room` (next to its
-   consumer, same structural-interface convention as `RaceFinisher`), one
-   method `ObserveTick(d time.Duration)`. `RoomActor` gains a
-   `tickObserver TickObserver` field, threaded through
-   `NewRoomActor`/`Registry.Spawn` the same way `logger` was just added —
-   continuing the already-accepted constructor-signature-growth cost.
-   `Run()`'s `case <-ticker.C:` branch times `broadcastSnapshot()`'s own
-   execution (not the inter-tick interval) and calls
-   `r.tickObserver.ObserveTick(elapsed)`. `*metrics.Metrics` satisfies this
-   structurally; tests use a no-op stub, same shape as `noopFinisher`.
-5. **Decision (resolved, not left open) — connection count**: **not** a
-   package-level `atomic.Int64` as the spec's option (a) literally
-   suggests — this project explicitly moved away from package-level
-   globals during `structured-logging.md` ("Thread a single process-wide
-   `*slog.Logger` explicitly through constructors... no-hidden-globals
-   convention"), and a bare package var would contradict that just one
-   feature later. Instead: an `atomic.Int64` **field on `WSHandler`**
-   (there is exactly one `WSHandler` in the process, so it's the natural
-   owner), incremented/decremented directly in `serveConn`
-   (`internal/ws/endpoint.go`) around `wg.Wait()` — not inside `hub.run`'s
-   `register`/`unregister` map mutations as the spec's phrasing implies.
-   That distinction matters for correctness, not just style: once a room
-   finishes, `hub.closed` closes and every connection's deferred
-   `hub.unregisterConn` call becomes a no-op (its `select` short-circuits
-   on `<-h.closed`), so the map mutation — and any counter tied to it —
-   would never actually fire for that connection, permanently leaking its
-   count. Counting in `serveConn` instead (one increment when the
-   connection starts being served, one deferred decrement when `wg.Wait()`
-   returns) is unconditional and can't leak, and sidesteps `hub`'s
-   internals entirely. No per-room labels (confirmed against the spec's
-   own Notes: a label set growing with every race ever created is exactly
-   the cardinality mistake to avoid).
-6. **Decision (resolved, not left open) — channel buffer usage seam**:
-   - `internal/room`: `RoomActor` already has `inbox`/`broadcast` as plain
-     fields; `len(ch)` is documented-safe from any goroutine, so
-     `Registry.InboxBufferUsage()` / `Registry.BroadcastBufferUsage()` can
-     just `RLock`, iterate `reg.rooms`, and sum `len(r.inbox)`/
-     `len(r.broadcast)` — no new synchronization.
-   - `internal/ws`: harder, because each hub's `conns map[chan []byte]struct{}`
-     is a **local variable inside `hub.run()`'s closure**, not a struct
-     field — there's no existing way to read it from outside that
-     goroutine at all. Add a `bufferUsageQuery` event through `hub.run`'s
-     own `select`, mirroring `RoomActor`'s existing `evictionQuery`
-     request/reply-channel pattern exactly: `hub.queryBufferUsage(ctx)
-     int` sums `len(c)` over every registered `c` and replies. `hubRegistry`
-     gets `TotalConnBufferUsage() int`, iterating its own hubs (under its
-     existing mutex) and summing each hub's query result; `WSHandler.ConnBufferUsage()`
-     delegates to it.
-   - Sum (not max) across connections/rooms for every one of these —
-     consistent, simple, and still operationally meaningful as "how much
-     is queued up right now across the whole process."
-7. **Decision (resolved, not left open) — metric #4, goroutine count**: no
-   custom `aviron_goroutines` gauge. `client_golang`'s auto-registered
-   `go_goroutines` (from `collectors.NewGoCollector()`, already being
-   registered in step 2 for the other runtime collectors) already satisfies
-   §9's "goroutine count" requirement — a duplicate custom gauge measuring
-   the exact same `runtime.NumGoroutine()` value would be pure redundancy,
-   not a second data point.
-8. **Naming**: `aviron_` prefix throughout, per Prometheus's own
-   `<namespace>_<subsystem>_<name>_<unit>` convention — see the exact names
-   listed in steps 2-6 above.
-9. **Swagger**: `GET /metrics` is a scrape endpoint, not part of the
-   client-facing REST API `backend/docs/` documents — no `@Router`
-   annotation, `make docs` not expected to change.
+<!-- populated by /feature load -->
 
 ## Notes
 
-- New dependency: `github.com/prometheus/client_golang` — first
-  third-party dependency added specifically for Phase 3.
-- `load-testing/k6-load-test.md` is this spec's actual consumer.
-- Explicitly avoid `race_id`-labeled metrics anywhere (confirmed already
-  in the Plan's decisions above) — a label set that grows with every race
-  ever created is a real Prometheus cardinality mistake, not a
-  hypothetical one.
-- Every metric read here is either already-synchronized (`Registry`'s
-  mutex), a documented-safe builtin (`len(ch)`, `runtime.NumGoroutine()`
-  via the auto-collector), a plain atomic (`WSHandler.connectionCount`),
-  or a `prometheus.Histogram.Observe()` call from a single room's own
-  goroutine (safe for concurrent use across many rooms sharing one
-  histogram by design) — no new locks anywhere.
+<!-- populated by /feature load -->
 
 ## History
 
@@ -193,3 +66,4 @@ In Progress
   Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green, `internal/room` re-run 3x with no flakiness (including the two new regression tests), `yarn build`/`yarn lint` clean (same pre-existing shadcn warning as every prior frontend feature), Swagger docs regenerated for the new endpoint. Bundled a second, unrelated commit on the same branch per explicit request: added a `pgadmin` service to `docker-compose.yml` (port 5050, pre-registered "Aviron (local)" connection via `docker/pgadmin/servers.json`) so the database can be browsed from a browser — verified live (`docker compose up -d pgadmin`, confirmed healthy, confirmed the pre-registered server loaded from the logs). Same disclosed gap as every frontend-touching feature this project: no live two-browser-tab test for the lobby live-update fix, verified by tracing the exact data flow (backend broadcast → `useRaceSocket` → `RaceScreenSidebar` render) rather than an observed browser session.
 - **Idempotent Join / Session Token Recovery** (2026-07-22) — Not a phase-plan spec; closes out two of the three "leftover items from previous phases" surfaced during an explicit audit requested before starting Phase 3 (the third, the minimum-participant question, was resolved as "no fix needed" and documented directly in `context/features/phase1/races/start-race.md`; the ranked public leaderboard remains open, not picked up here). The audit re-read every phase-plan spec and cross-referenced against current code rather than trusting History alone, surfacing: `POST /races/{id}/join` still 409ing `already_joined` for an already-pending participant (originally deferred in `reconnection/grace-period.md`'s own History entry, never revisited), and — found only by tracing the actual reload path, not from the original note — `JoinRace` rejecting anything non-`pending` unconditionally, meaning there was **no way at all**, not just an unfriendly one, to recover a lost `session_token` for a race already in progress. Traced end-to-end before writing any code: `session_token` only ever travels through React Router navigation state (`RaceDetailPage.tsx`), never persisted, so any reload loses it; `RaceScreen.tsx` then withholds the WebSocket connection entirely (`useRaceSocket`'s `if (!raceId || !sessionToken) return`), silently degrading a real participant into permanent read-only spectator mode with no error shown. Fixed symmetrically: `RaceService.JoinRace` now checks a new `IsParticipant` (`internal/race/repository.go` → `postgres.RaceRepository`, a single `SELECT EXISTS(...)`) *before* checking race status — an already-joined caller (pending, active, finished, or cancelled, doesn't matter) gets a freshly signed token instead of an error; a genuinely new joiner still goes through the unchanged status/count/insert path. Reasoned explicitly, not assumed, that issuing a token for a finished/cancelled race is harmless: `RaceScreen.tsx`'s existing `terminal` check already withholds it client-side, and even without that, the room actor behind a finished/cancelled race has already torn down and been removed from the registry, so a WS handshake would fail at the registry lookup regardless of token validity — no extra status guard needed. `ErrAlreadyJoined`/`AddParticipant`'s unique-violation mapping stays as a defensive fallback, now only reachable via the TOCTOU window between the `IsParticipant` check and the insert (two concurrent first-time joins from the same user) — the same accepted count-then-insert race class this codebase already accepts for `MaxParticipants`. Frontend: `RaceDetailPage.tsx`'s `sessionToken` became `useState` (was a plain `const` derived once from `location.state`), with a best-effort recovery `useEffect` that re-joins once `raceDetail` confirms the current user really is a participant of a non-terminal race — a failure just leaves the existing spectator fallback in place, not a new error state. **One test-writing correction caught before it shipped**: an initial service test asserted a recovered token must differ from the first one issued; failed immediately because `signSessionToken`'s `exp` is truncated to whole seconds and HS256 signing has no nonce, so two calls within the same wall-clock second legitimately produce a byte-identical JWT — not a bug, a wrong test assumption, fixed by asserting a token comes back at all rather than that it differs. Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green (new/updated service and handler tests covering both the pending-idempotency and previously-impossible active-race-recovery cases), `yarn build`/`yarn lint` clean, and — beyond the usual disclosed no-browser-automation gap — a full live end-to-end run against the real local server/Postgres reproducing every scenario directly: repeat join while pending → `200` with a token (was `409`); recovering a token on an active race → `200` (was `409`, previously impossible); a genuinely new user hitting an active race → still correctly `409`. No wire/DTO or Swagger changes — the endpoint's documented contract is unchanged, only its internal behavior. Bundled two small unrelated commits on the same branch history (not this feature's own commit): a `docs:` commit resolving the minimum-participant open question directly in `start-race.md`, done just before this feature started. Of the original three leftover items, only the full ranked/windowed `GET /leaderboard?window=alltime|weekly` remains genuinely open — still unclaimed by any phase, not picked up here, a candidate to fold into Phase 3 or address separately.
 - **Structured Logging** (2026-07-23) — First Phase 3 spec (`context/features/phase3/observability/structured-logging.md`), deliberately sequenced ahead of load testing per the spec's own rationale. Replaced all 7 existing `log.Printf` call sites with `slog`, tagged with `race_id`/`user_id`/`request_id` wherever in scope. New `internal/middleware/requestid.go` (`RequestID()`/`RequestIDFromContext`, `crypto/rand`-backed id, echoed as `X-Request-ID` — resolving the spec's open question in favor of adding the header) and `internal/middleware/requestlog.go` (`RequestLog(logger)`, one line per request: method/path/status/duration/`request_id`/`user_id`). One process-wide `*slog.Logger` (`slog.NewJSONHandler(os.Stdout, nil)`) is constructed in `internal/app.go` and threaded explicitly through `Registry`/`RoomActor` (a `race_id`-tagged child logger created once per room, at `Spawn`), `WSHandler` (a `race_id`+`user_id`-tagged child logger created once per connection, at `ServeHTTP`), and `RaceHandler` — resolving the spec's other open question in favor of the idiomatic pre-tagged-child-logger pattern over passing `race_id` at every call site, accepting the resulting constructor-signature growth on `NewRoomActor`/`NewRegistry`/`NewWSHandler`/`NewRaceHandler` (and the mechanical test-fixture churn across `internal/room`/`internal/ws`/`internal/race`/`internal/httpserver` that came with it — a `testLogger` package-level var added to each package's test helpers). **A real architecture gap surfaced and resolved during implementation, not left as a known limitation**: the spec called for the per-request summary line to include `user_id` "if `middleware.Auth` already ran," but `RequestLog` wraps the whole mux from outside while `Auth` is applied per-route deep inside `httpserver.RegisterRoutes` — Go's `context.WithValue` only propagates to handlers further down the call chain, never back up to an outer middleware's own stack frame after `next.ServeHTTP` returns (since `r.WithContext` returns a copy, it never mutates the `*http.Request` the outer frame is holding). Fixed with a small shared mutable recorder: `RequestLog` puts a `*requestLogAttrs` pointer into the request context before calling `next`; `Auth` (same package) writes `userID` into that same struct via a new unexported `setUserIDForLog`, so `RequestLog` reads the mutation back after `next.ServeHTTP` returns. Covered by a dedicated regression test (`TestRequestLog_IncludesUserIDWhenAuthRanInside`) proving the mechanism actually works, plus tests for `RequestID`'s id generation/uniqueness/header-echo and `RequestLog`'s field presence/absence across chains with and without `RequestID`/`Auth` upstream. `internal/app.go`'s `log.Fatalf`/`log.Fatal` (DB connect, migrate, `ListenAndServe`) deliberately left unconverted, per the spec's explicit scope. Verified: `go build ./...` and `go test ./...` clean across the whole module (no `go vet`/`gofmt`/`make docs` this run — a since-updated `/feature start` convention, no longer part of this workflow's default verification). Left one pre-existing, unrelated uncommitted change to `.claude/skills/feature/actions/start.md` (a prior session's edit removing `go vet`/`gofmt`/`make docs` from the verification step) out of this feature's commit, since it predates this feature and is unrelated to structured logging — still sitting uncommitted in the working tree. Next: whichever remaining Phase 3 spec is chosen next (`prometheus-metrics.md` touches some of the same files but is independent — order doesn't matter functionally) or a Phase 4 strong-plus item.
+- **Prometheus Metrics** (2026-07-23) — Second Phase 3 spec (`context/features/phase3/observability/prometheus-metrics.md`). Added `GET /metrics` (new `internal/metrics` package, `github.com/prometheus/client_golang` — the first third-party dependency added specifically for Phase 3), exposing 4 of the spec's 5 required metrics as custom collectors plus the standard Go runtime/process collectors for the 5th: `aviron_rooms_active`/`aviron_connections_active`/`aviron_channel_buffer_used{channel=...}` as `GaugeFunc`s (computed at scrape time, not polled), `aviron_tick_latency_seconds` as a `Histogram` observed from inside `RoomActor.Run()`, and goroutine count deliberately left to the auto-registered `go_goroutines` rather than a duplicate custom gauge. Resolved every open question the spec flagged for `load`/`start`, two by deliberately deviating from the spec's own literal suggestion rather than following it as written: (1) **tick latency** — a new `TickObserver` interface in `internal/room` (structural, same shape as `RaceFinisher`/`RaceLeaver`/`RaceCanceller`), so `*metrics.Metrics` can be handed to `RoomActor` without `internal/room` ever importing `internal/metrics`; (2) **connection count** — the spec suggested a package-level `atomic.Int64`, rejected because it would have directly contradicted the no-hidden-globals convention `structured-logging.md` had *just* established one feature earlier — used an `atomic.Int64` field on `WSHandler` instead (the one process-wide instance), and deliberately did not increment/decrement it inside `hub.run`'s register/unregister map mutations as the spec's phrasing implied: once a room finishes, `hub.closed` fires and every connection's deferred `hub.unregisterConn` call short-circuits into a no-op, so a counter tied to that mutation would leak on every room finish — fixed by counting unconditionally in `serveConn` itself (one increment when serving starts, one deferred decrement when it returns), which can't leak regardless of how the connection's internals shut down; (3) **channel buffer usage** — `internal/room`'s `inbox`/`broadcast` lengths were straightforward (`len(ch)` is documented goroutine-safe, so `Registry.InboxBufferUsage()`/`BroadcastBufferUsage()` just sum across rooms under the existing `RLock`), but `internal/ws`'s per-connection channels live in a local variable inside `hub.run()`'s own closure with no existing field to read them from outside that goroutine — added a `bufferUsageQuery` case to `hub.run`'s `select`, mirroring `RoomActor`'s existing `evictionQuery` request/reply-channel pattern exactly, plus `hubRegistry.totalConnBufferUsage()` to sum across every room's hub. **A genuine circular-construction problem found and resolved during `start`, not anticipated by the spec's own single-shot `NewMetrics(registry, wsHandler)` sketch**: `room.Registry` needs a `TickObserver` at its own construction time, but the room/connection gauges need `*room.Registry`/`*ws.WSHandler` to already exist — each side needs the other first. Resolved by splitting construction into stages: `metrics.NewMetrics()` (zero dependencies, can already record tick observations) runs first, is handed into `room.NewRegistry(logger, m)` as the `TickObserver`, and once `Registry`/`WSHandler` exist, `m.RegisterRoomGauges(registry)`/`m.RegisterWSGauges(wsHandler)` wire the scrape-time gauges — all composed in `internal/app.go`/`internal/httpserver/route.go`. `GET /metrics` uses a private `prometheus.Registry` (not the global `DefaultRegisterer`) via `promhttp.HandlerFor`, consistent with this project's constructor-threaded/no-hidden-globals convention; registered unauthenticated and uncors'd, alongside `GET /healthz`. Verified: `go build ./...` and `go test ./...` clean, full module re-run under `-race` clean (`internal/auth`/`internal/httpserver`/`internal/leaderboard`/`internal/metrics`/`internal/middleware`/`internal/race`/`internal/room`/`internal/ws` all passing), `internal/room`/`internal/ws` re-run 3x with no flakiness — a deliberately higher verification bar than this project's usual "once, per `/feature start`" convention, justified by the amount of new concurrency-adjacent code (the atomic counter, the new hub query channel). Added test coverage for every new accessor across `internal/room`, `internal/ws`, and the new `internal/metrics` package itself, plus an end-to-end test driving the real `httpserver.RegisterRoutes` composition over a real HTTP round-trip (not just the metrics package in isolation) to prove the full construction-order wiring actually works together. Docker wasn't running in this environment, so a live `cmd/server` + curl verification against real Postgres wasn't possible — the end-to-end `RegisterRoutes` test exercises the identical composition path without needing a reachable database (`GET /metrics` never touches `pool`, and `pgxpool.New` doesn't eagerly connect, the same pattern `TestHealthz_DBUnreachable` already established). Documented afterward in `docs/feature-log.md` with deliberately more depth and concrete, empirically-verified examples than this log's usual style, per explicit user request (new to observability concepts): a real captured JSON log line for the structured-logging feature (confirmed by actually running this project's exact logger setup rather than hand-writing a plausible-looking example — this caught that `slog.Duration` serializes as raw nanoseconds, not a formatted string, which would have been wrong to just assume) and a Gauge/Counter/Histogram/Summary reference table for this feature, whose every example was pulled from this project's own real `/metrics` scrape output (confirmed by actually running the registered Go/process collectors, which is what surfaced that `go_gc_duration_seconds` is genuinely a Summary — a real anchor instead of a hypothetical one). Same disclosed gap as the previous feature: `.claude/skills/feature/actions/start.md`'s pre-existing unrelated uncommitted diff was left out of this feature's commit. Next: whichever remaining Phase 3 spec is chosen next (`load-testing/k6-load-test.md` is the natural following step, now that both structured logging and metrics exist to observe it with) or a Phase 4 strong-plus item.
