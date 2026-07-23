@@ -1,24 +1,88 @@
-# Current Feature
+# Current Feature: pprof
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- Enable `net/http/pprof`'s profiling endpoints under `/debug/pprof/` on
+  this project's real mux, not the process-wide `http.DefaultServeMux`
+  (which a blank `import _ "net/http/pprof"` would silently target
+  instead, doing nothing on this project's own `*http.ServeMux`).
+- Gate exposure behind a new `Config.PprofEnabled bool` (env
+  `PPROF_ENABLED`, default `true`) rather than inventing a full
+  environment enum this codebase has no other use for yet.
+- Unauthenticated (no `requireAuth` wrap), matching `GET /metrics`'s
+  precedent — pprof has no JWT concept and this project has no separate
+  admin auth tier; explicitly accepted as a side-project trade-off, not
+  silently decided.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- `context/project-overview.md` §9: "`pprof` enabled in dev/staging
+  environments to inspect real goroutine leaks." The smallest Phase 3
+  spec — `net/http/pprof` is stdlib, wiring it up is a handful of lines —
+  sequenced third mainly because it's the lowest-risk piece, not because
+  it depends on the other two.
+- `net/http/pprof`'s own `init()` registers its handlers onto
+  `http.DefaultServeMux` the moment the package is imported. This
+  project's `internal/httpserver.NewServer()` builds its own
+  `*http.ServeMux` explicitly rather than using the default one — so a
+  bare blank import would compile clean and silently do nothing.
+  Explicit handler registration onto the real mux is required instead.
+- `internal/config.Config` has no environment concept today — confirmed
+  by direct read of `internal/config/config.go`: just
+  `DatabaseURL`/`Port`/`JWTSecret`/`CORSAllowedOrigin`.
+- This is the tool `load-testing/k6-load-test.md`'s follow-up work will
+  actually use — turns "goroutine count grew during the test" (visible
+  via `prometheus-metrics.md`'s gauge) into "grew because of *this* code
+  path."
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **Config**: add `PprofEnabled bool` to `internal/config.Config`,
+   loaded via a new `getEnvBool(key string, fallback bool) bool` helper
+   (mirrors the existing `getEnv(key, fallback string) string` shape) —
+   `getEnvBool("PPROF_ENABLED", true)`. Also add `PPROF_ENABLED=true` to
+   `backend/.env.example`, alongside the other three documented vars —
+   this file exists and lists every other config var, so a new one
+   belongs there too.
+2. **Registration seam (resolved, not left open)**: `internal/httpserver/route.go`'s
+   `RegisterRoutes`, guarded by `if cfg.PprofEnabled` — it already owns
+   every other route registration (`healthz`, `metrics`, races, `ws`,
+   swagger) and already receives `cfg` as a param, so this is the natural
+   seam rather than `internal/app.go`.
+3. **Exactly 5 handlers, matching the spec's own `Data` sketch** —
+   resolved a minor inconsistency between the spec's prose and its own
+   code sketch found during `load`: the "Registration" bullet's prose
+   says handlers are needed "plus `pprof.Handler("goroutine")`/`"heap"`/etc
+   for the named profiles," but that's redundant with what the `Data`
+   sketch already shows. `pprof.Index` registered at the trailing-slash
+   pattern `"GET /debug/pprof/"` already dispatches `/debug/pprof/goroutine`,
+   `/debug/pprof/heap`, `/debug/pprof/allocs`, etc. itself via Go 1.22
+   `http.ServeMux`'s subtree matching for trailing-slash patterns — the
+   exact same mechanism this project already relies on for
+   `server.HandleFunc("GET /swagger/", ...)`. No separate
+   `pprof.Handler(name)` mux entries needed; just the 5 handlers the
+   `Data` section already lists (`Index`/`Cmdline`/`Profile`/`Symbol`/`Trace`).
+4. **No auth, no CORS wrap** — matches `GET /metrics`'s already-shipped
+   precedent exactly (an operator/tool endpoint, not browser or
+   authenticated API traffic).
+5. **Swagger**: not part of the client REST API, no `@Router` annotation,
+   `make docs` not expected to produce a diff — same precedent as
+   `GET /metrics`.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Independent of `prometheus-metrics.md` and `structured-logging.md` —
+  moot in practice now, since both are already shipped; no ordering
+  concern either way.
+- No new concurrency of its own — `net/http/pprof`'s handlers are part of
+  the standard library and already safe for concurrent use; this spec
+  only wires them up.
+- New env var: `PPROF_ENABLED` (default `true`) — document in
+  `backend/.env.example` as part of this feature, not as an afterthought.
 
 ## History
 

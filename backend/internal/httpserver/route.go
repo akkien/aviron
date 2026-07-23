@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 
 	"github.com/akkien/aviron/internal/auth"
 	"github.com/akkien/aviron/internal/config"
@@ -61,4 +62,26 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	server.Handle("GET /ws", wsHandler)
 
 	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
+
+	if cfg.PprofEnabled {
+		// Not registered via a blank `import _ "net/http/pprof"`: that
+		// package's own init() registers onto http.DefaultServeMux, not
+		// the *http.ServeMux this project builds explicitly — a blank
+		// import alone would compile clean and silently do nothing.
+		// Exactly these 5 handlers are needed: Index's own dispatch
+		// already serves /debug/pprof/goroutine, /heap, /allocs, etc. via
+		// Go 1.22 ServeMux's trailing-slash subtree matching, the same
+		// mechanism GET /swagger/ above already relies on. Unauthenticated
+		// and uncors'd, matching GET /metrics's precedent — an
+		// operator/tool endpoint, not browser or API traffic. No "GET "
+		// method prefix (unlike this file's other routes): pprof.Symbol
+		// handles both GET and POST (go tool pprof POSTs to it to resolve
+		// symbols), so these are registered unrestricted by method, the
+		// same way net/http/pprof's own init() registers them.
+		server.HandleFunc("/debug/pprof/", pprof.Index)
+		server.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		server.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		server.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		server.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 }
