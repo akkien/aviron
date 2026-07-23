@@ -69,6 +69,7 @@ func Auth(jwtSecret []byte) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), userIDContextKey, userID)
+			setUserIDForLog(ctx, userID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

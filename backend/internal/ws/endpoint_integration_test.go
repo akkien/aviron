@@ -20,8 +20,8 @@ import (
 
 func newIntegrationTestServer(t *testing.T, secret []byte) (*httptest.Server, *room.Registry) {
 	t.Helper()
-	registry := room.NewRegistry()
-	handler := NewWSHandler(registry, secret, "http://localhost:5173")
+	registry := room.NewRegistry(testLogger)
+	handler := NewWSHandler(registry, secret, "http://localhost:5173", testLogger)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	return server, registry

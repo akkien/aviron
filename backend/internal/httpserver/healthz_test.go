@@ -33,7 +33,7 @@ func TestHealthz_OK(t *testing.T) {
 	}
 
 	mux := httpserver.NewServer()
-	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, room.NewRegistry())
+	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, room.NewRegistry(testLogger), testLogger)
 	srv := newTestServer(t, mux)
 	defer srv.Close()
 
@@ -60,7 +60,7 @@ func TestHealthz_DBUnreachable(t *testing.T) {
 	defer pool.Close()
 
 	mux := httpserver.NewServer()
-	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, room.NewRegistry())
+	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, room.NewRegistry(testLogger), testLogger)
 	srv := newTestServer(t, mux)
 	defer srv.Close()
 

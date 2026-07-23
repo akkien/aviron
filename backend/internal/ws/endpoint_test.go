@@ -12,14 +12,14 @@ import (
 )
 
 func newTestWSHandler() *WSHandler {
-	return NewWSHandler(room.NewRegistry(), []byte("test-secret"), "http://localhost:5173")
+	return NewWSHandler(room.NewRegistry(testLogger), []byte("test-secret"), "http://localhost:5173", testLogger)
 }
 
 func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -29,7 +29,7 @@ func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -68,7 +68,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -79,7 +79,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -106,7 +106,7 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -120,7 +120,7 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -153,7 +153,7 @@ func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 	actor.MarkActive("") // a pending race can't legitimately finish (pending-connections.md)
 
@@ -165,7 +165,7 @@ func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -239,7 +239,7 @@ func TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 	// Never MarkActive()'d: the race stays pending until the (shortened)
 	// PendingTimeoutDuration elapses.
@@ -253,7 +253,7 @@ func TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -279,7 +279,7 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 
 	conn := newFakeConn()
@@ -292,7 +292,7 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1")
+		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -336,7 +336,7 @@ func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	go actor.Run()
 
 	h := newTestWSHandler()
@@ -345,7 +345,7 @@ func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *tes
 	connA.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
 	doneA := make(chan struct{})
 	go func() {
-		h.serveConn(actor, connA, "race-1", "user-a", "user-a")
+		h.serveConn(actor, connA, "race-1", "user-a", "user-a", testLogger)
 		close(doneA)
 	}()
 
@@ -353,7 +353,7 @@ func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *tes
 	connB.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
 	doneB := make(chan struct{})
 	go func() {
-		h.serveConn(actor, connB, "race-1", "user-b", "user-b")
+		h.serveConn(actor, connB, "race-1", "user-b", "user-b", testLogger)
 		close(doneB)
 	}()
 

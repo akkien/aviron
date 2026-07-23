@@ -3,6 +3,7 @@ package race_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -10,6 +11,10 @@ import (
 	"github.com/akkien/aviron/internal/race"
 	"github.com/akkien/aviron/internal/room"
 )
+
+// testLogger discards output — this package's tests assert on responses and
+// fake-repository state, not log lines.
+var testLogger = slog.New(slog.DiscardHandler)
 
 // finishRaceCall records one FinishRace invocation, so tests can assert what
 // the service actually delegated to the repository.

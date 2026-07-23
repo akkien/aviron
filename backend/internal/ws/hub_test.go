@@ -126,7 +126,7 @@ func TestHubRegistry_GetOrCreate_ReturnsSameHubForSameRace(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 
 	h1 := hr.getOrCreate("race-1", actor)
 	h2 := hr.getOrCreate("race-1", actor)
@@ -140,8 +140,8 @@ func TestHubRegistry_GetOrCreate_DifferentRacesGetDifferentHubs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
-	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
+	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 
 	h1 := hr.getOrCreate("race-1", actor1)
 	h2 := hr.getOrCreate("race-2", actor2)
@@ -154,7 +154,7 @@ func TestHubRegistry_CleansUpAfterRoomContextCancelled(t *testing.T) {
 	hr := newHubRegistry()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger)
 	hr.getOrCreate("race-1", actor)
 
 	cancel()

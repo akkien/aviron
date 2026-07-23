@@ -1,24 +1,101 @@
-# Current Feature
+# Current Feature: Structured Logging
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- Replace every existing `log.Printf` call site with structured `slog`
+  logging, tagged with `race_id`/`user_id`/`request_id` wherever available.
+- Introduce `request_id` as a new concept in this codebase: generated per
+  request, attached to context, and logged.
+- Add a per-request HTTP summary log line (method, path, status, duration,
+  `request_id`, `user_id` if authenticated) so downstream `room`/`ws` log
+  lines can actually be correlated against a request.
+- Thread a single process-wide `*slog.Logger` explicitly through
+  constructors (no package-level global), matching this project's existing
+  no-hidden-globals convention.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- `context/project-overview.md` §9 calls for structured logging (`slog`)
+  tagged with `race_id`/`user_id`/`request_id`. Today the backend logs
+  through the plain `log` package at exactly 7 call sites, all
+  `log.Printf`, none structured, none carrying any of those three
+  identifiers:
+  - `internal/app.go:35` — listening on port
+  - `internal/room/room.go:342` — leave race error
+  - `internal/room/room.go:415` — cancel race error
+  - `internal/room/room.go:555` — finish race error
+  - `internal/race/handler.go:189` — room actor missing at start
+  - `internal/ws/endpoint.go:157` — dropping malformed message
+  - `internal/ws/endpoint.go:163` — dropping message
+- This is the foundation spec for the rest of Phase 3 — sequenced first
+  since load testing (`load-testing/k6-load-test.md`) is more useful once
+  failures/backpressure show up as structured, filterable log lines.
+- `race_id`/`user_id` are already in scope at most of the 7 call sites
+  today; `request_id` does not exist anywhere in this codebase yet and
+  needs new middleware.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. **`internal/middleware/requestid.go`** — new middleware following the
+   exact shape `middleware.Auth`/`middleware.Cors` already establish
+   (`contextKey` + `XFromContext(ctx)` accessor, template:
+   `internal/middleware/auth.go`'s `contextKey`/`userIDContextKey`/
+   `UserIDFromContext`):
+   - `func RequestID() func(http.Handler) http.Handler`
+   - `func RequestIDFromContext(ctx context.Context) (string, bool)`
+   - Generates a random id per request via `crypto/rand` (matches
+     `internal/race.GenerateRaceID`'s existing precedent — not `math/rand`).
+   - **Decision (resolved, not left open)**: also echo the id back as an
+     `X-Request-ID` response header — cheap, and useful for correlating a
+     client-reported bug with server logs; no existing precedent against it.
+2. **Logger construction** — `internal/app.go`'s `Run(cfg)` builds one
+   `*slog.Logger` via `slog.New(slog.NewJSONHandler(os.Stdout, nil))` and
+   threads it explicitly into every constructor that currently logs:
+   `RoomActor`, `WSHandler`, `RaceHandler`, plus `httpserver.RegisterRoutes`.
+3. **Request-logging middleware** — new small middleware (same shape as
+   `requestid.go`), registered right after `RequestID()`, logging one line
+   per request: method, path, status code, duration, `request_id`, and
+   `user_id` if `middleware.Auth` already ran by the time it fires.
+4. **Middleware ordering** in `internal/app.go` — `RequestID()` outermost
+   (wraps even `middleware.Cors`), so every request gets an id before
+   anything else runs, including requests that fail auth or CORS:
+   `middleware.RequestID()(requestLogging(logger)(middleware.Cors(cfg.CORSAllowedOrigin)(server)))`
+   (exact composition order confirmed at `start`).
+5. **`internal/room` / `internal/ws` logger threading** — **Decision
+   (resolved, not left open)**: store a pre-tagged child logger
+   (`logger.With(slog.String("race_id", r.id))`) on `RoomActor` at spawn
+   time, rather than passing `race_id` explicitly at every call site —
+   idiomatic `slog` pattern, avoids repetition. Accept the resulting
+   constructor-signature growth on `NewRoomActor`/`Registry.Spawn`
+   (already grown several params across `finisher`/`leaver`/`canceller`);
+   test fixture churn is a one-time, mechanical cost, not a reason to
+   avoid the idiomatic shape.
+6. **Convert the 7 existing call sites** to `slog`, attaching `race_id`/
+   `user_id` attributes wherever already in scope.
+7. **Swagger**: none of this touches REST DTOs/routes (aside from the new
+   response header), so `make docs` is not expected to produce a diff —
+   confirm at `complete`.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Depends on nothing else in Phase 3 — this is the foundation the other
+  specs build on.
+- `prometheus-metrics.md` touches some of the same files
+  (`internal/room/room.go`, `internal/ws`) but is otherwise independent;
+  order between them doesn't matter functionally.
+- Explicitly out of scope: converting `internal/app.go`'s `log.Fatalf`
+  startup failures (DB connection/migration) — these happen before the
+  logger or server exist, so converting them buys nothing. No log level
+  filtering/config (`LOG_LEVEL` env var) — `slog` defaults to `Info`+,
+  and a configurable minimum level is a future nice-to-have, not required
+  by §9.
+- `*slog.Logger`/`slog.NewJSONHandler` are safe for concurrent use by
+  design — no new synchronization needed in `RoomActor.Run()`'s single
+  goroutine or `internal/ws`'s reader/writer goroutines.
 
 ## History
 

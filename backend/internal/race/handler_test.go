@@ -33,7 +33,7 @@ func signTestToken(t *testing.T, secret []byte, userID string) string {
 func newTestHandler() *race.RaceHandler {
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, []byte("test-secret"))
-	return race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	return race.NewRaceHandler(svc, room.NewRegistry(testLogger), context.Background(), testLogger)
 }
 
 func TestRaceHandler_Create_Created(t *testing.T) {
@@ -308,7 +308,7 @@ func TestRaceHandler_Join_NotPending(t *testing.T) {
 	secret := []byte("test-secret")
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, secret)
-	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	h := race.NewRaceHandler(svc, room.NewRegistry(testLogger), context.Background(), testLogger)
 
 	raceID := createTestRace(t, secret, h)
 	repo.races[0].Status = "active"
@@ -546,7 +546,7 @@ func TestRaceHandler_Status_PendingRaceIncludesPendingExpiresAt(t *testing.T) {
 	secret := []byte("test-secret")
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, secret)
-	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	h := race.NewRaceHandler(svc, room.NewRegistry(testLogger), context.Background(), testLogger)
 	raceID := createTestRace(t, secret, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/races/"+raceID, nil)
@@ -582,7 +582,7 @@ func TestRaceHandler_Status_FinishedRaceIncludesFinishResults(t *testing.T) {
 	secret := []byte("test-secret")
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, secret)
-	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	h := race.NewRaceHandler(svc, room.NewRegistry(testLogger), context.Background(), testLogger)
 	raceID := createTestRace(t, secret, h) // creator auto-joins as "creator"
 
 	rank := 1
@@ -635,7 +635,7 @@ func TestRaceHandler_Status_ActiveRaceOmitsPendingExpiresAt(t *testing.T) {
 	secret := []byte("test-secret")
 	repo := newFakeRepository()
 	svc := race.NewRaceService(repo, secret)
-	h := race.NewRaceHandler(svc, room.NewRegistry(), context.Background())
+	h := race.NewRaceHandler(svc, room.NewRegistry(testLogger), context.Background(), testLogger)
 	raceID := createTestRace(t, secret, h)
 	repo.races[0].Status = "active"
 

@@ -4,8 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"testing"
 )
+
+// testLogger discards output — these tests assert on room state and
+// side-effect calls, not log lines, but RoomActor.logger must still be
+// non-nil for the error-logging call sites to be safe to hit.
+var testLogger = slog.New(slog.DiscardHandler)
 
 // noopFinisher satisfies RaceFinisher without touching Postgres, for tests
 // that don't care about race-completion/finish-race.md's persistence step.
@@ -105,6 +111,7 @@ func newTestActor() *RoomActor {
 		active:               true,
 		ctx:                  ctx,
 		cancel:               cancel,
+		logger:               testLogger,
 	}
 }
 

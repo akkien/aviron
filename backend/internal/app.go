@@ -3,7 +3,9 @@ package internal
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/db"
@@ -15,6 +17,8 @@ import (
 func Run(cfg *config.Config) {
 	ctx := context.Background()
 
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("db: %v", err)
@@ -25,13 +29,13 @@ func Run(cfg *config.Config) {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	registry := room.NewRegistry()
+	registry := room.NewRegistry(logger)
 
 	server := httpserver.NewServer()
-	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry)
+	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger)
 
-	handler := middleware.Cors(cfg.CORSAllowedOrigin)(server)
+	handler := middleware.RequestID()(middleware.RequestLog(logger)(middleware.Cors(cfg.CORSAllowedOrigin)(server)))
 
-	log.Printf("listening on :%s", cfg.Port)
+	logger.Info("listening", slog.String("port", cfg.Port))
 	log.Fatal(http.ListenAndServe(":"+cfg.Port, handler))
 }

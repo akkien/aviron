@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/akkien/aviron/internal/auth"
@@ -16,7 +17,7 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
-func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry) {
+func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry, logger *slog.Logger) {
 	healthzHandler := NewHealthzHandler(pool)
 	server.HandleFunc("GET /healthz", healthzHandler)
 
@@ -31,7 +32,7 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 
 	raceRepo := postgres.NewRaceRepository(pool)
 	raceSvc := race.NewRaceService(raceRepo, []byte(cfg.JWTSecret))
-	raceHandler := race.NewRaceHandler(raceSvc, registry, ctx)
+	raceHandler := race.NewRaceHandler(raceSvc, registry, ctx, logger)
 
 	server.Handle("POST /races", requireAuth(http.HandlerFunc(raceHandler.Create)))
 	server.Handle("GET /races", requireAuth(http.HandlerFunc(raceHandler.ListOpen)))
@@ -49,7 +50,7 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	// Not wrapped in requireAuth: this endpoint authenticates via the
 	// query-string session_token (websocket/ws-endpoint.md), not the
 	// Authorization header middleware.Auth expects.
-	wsHandler := ws.NewWSHandler(registry, []byte(cfg.JWTSecret), cfg.CORSAllowedOrigin)
+	wsHandler := ws.NewWSHandler(registry, []byte(cfg.JWTSecret), cfg.CORSAllowedOrigin, logger)
 	server.Handle("GET /ws", wsHandler)
 
 	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)

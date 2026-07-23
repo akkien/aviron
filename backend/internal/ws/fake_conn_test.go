@@ -3,11 +3,16 @@ package ws
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/coder/websocket"
 
 	"github.com/akkien/aviron/internal/room"
 )
+
+// testLogger discards output — this package's tests assert on connection
+// plumbing and delivered messages, not log lines.
+var testLogger = slog.New(slog.DiscardHandler)
 
 // fakeFinisher satisfies room.RaceFinisher without touching Postgres — this
 // package's tests exercise connection plumbing, not

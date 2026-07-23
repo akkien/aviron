@@ -2,7 +2,7 @@ package ws
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -35,18 +35,20 @@ type WSHandler struct {
 	jwtSecret     []byte
 	hubs          *hubRegistry
 	allowedOrigin string
+	logger        *slog.Logger
 }
 
 // NewWSHandler constructs a WSHandler. allowedOrigin is reused from the same
 // config value the REST CORS middleware already uses (config.CORSAllowedOrigin)
 // — without it, coder/websocket's default same-origin check would reject the
 // frontend's cross-origin WebSocket handshake in local dev.
-func NewWSHandler(registry *room.Registry, jwtSecret []byte, allowedOrigin string) *WSHandler {
+func NewWSHandler(registry *room.Registry, jwtSecret []byte, allowedOrigin string, logger *slog.Logger) *WSHandler {
 	return &WSHandler{
 		registry:      registry,
 		jwtSecret:     jwtSecret,
 		hubs:          newHubRegistry(),
 		allowedOrigin: allowedOrigin,
+		logger:        logger,
 	}
 }
 
@@ -91,14 +93,15 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// race_id/user_id (internal/race/service.go's JoinRace), and looking up
 	// users.display_name here would be this endpoint's only Postgres
 	// round-trip, contradicting ws-endpoint.md's "no new Postgres access."
-	h.serveConn(actor, conn, raceID, userID, userID)
+	connLogger := h.logger.With(slog.String("race_id", raceID), slog.String("user_id", userID))
+	h.serveConn(actor, conn, raceID, userID, userID, connLogger)
 }
 
 // serveConn drives one connection until it's done, then returns — callers
 // (ServeHTTP, and this file's tests) can rely on that return meaning both
 // the reader and writer goroutines have actually exited, not just been told
 // to.
-func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID, displayName string) {
+func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID, displayName string, logger *slog.Logger) {
 	hub := h.hubs.getOrCreate(raceID, actor)
 
 	// Deliberately NOT context.WithCancel(actor.Context()): that would fire
@@ -126,7 +129,7 @@ func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		readLoop(connCtx, conn, actor, userID, displayName)
+		readLoop(connCtx, conn, actor, userID, displayName, logger)
 	}()
 	go func() {
 		defer wg.Done()
@@ -141,7 +144,7 @@ func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID
 // readLoop never touches room state directly — every decoded message
 // becomes a room.RoomEvent handed to actor.Send, which is the only
 // cross-goroutine entry point into the room's single-writer state.
-func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, displayName string) {
+func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, displayName string, logger *slog.Logger) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -154,13 +157,13 @@ func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, d
 
 		msg, err := decodeClientMessage(data)
 		if err != nil {
-			log.Printf("ws: dropping malformed message from user %s: %v", userID, err)
+			logger.Warn("dropping malformed message", slog.Any("error", err))
 			continue
 		}
 
 		ev, err := msg.toRoomEvent(userID, displayName)
 		if err != nil {
-			log.Printf("ws: dropping message from user %s: %v", userID, err)
+			logger.Warn("dropping message", slog.Any("error", err))
 			continue
 		}
 

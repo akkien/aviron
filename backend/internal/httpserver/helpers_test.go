@@ -2,10 +2,15 @@ package httpserver_test
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+// testLogger discards output — these tests assert on HTTP responses, not
+// log lines.
+var testLogger = slog.New(slog.DiscardHandler)
 
 func newTestServer(t *testing.T, h http.Handler) *httptest.Server {
 	t.Helper()

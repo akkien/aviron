@@ -3,7 +3,7 @@ package room
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sort"
 	"time"
 )
@@ -96,6 +96,10 @@ type RoomActor struct {
 	// and hand the next finisher a duplicate rank (leave-race.md). A counter
 	// untouched by departure sidesteps that entirely.
 	finishedCount int
+	// logger is pre-tagged with this room's race_id (Registry.Spawn does
+	// the tagging, once, before construction) so call sites below don't
+	// need to repeat it.
+	logger *slog.Logger
 }
 
 // NewRoomActor constructs a room actor for race id, seeded with the race
@@ -104,7 +108,7 @@ type RoomActor struct {
 // the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, logger *slog.Logger) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
@@ -120,6 +124,7 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 		leaver:               leaver,
 		canceller:            canceller,
 		startedAt:            time.Now(),
+		logger:               logger,
 	}
 	time.AfterFunc(noShowTimeoutDuration, func() {
 		r.Send(noShowTimeout{})
@@ -339,7 +344,7 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 				// to clean up a participant left in place by a failed call.
 				delete(r.participants, e.UserID)
 				if err := r.leaver.LeaveRace(r.ctx, r.id, e.UserID); err != nil {
-					log.Printf("room %s: leave race for user %s: %v", r.id, e.UserID, err)
+					r.logger.Error("leave race failed", slog.String("user_id", e.UserID), slog.Any("error", err))
 				}
 				// If that was the last participant, cancel the race now
 				// instead of leaving it pending until PendingTimeoutDuration
@@ -412,7 +417,7 @@ func (r *RoomActor) broadcastRaceStarted(promptText string) {
 // already accepts.
 func (r *RoomActor) expirePendingRoom() {
 	if err := r.canceller.CancelRace(r.ctx, r.id); err != nil {
-		log.Printf("room %s: cancel race: %v", r.id, err)
+		r.logger.Error("cancel race failed", slog.Any("error", err))
 		return
 	}
 	r.broadcastRaceExpired()
@@ -552,7 +557,7 @@ func (r *RoomActor) finishRace(results []ParticipantResult) {
 		// No retry: this is a side project's accepted gap, not a production
 		// resilience story. Logged and left running rather than torn down,
 		// so at least the room doesn't silently vanish if Postgres hiccups.
-		log.Printf("room %s: finish race: %v", r.id, err)
+		r.logger.Error("finish race failed", slog.Any("error", err))
 		return
 	}
 	r.finished = true

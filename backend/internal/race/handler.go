@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"time"
@@ -29,11 +29,12 @@ type RaceHandler struct {
 	// ctx is the process's root context, used (not r.Context()) when spawning
 	// a room actor so it keeps running after the triggering HTTP request
 	// returns and its own context is cancelled.
-	ctx context.Context
+	ctx    context.Context
+	logger *slog.Logger
 }
 
-func NewRaceHandler(svc *RaceService, registry *room.Registry, ctx context.Context) *RaceHandler {
-	return &RaceHandler{svc: svc, registry: registry, ctx: ctx}
+func NewRaceHandler(svc *RaceService, registry *room.Registry, ctx context.Context, logger *slog.Logger) *RaceHandler {
+	return &RaceHandler{svc: svc, registry: registry, ctx: ctx, logger: logger}
 }
 
 // Create godoc
@@ -186,7 +187,7 @@ func (h *RaceHandler) Start(w http.ResponseWriter, r *http.Request) {
 
 	actor, ok := h.registry.Get(raceID)
 	if !ok {
-		log.Printf("race %s: room actor missing at start", raceID)
+		h.logger.Error("room actor missing at start", slog.String("race_id", raceID))
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}

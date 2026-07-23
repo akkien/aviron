@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 )
 
@@ -17,13 +18,17 @@ const broadcastBufferSize = 16
 // for this single-instance phase; the Redis-backed cross-instance registry
 // is Phase 4's concern, not this one's.
 type Registry struct {
-	mu    sync.RWMutex
-	rooms map[string]*RoomActor
+	mu     sync.RWMutex
+	rooms  map[string]*RoomActor
+	logger *slog.Logger
 }
 
-// NewRegistry constructs an empty Registry.
-func NewRegistry() *Registry {
-	return &Registry{rooms: make(map[string]*RoomActor)}
+// NewRegistry constructs an empty Registry. logger is the process-wide
+// logger; Spawn tags a race_id-scoped child logger off it for each room
+// actor it constructs, rather than threading race_id through every log call
+// site inside internal/room.
+func NewRegistry(logger *slog.Logger) *Registry {
+	return &Registry{rooms: make(map[string]*RoomActor), logger: logger}
 }
 
 // Spawn constructs a RoomActor for raceID seeded with the race's
@@ -41,7 +46,8 @@ func NewRegistry() *Registry {
 // composition root.
 func (reg *Registry) Spawn(ctx context.Context, raceID string, distanceMeters int, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller) *RoomActor {
 	broadcast := make(chan []byte, broadcastBufferSize)
-	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller)
+	roomLogger := reg.logger.With(slog.String("race_id", raceID))
+	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, roomLogger)
 
 	reg.mu.Lock()
 	reg.rooms[raceID] = actor
