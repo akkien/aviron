@@ -1049,3 +1049,125 @@ Added a `GET /metrics` endpoint that exposes five numbers about the server's liv
 - **Naming convention**: every custom metric is prefixed `aviron_` (e.g. `aviron_rooms_active`, `aviron_connections_active`, `aviron_tick_latency_seconds`) to keep this app's own numbers clearly separate from the automatically-provided Go runtime ones (`go_goroutines`, `go_memstats_*`, etc.) in the scraped output.
 - **Deliberately avoided per-race labels**: Prometheus lets a metric carry extra dimensions ("labels"), e.g. a separate connection count *per race*. That was deliberately not done here — a label value is created for every distinct value ever seen, so a `race_id` label would mean the metrics system accumulates one new permanent label value for every race ever created for as long as the process runs, which is a well-known Prometheus foot-gun ("cardinality explosion") worth avoiding on purpose rather than discovering by accident later.
 - Verified with a real HTTP round-trip test that drives the actual route-registration code used in production (not just the metrics package in isolation) and checks the scraped response body contains every expected metric name — plus dedicated tests for each of the trickier pieces above (the connection counter surviving a disconnect, the goroutine-owned-map query, the sum-across-multiple-rooms arithmetic), all re-run multiple times under Go's race detector to rule out flakiness.
+
+## pprof
+
+Enabled Go's built-in `net/http/pprof` profiler under `/debug/pprof/`, gated by an env var — the third and smallest of Phase 3's observability tools, giving a way to answer "*why* did goroutine count climb" once Prometheus's gauge (above) shows *that* it did.
+
+### Goals (pprof)
+
+- `GET /debug/pprof/*` registered on this project's real mux (not the process-wide default one)
+- Gated behind `Config.PprofEnabled` (env `PPROF_ENABLED`, default `true`) — a single bool, not a full environment enum this codebase has no other use for
+- Unauthenticated, matching `GET /metrics`'s precedent — an operator/tool endpoint, not browser or API traffic
+
+### Explain (pprof)
+
+- **The gotcha this feature exists to avoid**: `net/http/pprof`'s own `init()` function registers its handlers onto Go's *global* `http.DefaultServeMux` the instant the package is imported — a common trap, since most real servers (this one included) build their own separate `*http.ServeMux` and never actually serve `http.DefaultServeMux` at all. A bare `import _ "net/http/pprof"` here would compile clean, add nothing to any request log, and simply never be reachable — silent, not a crash, which is exactly what makes it worth calling out explicitly rather than discovering it by confused troubleshooting later:
+
+  ```mermaid
+  flowchart LR
+      subgraph wrong["A blank import (wrong for this project)"]
+          I1["import _ \"net/http/pprof\""] -->|registers onto| D["http.DefaultServeMux<br/>(never actually served)"]
+      end
+      subgraph right["What this feature does instead"]
+          I2["explicit pprof.Index/Cmdline/<br/>Profile/Symbol/Trace"] -->|registered onto| M["this project's own<br/>*http.ServeMux"]
+      end
+  ```
+
+- **Exactly 5 handlers cover every profile**, not one registration per profile type — `pprof.Index`, registered at the trailing-slash pattern `/debug/pprof/`, dispatches `/debug/pprof/goroutine`, `/debug/pprof/heap`, `/debug/pprof/allocs`, etc. itself, the same subtree-matching behavior this project's `GET /swagger/` route already relies on:
+
+  | Registered pattern | Handler | What it serves |
+  | --- | --- | --- |
+  | `/debug/pprof/` | `pprof.Index` | The index page, *and* every named profile (`goroutine`, `heap`, `allocs`, `block`, `mutex`, `threadcreate`) via its own internal dispatch |
+  | `/debug/pprof/cmdline` | `pprof.Cmdline` | The running process's command-line invocation |
+  | `/debug/pprof/profile` | `pprof.Profile` | A CPU profile, sampled over `?seconds=N` |
+  | `/debug/pprof/symbol` | `pprof.Symbol` | Program counter → function name lookups |
+  | `/debug/pprof/trace` | `pprof.Trace` | An execution trace, over `?seconds=N` |
+
+- **A real correctness bug caught before shipping, not after**: every other route in this file is registered with a `"GET /path"` method-restricted pattern (Go 1.22's method-aware `http.ServeMux`). Doing the same for these 5 would have silently broken `go tool pprof`'s use of `/debug/pprof/symbol`, since `pprof.Symbol`'s own implementation branches on the request method — reading the query string for `GET`, but reading the request body for `POST` (used when resolving a large batch of addresses at once). All 5 pprof handlers are registered unrestricted by method instead, deliberately breaking from this file's own convention, with a comment explaining why.
+- The gate itself (`internal/config/config.go`):
+
+  ```go
+  PprofEnabled: getEnvBool("PPROF_ENABLED", true),
+  ```
+
+- Verified both states directly, not just the happy path: `PprofEnabled: true` → `200` on `/debug/pprof/`, `/goroutine`, `/cmdline`; `PprofEnabled: false` → `404` (nothing registered at all, not just an auth wall in front of it).
+
+## k6 Load Test
+
+Simulates hundreds of real players — register, log in, create/join/start a race, open the real WebSocket handshake, type at a realistic pace — to generate genuine concurrent load against a running instance, closing out Phase 3. Along the way, running it for real against a real server surfaced and fixed a serious bug that had been silently breaking every real WebSocket connection since Structured Logging shipped.
+
+### Goals (k6 Load Test)
+
+- A `load/` directory (repo root) with k6 scripts simulating the full real client flow, ending in genuinely concurrent WebSocket + telemetry traffic
+- Scale knobs (race count, players per race, target word count) tunable per run via `-e` flags, not hardcoded
+- `make loadtest` to run it
+- Builds the load-generation tool and the means to watch a run happen — explicitly **not** fixing whatever it finds, and **not** deploying a Prometheus server/Grafana
+
+### Explain (k6 Load Test)
+
+- **The coordination problem this design had to solve**: the naive reading of "one VU creates a race, others join it" runs straight into a real constraint — k6 virtual users are independent JS runtimes with no shared memory and no message-passing between them at runtime. Resolved by moving every REST call (register, login, create, join, start) into k6's `setup()`, which runs once, single-threaded, before any VU executes — turning "coordinate N concurrent actors" into "run N sequential steps," which needs no coordination mechanism at all. The part that actually matters for a *load* test — hundreds of concurrent WebSocket connections and telemetry streams stressing the room actor's single-writer goroutines — is completely unaffected, since it all still happens in the genuinely-parallel per-VU phase:
+
+  ```mermaid
+  sequenceDiagram
+      participant Setup as setup() — single-threaded
+      participant Backend
+      participant VUs as All VUs — genuinely parallel
+
+      Note over Setup,Backend: Sequential: no coordination needed
+      Setup->>Backend: register + login (N users)
+      Setup->>Backend: POST /races (creator, auto-joined)
+      Setup->>Backend: POST /races/{id}/join (every other player)
+      Setup->>Backend: POST /races/{id}/start
+      Setup-->>VUs: returns [{raceID, sessionToken}, ...] per VU
+
+      Note over VUs,Backend: Parallel: the actual load
+      par VU 1
+          VUs->>Backend: GET /ws, join_race, telemetry×N
+      and VU 2
+          VUs->>Backend: GET /ws, join_race, telemetry×N
+      and VU N
+          VUs->>Backend: GET /ws, join_race, telemetry×N
+      end
+  ```
+
+- **The `pace_watt` telemetry sent is not approximated — it's the same formula the real frontend uses** (`frontend/src/components/race-screen/TypingBox.tsx`), so a load-test run produces numbers the room actor treats identically to a real player's:
+
+  ```js
+  // load/lib/ws-client.js, mirroring TypingBox.tsx exactly
+  const elapsedMinutes = (Date.now() - startedAtMs) / 60000
+  const paceWatt = elapsedMinutes > 0 ? Math.round(wordsCompleted / elapsedMinutes) : 0
+  ```
+
+- **A real, severe bug found by actually running this against a real server — not a load-test finding in the "backpressure/goroutine leak" sense this spec deliberately deferred, but a full regression**: the very first real run got `501 Not Implemented` on every single WebSocket handshake. Root cause: `RequestLog` (Structured Logging, above) wraps every request's `http.ResponseWriter` in a small `statusWriter` struct to capture the status code for the log line — but that wrapper only embeds the 3-method `http.ResponseWriter` *interface*, not the concrete writer's full method set, so `http.Hijacker` (which `coder/websocket.Accept` requires to take over the raw TCP connection for a WebSocket upgrade) silently stopped being reachable through it. Since `RequestLog` wraps the *entire* mux, this broke every real WebSocket connection — including real users' — the moment that feature shipped, and nothing in the test suite caught it because `internal/ws`'s own tests exercise a fake connection, never a real `net/http` hijack:
+
+  ```mermaid
+  sequenceDiagram
+      participant Client
+      participant RL as RequestLog
+      participant WS as GET /ws handler
+      participant Lib as coder/websocket.Accept
+
+      Client->>RL: GET /ws (Upgrade: websocket)
+      RL->>RL: wraps w in statusWriter{ResponseWriter: w}
+      RL->>WS: next.ServeHTTP(statusWriter, r)
+      WS->>Lib: Accept(statusWriter, r, ...)
+      Lib->>Lib: w.(http.Hijacker) — FAILS, statusWriter has no Hijack()
+      Lib-->>Client: 501 Not Implemented
+  ```
+
+  Fixed by giving `statusWriter` its own `Hijack()` method that forwards to the underlying writer (erroring cleanly if that writer genuinely doesn't support it, rather than panicking) — a one-line-conceptually fix once found, but the finding itself only came from an end-to-end run through the real middleware chain, exactly the gap unit tests with fakes can't close. Two regression tests now cover it directly: one proving the forward actually happens, one proving the error path behaves when it genuinely can't.
+- **A real successful run, after the fix** — 5 races × 8 players, 30 words each, against a real Postgres-backed instance:
+
+  | Metric | Result |
+  | --- | --- |
+  | Iterations completed | 40 / 40 |
+  | Checks passed | 6,382 / 6,382 (100%) |
+  | HTTP failures | 0 |
+  | `ws_msgs_sent` | 1,240 (= 40 VUs × 31 messages: 1 `join_race` + 30 `telemetry`, exactly) |
+  | Broadcast tick latency | all 987 ticks under 5ms |
+  | Goroutines, before → after | 7 → 8 (no climb — no leak signature) |
+  | `aviron_rooms_active`/`aviron_connections_active` after | 0 / 0 |
+
+  A clean result at this scale is itself a meaningful finding, not a non-result: it establishes a healthy baseline before the next run ramps `NUM_RACES`/`VUS_PER_RACE` up further to actually find where (if anywhere) this instance starts to strain.
+- Explicitly not built in this first pass: deliberate disconnect/reconnect chaos (a natural follow-up once steady-state numbers are understood), and testing actual horizontal scaling (Redis, ≥2 instances — Phase 4). This closes out every spec in Phase 3.

@@ -1,4 +1,4 @@
-.PHONY: run build start stop restart test docs
+.PHONY: run build start stop restart test docs loadtest
 
 BINARY := server
 PID_FILE := .server.pid
@@ -34,3 +34,10 @@ test:
 
 docs:
 	swag init -g cmd/server/main.go --parseDependency --parseInternal
+
+# Requires the backend already running against a real Postgres (make
+# start) and the k6 binary installed. Override scale knobs with -e, e.g.
+# `k6 run -e NUM_RACES=10 ../load/scenarios/race-lifecycle.js` — see
+# ../load/README.md.
+loadtest:
+	k6 run ../load/scenarios/race-lifecycle.js
