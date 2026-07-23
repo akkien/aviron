@@ -1,101 +1,24 @@
-# Current Feature: Structured Logging
+# Current Feature
 
 ## Status
 
-In Progress
+Not Started
 
 ## Goals
 
-- Replace every existing `log.Printf` call site with structured `slog`
-  logging, tagged with `race_id`/`user_id`/`request_id` wherever available.
-- Introduce `request_id` as a new concept in this codebase: generated per
-  request, attached to context, and logged.
-- Add a per-request HTTP summary log line (method, path, status, duration,
-  `request_id`, `user_id` if authenticated) so downstream `room`/`ws` log
-  lines can actually be correlated against a request.
-- Thread a single process-wide `*slog.Logger` explicitly through
-  constructors (no package-level global), matching this project's existing
-  no-hidden-globals convention.
+<!-- populated by /feature load -->
 
 ## Explain
 
-- `context/project-overview.md` §9 calls for structured logging (`slog`)
-  tagged with `race_id`/`user_id`/`request_id`. Today the backend logs
-  through the plain `log` package at exactly 7 call sites, all
-  `log.Printf`, none structured, none carrying any of those three
-  identifiers:
-  - `internal/app.go:35` — listening on port
-  - `internal/room/room.go:342` — leave race error
-  - `internal/room/room.go:415` — cancel race error
-  - `internal/room/room.go:555` — finish race error
-  - `internal/race/handler.go:189` — room actor missing at start
-  - `internal/ws/endpoint.go:157` — dropping malformed message
-  - `internal/ws/endpoint.go:163` — dropping message
-- This is the foundation spec for the rest of Phase 3 — sequenced first
-  since load testing (`load-testing/k6-load-test.md`) is more useful once
-  failures/backpressure show up as structured, filterable log lines.
-- `race_id`/`user_id` are already in scope at most of the 7 call sites
-  today; `request_id` does not exist anywhere in this codebase yet and
-  needs new middleware.
+<!-- populated by /feature load -->
 
 ## Plan
 
-1. **`internal/middleware/requestid.go`** — new middleware following the
-   exact shape `middleware.Auth`/`middleware.Cors` already establish
-   (`contextKey` + `XFromContext(ctx)` accessor, template:
-   `internal/middleware/auth.go`'s `contextKey`/`userIDContextKey`/
-   `UserIDFromContext`):
-   - `func RequestID() func(http.Handler) http.Handler`
-   - `func RequestIDFromContext(ctx context.Context) (string, bool)`
-   - Generates a random id per request via `crypto/rand` (matches
-     `internal/race.GenerateRaceID`'s existing precedent — not `math/rand`).
-   - **Decision (resolved, not left open)**: also echo the id back as an
-     `X-Request-ID` response header — cheap, and useful for correlating a
-     client-reported bug with server logs; no existing precedent against it.
-2. **Logger construction** — `internal/app.go`'s `Run(cfg)` builds one
-   `*slog.Logger` via `slog.New(slog.NewJSONHandler(os.Stdout, nil))` and
-   threads it explicitly into every constructor that currently logs:
-   `RoomActor`, `WSHandler`, `RaceHandler`, plus `httpserver.RegisterRoutes`.
-3. **Request-logging middleware** — new small middleware (same shape as
-   `requestid.go`), registered right after `RequestID()`, logging one line
-   per request: method, path, status code, duration, `request_id`, and
-   `user_id` if `middleware.Auth` already ran by the time it fires.
-4. **Middleware ordering** in `internal/app.go` — `RequestID()` outermost
-   (wraps even `middleware.Cors`), so every request gets an id before
-   anything else runs, including requests that fail auth or CORS:
-   `middleware.RequestID()(requestLogging(logger)(middleware.Cors(cfg.CORSAllowedOrigin)(server)))`
-   (exact composition order confirmed at `start`).
-5. **`internal/room` / `internal/ws` logger threading** — **Decision
-   (resolved, not left open)**: store a pre-tagged child logger
-   (`logger.With(slog.String("race_id", r.id))`) on `RoomActor` at spawn
-   time, rather than passing `race_id` explicitly at every call site —
-   idiomatic `slog` pattern, avoids repetition. Accept the resulting
-   constructor-signature growth on `NewRoomActor`/`Registry.Spawn`
-   (already grown several params across `finisher`/`leaver`/`canceller`);
-   test fixture churn is a one-time, mechanical cost, not a reason to
-   avoid the idiomatic shape.
-6. **Convert the 7 existing call sites** to `slog`, attaching `race_id`/
-   `user_id` attributes wherever already in scope.
-7. **Swagger**: none of this touches REST DTOs/routes (aside from the new
-   response header), so `make docs` is not expected to produce a diff —
-   confirm at `complete`.
+<!-- populated by /feature load -->
 
 ## Notes
 
-- Depends on nothing else in Phase 3 — this is the foundation the other
-  specs build on.
-- `prometheus-metrics.md` touches some of the same files
-  (`internal/room/room.go`, `internal/ws`) but is otherwise independent;
-  order between them doesn't matter functionally.
-- Explicitly out of scope: converting `internal/app.go`'s `log.Fatalf`
-  startup failures (DB connection/migration) — these happen before the
-  logger or server exist, so converting them buys nothing. No log level
-  filtering/config (`LOG_LEVEL` env var) — `slog` defaults to `Info`+,
-  and a configurable minimum level is a future nice-to-have, not required
-  by §9.
-- `*slog.Logger`/`slog.NewJSONHandler` are safe for concurrent use by
-  design — no new synchronization needed in `RoomActor.Run()`'s single
-  goroutine or `internal/ws`'s reader/writer goroutines.
+<!-- populated by /feature load -->
 
 ## History
 
@@ -142,3 +65,4 @@ In Progress
 
   Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green, `internal/room` re-run 3x with no flakiness (including the two new regression tests), `yarn build`/`yarn lint` clean (same pre-existing shadcn warning as every prior frontend feature), Swagger docs regenerated for the new endpoint. Bundled a second, unrelated commit on the same branch per explicit request: added a `pgadmin` service to `docker-compose.yml` (port 5050, pre-registered "Aviron (local)" connection via `docker/pgadmin/servers.json`) so the database can be browsed from a browser — verified live (`docker compose up -d pgadmin`, confirmed healthy, confirmed the pre-registered server loaded from the logs). Same disclosed gap as every frontend-touching feature this project: no live two-browser-tab test for the lobby live-update fix, verified by tracing the exact data flow (backend broadcast → `useRaceSocket` → `RaceScreenSidebar` render) rather than an observed browser session.
 - **Idempotent Join / Session Token Recovery** (2026-07-22) — Not a phase-plan spec; closes out two of the three "leftover items from previous phases" surfaced during an explicit audit requested before starting Phase 3 (the third, the minimum-participant question, was resolved as "no fix needed" and documented directly in `context/features/phase1/races/start-race.md`; the ranked public leaderboard remains open, not picked up here). The audit re-read every phase-plan spec and cross-referenced against current code rather than trusting History alone, surfacing: `POST /races/{id}/join` still 409ing `already_joined` for an already-pending participant (originally deferred in `reconnection/grace-period.md`'s own History entry, never revisited), and — found only by tracing the actual reload path, not from the original note — `JoinRace` rejecting anything non-`pending` unconditionally, meaning there was **no way at all**, not just an unfriendly one, to recover a lost `session_token` for a race already in progress. Traced end-to-end before writing any code: `session_token` only ever travels through React Router navigation state (`RaceDetailPage.tsx`), never persisted, so any reload loses it; `RaceScreen.tsx` then withholds the WebSocket connection entirely (`useRaceSocket`'s `if (!raceId || !sessionToken) return`), silently degrading a real participant into permanent read-only spectator mode with no error shown. Fixed symmetrically: `RaceService.JoinRace` now checks a new `IsParticipant` (`internal/race/repository.go` → `postgres.RaceRepository`, a single `SELECT EXISTS(...)`) *before* checking race status — an already-joined caller (pending, active, finished, or cancelled, doesn't matter) gets a freshly signed token instead of an error; a genuinely new joiner still goes through the unchanged status/count/insert path. Reasoned explicitly, not assumed, that issuing a token for a finished/cancelled race is harmless: `RaceScreen.tsx`'s existing `terminal` check already withholds it client-side, and even without that, the room actor behind a finished/cancelled race has already torn down and been removed from the registry, so a WS handshake would fail at the registry lookup regardless of token validity — no extra status guard needed. `ErrAlreadyJoined`/`AddParticipant`'s unique-violation mapping stays as a defensive fallback, now only reachable via the TOCTOU window between the `IsParticipant` check and the insert (two concurrent first-time joins from the same user) — the same accepted count-then-insert race class this codebase already accepts for `MaxParticipants`. Frontend: `RaceDetailPage.tsx`'s `sessionToken` became `useState` (was a plain `const` derived once from `location.state`), with a best-effort recovery `useEffect` that re-joins once `raceDetail` confirms the current user really is a participant of a non-terminal race — a failure just leaves the existing spectator fallback in place, not a new error state. **One test-writing correction caught before it shipped**: an initial service test asserted a recovered token must differ from the first one issued; failed immediately because `signSessionToken`'s `exp` is truncated to whole seconds and HS256 signing has no nonce, so two calls within the same wall-clock second legitimately produce a byte-identical JWT — not a bug, a wrong test assumption, fixed by asserting a token comes back at all rather than that it differs. Verified: `go build`/`go vet`/`gofmt -l .` clean, full `go test ./... -race` green (new/updated service and handler tests covering both the pending-idempotency and previously-impossible active-race-recovery cases), `yarn build`/`yarn lint` clean, and — beyond the usual disclosed no-browser-automation gap — a full live end-to-end run against the real local server/Postgres reproducing every scenario directly: repeat join while pending → `200` with a token (was `409`); recovering a token on an active race → `200` (was `409`, previously impossible); a genuinely new user hitting an active race → still correctly `409`. No wire/DTO or Swagger changes — the endpoint's documented contract is unchanged, only its internal behavior. Bundled two small unrelated commits on the same branch history (not this feature's own commit): a `docs:` commit resolving the minimum-participant open question directly in `start-race.md`, done just before this feature started. Of the original three leftover items, only the full ranked/windowed `GET /leaderboard?window=alltime|weekly` remains genuinely open — still unclaimed by any phase, not picked up here, a candidate to fold into Phase 3 or address separately.
+- **Structured Logging** (2026-07-23) — First Phase 3 spec (`context/features/phase3/observability/structured-logging.md`), deliberately sequenced ahead of load testing per the spec's own rationale. Replaced all 7 existing `log.Printf` call sites with `slog`, tagged with `race_id`/`user_id`/`request_id` wherever in scope. New `internal/middleware/requestid.go` (`RequestID()`/`RequestIDFromContext`, `crypto/rand`-backed id, echoed as `X-Request-ID` — resolving the spec's open question in favor of adding the header) and `internal/middleware/requestlog.go` (`RequestLog(logger)`, one line per request: method/path/status/duration/`request_id`/`user_id`). One process-wide `*slog.Logger` (`slog.NewJSONHandler(os.Stdout, nil)`) is constructed in `internal/app.go` and threaded explicitly through `Registry`/`RoomActor` (a `race_id`-tagged child logger created once per room, at `Spawn`), `WSHandler` (a `race_id`+`user_id`-tagged child logger created once per connection, at `ServeHTTP`), and `RaceHandler` — resolving the spec's other open question in favor of the idiomatic pre-tagged-child-logger pattern over passing `race_id` at every call site, accepting the resulting constructor-signature growth on `NewRoomActor`/`NewRegistry`/`NewWSHandler`/`NewRaceHandler` (and the mechanical test-fixture churn across `internal/room`/`internal/ws`/`internal/race`/`internal/httpserver` that came with it — a `testLogger` package-level var added to each package's test helpers). **A real architecture gap surfaced and resolved during implementation, not left as a known limitation**: the spec called for the per-request summary line to include `user_id` "if `middleware.Auth` already ran," but `RequestLog` wraps the whole mux from outside while `Auth` is applied per-route deep inside `httpserver.RegisterRoutes` — Go's `context.WithValue` only propagates to handlers further down the call chain, never back up to an outer middleware's own stack frame after `next.ServeHTTP` returns (since `r.WithContext` returns a copy, it never mutates the `*http.Request` the outer frame is holding). Fixed with a small shared mutable recorder: `RequestLog` puts a `*requestLogAttrs` pointer into the request context before calling `next`; `Auth` (same package) writes `userID` into that same struct via a new unexported `setUserIDForLog`, so `RequestLog` reads the mutation back after `next.ServeHTTP` returns. Covered by a dedicated regression test (`TestRequestLog_IncludesUserIDWhenAuthRanInside`) proving the mechanism actually works, plus tests for `RequestID`'s id generation/uniqueness/header-echo and `RequestLog`'s field presence/absence across chains with and without `RequestID`/`Auth` upstream. `internal/app.go`'s `log.Fatalf`/`log.Fatal` (DB connect, migrate, `ListenAndServe`) deliberately left unconverted, per the spec's explicit scope. Verified: `go build ./...` and `go test ./...` clean across the whole module (no `go vet`/`gofmt`/`make docs` this run — a since-updated `/feature start` convention, no longer part of this workflow's default verification). Left one pre-existing, unrelated uncommitted change to `.claude/skills/feature/actions/start.md` (a prior session's edit removing `go vet`/`gofmt`/`make docs` from the verification step) out of this feature's commit, since it predates this feature and is unrelated to structured logging — still sitting uncommitted in the working tree. Next: whichever remaining Phase 3 spec is chosen next (`prometheus-metrics.md` touches some of the same files but is independent — order doesn't matter functionally) or a Phase 4 strong-plus item.
