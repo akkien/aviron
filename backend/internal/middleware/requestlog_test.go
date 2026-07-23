@@ -1,9 +1,11 @@
 package middleware_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,4 +138,65 @@ func TestRequestLog_OmitsUserIDWhenAuthRejects(t *testing.T) {
 	if _, ok := fields["user_id"]; ok {
 		t.Error("user_id present, want absent — Auth rejected the request")
 	}
+}
+
+// hijackableRecorder adds a fake Hijack to httptest.ResponseRecorder,
+// since ResponseRecorder itself doesn't implement http.Hijacker.
+type hijackableRecorder struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	return nil, nil, nil
+}
+
+// TestRequestLog_ForwardsHijack is a regression test for a real bug found
+// via a k6 load test run: statusWriter only embeds the http.ResponseWriter
+// *interface* (Header/Write/WriteHeader), so without an explicit Hijack
+// method, GET /ws's real WebSocket handshake (coder/websocket.Accept,
+// which requires http.Hijacker to take over the raw connection) failed
+// with 501 Not Implemented for every request that passed through
+// RequestLog — which wraps the entire mux, so every request.
+func TestRequestLog_ForwardsHijack(t *testing.T) {
+	logger, _ := newTestLogger()
+	rec := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	var hijackErr error
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter passed to the handler does not implement http.Hijacker")
+		}
+		_, _, hijackErr = hj.Hijack()
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	middleware.RequestLog(logger)(next).ServeHTTP(rec, req)
+
+	if hijackErr != nil {
+		t.Fatalf("Hijack() returned an error: %v", hijackErr)
+	}
+	if !rec.hijacked {
+		t.Error("underlying ResponseWriter's Hijack was never called — RequestLog's wrapper isn't forwarding it")
+	}
+}
+
+func TestRequestLog_HijackErrorsWhenUnderlyingWriterDoesNotSupportIt(t *testing.T) {
+	logger, _ := newTestLogger()
+	rec := httptest.NewRecorder() // does not implement http.Hijacker
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter passed to the handler does not implement http.Hijacker")
+		}
+		if _, _, err := hj.Hijack(); err == nil {
+			t.Error("Hijack() error = nil, want an error since the underlying ResponseWriter doesn't support it")
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	middleware.RequestLog(logger)(next).ServeHTTP(rec, req)
 }

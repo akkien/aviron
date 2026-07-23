@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -73,4 +76,23 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(status int) {
 	sw.status = status
 	sw.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack forwards to the underlying ResponseWriter's http.Hijacker.
+// Without this, statusWriter's embedded field is the http.ResponseWriter
+// *interface* (only Header/Write/WriteHeader), not the concrete value's
+// full method set — embedding alone does not promote Hijack, so anything
+// wrapped in a bare statusWriter would silently stop being hijackable.
+// GET /ws (internal/ws/endpoint.go, via coder/websocket.Accept) requires
+// exactly this to take over the raw connection for the WebSocket upgrade;
+// RequestLog wraps every request, /ws included, so without this forward
+// every real WebSocket handshake fails with 501 Not Implemented — found
+// via a real k6 load-test run, not a test suite (go test never exercises
+// a real hijack, only the fake wsConn in internal/ws's unit tests).
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := sw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return hj.Hijack()
 }
