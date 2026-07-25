@@ -346,7 +346,7 @@ export function RaceScreenSidebar({
         }))
     return (
       <div className="flex flex-col gap-3">
-        <div className="heading-pop font-heading text-2xl font-extrabold">Race finished</div>
+        <div className="heading-pop font-heading text-2xl font-extrabold">{raceDetail.name}</div>
         <ul className="flex flex-col gap-1.5 text-sm">
           {[...results]
             .sort((a, b) => (a.finish_rank ?? Infinity) - (b.finish_rank ?? Infinity))

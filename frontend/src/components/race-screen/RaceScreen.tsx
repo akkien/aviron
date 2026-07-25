@@ -120,7 +120,12 @@ export function RaceScreen({
       <div className="w-[70%]">
         {raceDetail && (
           <RaceTrack
-            status={raceDetail.status}
+            // raceDetail.status is a REST snapshot that's never re-fetched
+            // after a live race_finished message (same lag
+            // RaceScreenSidebar's own finished-state check already works
+            // around) — without this, the track's status pill gets stuck on
+            // "Race In Progress" for every already-connected player.
+            status={finished ? "finished" : raceDetail.status}
             participants={raceDetail.participants}
             raceState={raceState}
             distanceMeters={raceDetail.distance_meters}
