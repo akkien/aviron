@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
+import { BrowserRouter, Routes, Route } from "react-router-dom"
 
 import { LoginPage } from "@/pages/LoginPage"
 import { RacesPage } from "@/pages/RacesPage"
@@ -9,9 +9,8 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/races" element={<RacesPage />} />
+        <Route path="/" element={<RacesPage />} />
         <Route path="/races/:raceId" element={<RaceDetailPage />} />
-        <Route path="/" element={<Navigate to="/races" replace />} />
       </Routes>
     </BrowserRouter>
   )

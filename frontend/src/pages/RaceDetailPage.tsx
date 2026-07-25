@@ -72,7 +72,7 @@ export function RaceDetailPage() {
   }, [sessionToken, raceId, raceDetail])
 
   if (!raceId) {
-    return <Navigate to="/races" replace />
+    return <Navigate to="/" replace />
   }
 
   return (
@@ -86,7 +86,7 @@ export function RaceDetailPage() {
         onPromptTextFetched={setPromptText}
         onStarted={setPromptText}
         onRefresh={() => refreshStatus(raceId)}
-        onLeftRace={() => navigate("/races")}
+        onLeftRace={() => navigate("/")}
       />
     </div>
   )

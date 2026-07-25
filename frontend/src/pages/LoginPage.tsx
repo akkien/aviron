@@ -32,7 +32,7 @@ export function LoginPage() {
         body: JSON.stringify({ email, password } satisfies LoginRequest),
       })
       setToken(res.token)
-      navigate("/races")
+      navigate("/")
     } catch (err) {
       setError(err instanceof Error ? err.message : "login failed")
     } finally {
