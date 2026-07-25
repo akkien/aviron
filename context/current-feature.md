@@ -1,4 +1,4 @@
-# Current Feature
+# Current Feature: Race Router
 
 ## Status
 
@@ -6,19 +6,234 @@ Not Started
 
 ## Goals
 
-<!-- populated by /feature load -->
+- A new standalone process, `cmd/race-router`, sits in front of the pool of
+  `race-service` instances and routes every request/connection to the
+  instance that actually owns its `race_id` — once, up front — using
+  `redis-room-registry.md`'s registry (`Owner`, `room:events`) as the
+  source of truth. Second Phase 4 spec
+  (`context/features/phase4/phase-4-plan.md`), depends on the just-shipped
+  Redis Room Registry feature.
+- `internal/race/handler.go` and `internal/ws/endpoint.go` need **zero**
+  changes — the router proxies a connection to the correct instance
+  *before* either file ever sees a request for a room it doesn't own, so
+  both can keep assuming "I own whatever room I'm asked about," exactly as
+  they do today.
+- A room-less request (register, login, browse races, leaderboard) is
+  round-robin'd across every configured backend — no registry lookup.
+- A room-scoped request/connection (a `race_id` in the path or the `GET
+  /ws` query string) is resolved via an in-memory cache backed by a lazy
+  `Owner()` call (short TTL) and a live `room:events` subscription (fast
+  path) — a genuine miss (room never existed, finished, cancelled) gets a
+  `404` straight from the router, never forwarded to a backend that's
+  certain to reject it anyway.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- Spec: `context/features/phase4/horizontal-scaling/race-router.md`.
+  Replaces the originally-planned `cross-instance-relay.md` (superseded —
+  see that file's own "Superseded" section): instead of relaying every
+  message after the fact, the router picks the correct instance once, up
+  front, via `net/http/httputil.ReverseProxy` — which already forwards a
+  hijacked/upgraded connection once a backend responds `101 Switching
+  Protocols`, so the WebSocket case needs no bespoke socket-splicing code.
+- Not a second "API Gateway" reopening `project-overview.md` §8's decision
+  — that decision was about not splitting WS termination from room
+  simulation; this is a routing/reverse-proxy layer in front of instances
+  that each still do REST + WS termination + room simulation together,
+  unchanged. It never terminates the application-level WebSocket or runs
+  any room logic itself.
+- Confirmed via grep: `cmd/race-router` doesn't exist yet; `internal/race`'s
+  REST routes are `POST /races`, `GET /races`, `POST /races/{id}/join`,
+  `POST /races/{id}/start`, `GET /races/{id}/text`, `GET /races/{id}`
+  (race_id as a path segment), plus `GET /ws?race_id=...` (query param) —
+  the router has no access to the backend's own `http.ServeMux` pattern
+  table (it's a separate process), so it needs its own small parser to
+  tell a room-scoped request apart from a room-less one.
+- **Real gap found during grounding, not flagged by the spec itself**:
+  `internal/roomlocator.Locator` (shipped in `redis-room-registry.md`) has
+  `Owner` but no way to subscribe to `room:events` — its `*redis.Client` is
+  a private field and there's no exported event type. The spec's own Data
+  sketch (`locator *roomlocator.Locator // Owner(); also subscribes to
+  room:events`) isn't buildable against the code as shipped. This spec
+  extends `internal/roomlocator`: the already-defined-but-unexported
+  `roomEvent` struct (fields are already exported — `Type`/`RaceID`/
+  `InstanceID`) becomes exported `RoomEvent`, and a new
+  `Locator.SubscribeRoomEvents(ctx) (<-chan RoomEvent, error)` method
+  encapsulates the `Subscribe`+decode loop, so `race-router` never needs
+  raw `*redis.Client` access or its own copy of the wire schema.
+- **Real gap found during grounding**: the spec's Concurrency section
+  claims `watchRoomEvents` is "torn down on process shutdown (SIGTERM →
+  root `context.Context` cancellation), the same pattern this codebase
+  already uses everywhere else" — confirmed via grep that this is false:
+  no `signal.Notify`/SIGTERM handling exists anywhere in this codebase
+  today. `internal/app.Run` just blocks forever on `http.ListenAndServe`
+  with `context.Background()`. There is no existing pattern to mirror;
+  confirm at `start` whether to build new signal handling just for this
+  binary or match `cmd/server`'s existing simpler (no graceful shutdown)
+  model for consistency between the two.
+- **Real gap found during grounding**: `Owner()` returns this project's
+  `InstanceID` — an opaque random base58 string (same generator as race
+  ids), not a `host:port`. But the router's `backends`/proxy target needs
+  an actual reachable address. Resolved here: in any real multi-instance
+  deployment, each `race-service` instance's `INSTANCE_ID` must be set
+  explicitly to its own reachable `host:port` (not left auto-generated) so
+  `Owner()`'s answer is directly usable as a proxy target — this closes the
+  open question flagged in `redis-room-registry.md`'s own History entry.
+  No extra validation against the configured `backends` list is added
+  (over-engineering for this project's scale) — the returned instance id
+  is trusted directly as the address.
+- "Round-robin'd across every **healthy** backend" has no corresponding
+  health-check mechanism anywhere in the spec's Data or Testing sections —
+  interpreted as descriptive, not a requirement: round robin cycles over
+  the full static `backends` list unconditionally, no active health
+  checking in this first version.
+- `httputil.ReverseProxy`'s `Director` is `func(*http.Request)` — it can't
+  itself short-circuit a response, so it can't return the "genuine miss"
+  `404` on its own. Resolved: `Router.ServeHTTP` resolves the target address
+  first (round robin or cache/`Owner`), writes `404` directly and returns
+  without ever invoking the proxy on a genuine miss, and otherwise stashes
+  the resolved address on the request's context for the shared
+  `ReverseProxy`'s `Director` to read and apply to `req.URL`.
+- Mirrors `cmd/server`'s existing `cmd/<x>` (thin main) + `internal/<x>`
+  (real logic) split, not the spec's literal `cmd/race-router/router.go`
+  sketch — `internal/racerouter` holds `Config`/`Router`/`Director`/
+  `watchRoomEvents` and is where all the tests live; `cmd/race-router/
+  main.go` stays a 2-line entrypoint like `cmd/server/main.go` already is.
+  No Handler/Service/Repository layering (`coding-standards.md` scopes that
+  convention to REST *domain* features in `internal/<domain>`) — this is
+  routing infrastructure, the same reasoning that already keeps
+  `internal/room` out of that layering.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. `internal/roomlocator/locator.go` — rename unexported `roomEvent` →
+   exported `RoomEvent` (no field changes needed, already exported); add
+   `Locator.SubscribeRoomEvents(ctx context.Context) (<-chan RoomEvent,
+   error)`: `client.Subscribe(ctx, roomEventsChannel)`, confirm via
+   `sub.Receive(ctx)`, then a goroutine decoding `sub.Channel()` onto a
+   returned channel, skipping (not erroring on) malformed payloads,
+   closing the output channel and the subscription when `ctx` is done or
+   the source channel closes. Update `internal/roomlocator/locator_test.go`'s
+   existing `decodeRoomEvent` helper for the rename; add a new test:
+   `SubscribeRoomEvents` receives both a `created` and a `removed` event
+   published by `Claim`/`Release`, and its output channel closes cleanly
+   on context cancellation (no goroutine leak).
+2. New `internal/racerouter/config.go` — `Config{ListenAddr, RedisURL,
+   Backends []string, CacheTTL time.Duration}`, loaded from env
+   (`RACE_ROUTER_LISTEN_ADDR` default `:8090`, `REDIS_URL` same default as
+   the backend, `RACE_SERVICE_INSTANCES` comma-separated **required** — fail
+   fast if empty, `ROUTING_CACHE_TTL` default `30s`).
+3. New `internal/racerouter/router.go`:
+   - A small structural `RoomLocator` interface local to this package
+     (`Owner`, `SubscribeRoomEvents`) — mirrors `internal/room.RoomLocator`'s
+     naming/shape (different capabilities, different package, no import
+     overlap: `race-router` never imports `internal/room`) so tests can
+     substitute a fake instead of a real `*roomlocator.Locator`.
+   - `cacheEntry{instance string, expiresAt time.Time}`, `Router{mu
+     sync.RWMutex, cache map[string]cacheEntry, locator RoomLocator,
+     backends []string, next atomic.Uint64, cacheTTL time.Duration, proxy
+     *httputil.ReverseProxy, logger *slog.Logger}`.
+   - `extractRaceID(r *http.Request) (raceID string, ok bool)` — `GET
+     /ws` reads the `race_id` query param; `/races/{id}...` (anything
+     under `/races/` beyond the bare `POST /races`/`GET /races`) reads the
+     second path segment; everything else is room-less.
+   - `resolveTarget(ctx, raceID string) (addr string, found bool, err error)`
+     — cache hit (RLock, unexpired) → return; miss → `locator.Owner`,
+     write-through the cache (Lock) under the same short TTL if found.
+     **Three-way result, not two** (a bug caught during `load`'s own review,
+     before any code existed — the original two-return-value sketch
+     collapsed "Redis said not found" and "Redis is unreachable" into the
+     same `false`): `found=false, err=nil` is a genuine miss (room never
+     existed, finished, cancelled); `err != nil` is a lookup failure
+     (Redis down/timeout) — these must produce different HTTP statuses.
+   - `nextBackend() string` — `atomic.Uint64.Add(1) % len(backends)`.
+   - `ServeHTTP(w, r)` — resolves the target (round robin for room-less,
+     `resolveTarget` for room-scoped): a genuine miss (`found=false, err=nil`)
+     writes `404` directly; a lookup error (`err != nil`) writes `503`
+     (tells the client/LB to retry, rather than "this race is permanently
+     gone"); otherwise stashes the address via `context.WithValue` and
+     delegates to `rt.proxy.ServeHTTP`.
+   - `Director(req *http.Request)` — reads the stashed address from
+     `req.Context()`, sets `req.URL.Scheme = "http"` / `req.URL.Host =
+     addr`.
+   - `watchRoomEvents(ctx context.Context)` — one process-lifetime
+     goroutine: `locator.SubscribeRoomEvents(ctx)`, `created` writes/
+     refreshes a cache entry, `removed` deletes one.
+4. New `internal/racerouter/run.go` (mirrors `internal/app.go`'s shape) —
+   `Run(cfg Config)`: connects Redis (`internal/redisclient.NewClient`,
+   reused as-is), builds `roomlocator.NewLocator(client, "race-router")`
+   (the instance id is inert here — this process never calls
+   `Claim`/`Refresh`/`Release`), constructs `Router`, starts
+   `watchRoomEvents` in a goroutine, `http.ListenAndServe(cfg.ListenAddr,
+   router)` — blocks forever with `context.Background()`, matching
+   `cmd/server`'s existing model (no new signal handling, pending the
+   `start`-time confirmation flagged in Explain).
+5. New `cmd/race-router/main.go` — 2 lines: `cfg :=
+   racerouter.LoadConfig()`, `racerouter.Run(cfg)`, mirroring
+   `cmd/server/main.go` exactly.
+6. Tests:
+   - `internal/racerouter/config_test.go` — env var parsing/defaults,
+     missing `RACE_SERVICE_INSTANCES` fails fast.
+   - `internal/racerouter/router_test.go` — against a fake `RoomLocator`
+     (no real Redis): room-less request → round robin across calls;
+     cache hit → correct host, `Owner` not called again; cache miss →
+     `Owner` called once, cache populated, correct host; genuine miss →
+     `404`, proxy never invoked. `-race` coverage: concurrent `ServeHTTP`
+     calls racing a simulated `watchRoomEvents` writer, and concurrent
+     cache misses for the same `raceID` racing each other's
+     write-after-lookup.
+   - `internal/racerouter/router_integration_test.go` — a real `Router` in
+     front of two `httptest.Server` fakes, confirming both the round-robin
+     and room-scoped paths land on the expected backend.
+7. Not built here, confirmed against `phase-4-plan.md`'s own dependency
+   ordering: `multi-instance-dev-setup.md` (Redis in `docker-compose.yml`
+   — already added by `redis-room-registry.md` — plus running 2 real
+   `cmd/server` processes and this router together) is the next spec, and
+   is this feature's actual higher-value acceptance test; no
+   Makefile/docker-compose changes for a second binary happen in this
+   feature.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- Sits behind whatever terminates TLS in a real deployment — this spec is
+  the room-aware routing decision only, not TLS/DDoS/rate-limiting (stays
+  the outer layer's job, e.g. Phase 5's nginx-ingress).
+- Single Redis instance, same disclosed simplification as
+  `redis-room-registry.md` — this router's cache depends on the same
+  registry being reachable that owning instances do, so it inherits that
+  spec's single-point-of-failure risk exactly, not a new one.
+- Graceful draining on scale-down (making `backends` dynamic instead of
+  static) is explicitly out of scope for this first version — worth its
+  own follow-up spec once Phase 5's Kubernetes work makes instance count
+  change at runtime.
+- Backend addresses (`RACE_SERVICE_INSTANCES` entries and `Owner()`'s
+  returned instance ids) are plain `host:port`, proxied over `http://` —
+  no TLS between the router and backends locally, consistent with TLS
+  being the outer layer's job per the Notes above.
+- **`race-router` is fully stateless, so running N replicas behind a load
+  balancer costs nothing architecturally** (each replica independently
+  caches and subscribes, no coordination needed) — but this project only
+  ever runs **one**. Single point of failure for routing, accepted
+  deliberately rather than built around, consistent with this feature's
+  scope (this spec builds one process; redundancy isn't part of it).
+- **Disclosed limitation, not fixed by this spec or anything else in this
+  project: an owning instance crashing mid-race (not a graceful shutdown)
+  is unrecoverable.** A room's entire live state exists only in that one
+  instance's RAM (no leader election, no replication — deliberate per
+  `redis-room-registry.md`) — an ungraceful crash (OOM, panic, node
+  failure) gives it no chance to persist anything, and `finishRace`'s
+  Postgres transaction never runs, so the race's results are lost, not
+  just delayed. Detection is also slow: the dead instance's Redis
+  ownership key looks valid until its TTL lapses (up to ~80s: the last
+  heartbeat gap plus the 60s claim TTL), so every reconnect attempt in
+  that window gets proxied straight to a dead instance (a `502` from
+  `ReverseProxy`'s own dial failure) before `Owner()` finally reports
+  not-found and players just see "race not found" — indistinguishable
+  from a race that never existed. Same category of accepted risk as the
+  single-Redis-instance SPOF already disclosed above, just not previously
+  written down; actually fixing it (periodic room-state snapshotting +
+  reassigning a dead room to a new owner) would be a materially bigger
+  feature, out of this project's scope.
 
 ## History
 
