@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 
 import { apiFetch } from "@/lib/api"
+import { floatStyle } from "@/lib/utils"
 import type { LeaderboardTopResponse } from "@/types/leaderboard"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -45,7 +46,7 @@ export function RankedLeaderboard() {
   const totalPages = data?.total_pages ?? 1
 
   return (
-    <Card className="h-full">
+    <Card className="h-full card-floating" style={floatStyle(7, -2)}>
       <CardHeader className="flex-row items-center justify-between px-4 pb-0">
         <CardTitle className="text-base">Leaderboard</CardTitle>
         <div className="flex items-center gap-1.5">

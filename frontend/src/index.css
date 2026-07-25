@@ -88,3 +88,29 @@
     opacity: 0;
   }
 }
+
+/* Blue-tinted, wider-spread shadow so cards read as resting on
+   WaterBackground rather than a flat page color. */
+.shadow-water {
+  box-shadow:
+    0 12px 28px -10px rgba(0, 149, 214, 0.45),
+    0 4px 10px -6px rgba(0, 149, 214, 0.3);
+}
+
+/* Gentle up/down bob, like a card floating on the water surface. Duration
+   and delay are set per instance via --card-float-duration/-delay so
+   multiple cards on the same page don't bob in lockstep. */
+@keyframes card-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+.card-floating {
+  animation: card-float var(--card-float-duration, 6s) ease-in-out infinite;
+  animation-delay: var(--card-float-delay, 0s);
+}

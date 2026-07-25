@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { apiFetch } from "@/lib/api"
+import { floatStyle } from "@/lib/utils"
 import type { LeaderboardMeResponse } from "@/types/leaderboard"
 
 // Only 3 rows ship — the mockup's 4th stat (Avg Accuracy) is dropped
@@ -26,7 +27,7 @@ export function StatCards() {
   }, [])
 
   return (
-    <Card className="h-full">
+    <Card className="h-full card-floating" style={floatStyle(6, -0.5)}>
       <CardHeader className="px-4 pb-0">
         <CardTitle className="text-base">Your Stats</CardTitle>
       </CardHeader>

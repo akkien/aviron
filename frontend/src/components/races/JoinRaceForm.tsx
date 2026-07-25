@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react"
 
 import { apiFetch } from "@/lib/api"
+import { floatStyle } from "@/lib/utils"
 import type { JoinRaceResponse } from "@/types/race"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -35,7 +36,7 @@ export function JoinRaceForm({ onJoined }: JoinRaceFormProps) {
   }
 
   return (
-    <Card>
+    <Card className="card-floating" style={floatStyle(5.5, -1)}>
       <CardHeader className="px-4 pb-0">
         <CardTitle className="text-base">Have a race ID?</CardTitle>
       </CardHeader>

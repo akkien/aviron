@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 
 import { laneColor } from "@/lib/colors"
 import { apiFetch } from "@/lib/api"
+import { floatStyle } from "@/lib/utils"
 import type { JoinRaceResponse, ListOpenRacesResponse, OpenRace } from "@/types/race"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -66,7 +67,7 @@ export function OpenRacesList({ onJoined }: OpenRacesListProps) {
     // to match the row's height (RacesPage's items-stretch) and scroll
     // *internally* if there are more races than fit, instead of growing
     // past its row and forcing the whole page to scroll.
-    <Card className="flex h-full flex-col">
+    <Card className="flex h-full flex-col card-floating" style={floatStyle(7.5, -3)}>
       <CardHeader className="shrink-0 px-4 pb-0">
         <CardTitle className="text-base">Open Races</CardTitle>
       </CardHeader>
