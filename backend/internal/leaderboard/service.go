@@ -36,45 +36,46 @@ func (s *LeaderboardService) GetMyStats(ctx context.Context, userID string) (Lea
 	}, nil
 }
 
-// defaultLimit/maxLimit bound GetTop's result size. A caller-requested
-// limit is clamped, not rejected, so an oversized request degrades to the
-// max rather than needing its own error path.
-const (
-	defaultLimit = 20
-	maxLimit     = 100
-)
+// pageSize is fixed, not caller-configurable — the client only ever asks
+// for a page number, matching the frontend's own fixed 5-per-page display
+// rather than exposing a generic limit/offset pair over the wire.
+const pageSize = 5
 
-// GetTop returns window's ranked entries (wins descending, AvgWPM as
-// tiebreaker — repo.GetTop already returns them in that order, this only
-// assigns rank by position). windowParam is raw, caller-supplied
+// GetTop returns window's ranked entries for one page (wins descending,
+// AvgWPM as tiebreaker — repo.GetTop already returns them in that order,
+// this only assigns rank by absolute position, offset-aware so page 2's
+// first entry is rank 6, not rank 1). windowParam is raw, caller-supplied
 // query-string input; anything other than "alltime"/"weekly" returns a
 // field-keyed error the same way AuthService.Register's validation does,
 // not a generic 500 — mirrors that method's (data, fieldErrs, err) shape.
-func (s *LeaderboardService) GetTop(ctx context.Context, windowParam string, limit int) (resp LeaderboardTopResponse, fieldErrs map[string]string, err error) {
+// page is 1-indexed; anything less than 1 is treated as 1 rather than
+// rejected, the same "clamp, don't reject" precedent this method already
+// used for limit before pagination replaced it.
+func (s *LeaderboardService) GetTop(ctx context.Context, windowParam string, page int) (resp LeaderboardTopResponse, fieldErrs map[string]string, err error) {
 	window := Window(windowParam)
 	if window != WindowAllTime && window != WindowWeekly {
 		return LeaderboardTopResponse{}, map[string]string{"window": "must be alltime or weekly"}, nil
 	}
 
-	switch {
-	case limit <= 0:
-		limit = defaultLimit
-	case limit > maxLimit:
-		limit = maxLimit
+	if page < 1 {
+		page = 1
 	}
+	offset := (page - 1) * pageSize
 
-	entries, err := s.repo.GetTop(ctx, window, limit)
+	entries, total, err := s.repo.GetTop(ctx, window, pageSize, offset)
 	if err != nil {
 		return LeaderboardTopResponse{}, nil, err
 	}
 
 	resp = LeaderboardTopResponse{
-		Window:  string(window),
-		Entries: make([]LeaderboardEntryResponse, len(entries)),
+		Window:     string(window),
+		Page:       page,
+		TotalPages: max(1, (total+pageSize-1)/pageSize),
+		Entries:    make([]LeaderboardEntryResponse, len(entries)),
 	}
 	for i, e := range entries {
 		resp.Entries[i] = LeaderboardEntryResponse{
-			Rank:        i + 1,
+			Rank:        offset + i + 1,
 			UserID:      e.UserID,
 			DisplayName: e.DisplayName,
 			Races:       e.Races,

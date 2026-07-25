@@ -42,11 +42,11 @@ func (h *LeaderboardHandler) Me(w http.ResponseWriter, r *http.Request) {
 
 // Top godoc
 // @Summary Get the ranked leaderboard
-// @Description Returns the top entries for the requested window, ranked by wins (avg WPM as tiebreaker).
+// @Description Returns one page (5 entries) of the requested window, ranked by wins (avg WPM as tiebreaker).
 // @Tags leaderboard
 // @Produce json
 // @Param window query string true "alltime or weekly"
-// @Param limit query int false "max entries to return (default 20, capped at 100)"
+// @Param page query int false "1-indexed page number (default 1)"
 // @Success 200 {object} LeaderboardTopResponse
 // @Failure 400 {object} map[string]interface{} "field-keyed validation errors"
 // @Failure 401 {object} map[string]string "error: unauthorized"
@@ -58,11 +58,11 @@ func (h *LeaderboardHandler) Top(w http.ResponseWriter, r *http.Request) {
 	}
 
 	windowParam := r.URL.Query().Get("window")
-	// A missing/unparseable limit is treated as "not provided," not an
-	// error — GetTop clamps a zero value to its own default.
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	// A missing/unparseable page is treated as "not provided," not an
+	// error — GetTop clamps anything less than 1 to page 1.
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 
-	resp, fieldErrs, err := h.svc.GetTop(r.Context(), windowParam, limit)
+	resp, fieldErrs, err := h.svc.GetTop(r.Context(), windowParam, page)
 	if len(fieldErrs) > 0 {
 		httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{"errors": fieldErrs})
 		return

@@ -61,7 +61,7 @@ func TestService_GetTop_InvalidWindow_ReturnsFieldError(t *testing.T) {
 	}
 }
 
-func TestService_GetTop_AssignsRankByPosition(t *testing.T) {
+func TestService_GetTop_FirstPage_AssignsRankByPosition(t *testing.T) {
 	repo := newFakeRepository()
 	repo.top[leaderboard.WindowAllTime] = []leaderboard.Entry{
 		{UserID: "user-1", DisplayName: "Alice", Races: 5, Wins: 3, AvgWPM: 60},
@@ -69,7 +69,7 @@ func TestService_GetTop_AssignsRankByPosition(t *testing.T) {
 	}
 	svc := leaderboard.NewLeaderboardService(repo)
 
-	resp, fieldErrs, err := svc.GetTop(context.Background(), "alltime", 10)
+	resp, fieldErrs, err := svc.GetTop(context.Background(), "alltime", 1)
 	if err != nil {
 		t.Fatalf("GetTop() error = %v", err)
 	}
@@ -78,6 +78,9 @@ func TestService_GetTop_AssignsRankByPosition(t *testing.T) {
 	}
 	if resp.Window != "alltime" {
 		t.Errorf("Window = %q, want %q", resp.Window, "alltime")
+	}
+	if resp.Page != 1 || resp.TotalPages != 1 {
+		t.Errorf("Page = %d, TotalPages = %d, want 1 and 1", resp.Page, resp.TotalPages)
 	}
 	if len(resp.Entries) != 2 {
 		t.Fatalf("len(Entries) = %d, want 2", len(resp.Entries))
@@ -90,39 +93,42 @@ func TestService_GetTop_AssignsRankByPosition(t *testing.T) {
 	}
 }
 
-func TestService_GetTop_NonPositiveLimit_UsesDefault(t *testing.T) {
+func TestService_GetTop_SecondPage_RankContinuesFromOffset(t *testing.T) {
 	repo := newFakeRepository()
-	entries := make([]leaderboard.Entry, 25)
+	entries := make([]leaderboard.Entry, 12)
 	for i := range entries {
 		entries[i] = leaderboard.Entry{UserID: "user"}
 	}
 	repo.top[leaderboard.WindowWeekly] = entries
 	svc := leaderboard.NewLeaderboardService(repo)
 
-	resp, _, err := svc.GetTop(context.Background(), "weekly", 0)
+	resp, _, err := svc.GetTop(context.Background(), "weekly", 2)
 	if err != nil {
 		t.Fatalf("GetTop() error = %v", err)
 	}
-	if len(resp.Entries) != 20 {
-		t.Errorf("len(Entries) = %d, want default limit 20", len(resp.Entries))
+	if resp.Page != 2 || resp.TotalPages != 3 {
+		t.Errorf("Page = %d, TotalPages = %d, want 2 and 3 (12 entries / 5 per page)", resp.Page, resp.TotalPages)
+	}
+	if len(resp.Entries) != 5 {
+		t.Fatalf("len(Entries) = %d, want 5", len(resp.Entries))
+	}
+	// Page 2 starts at offset 5, so its first entry is rank 6 — not rank 1.
+	if resp.Entries[0].Rank != 6 {
+		t.Errorf("Entries[0].Rank = %d, want 6 (offset 5 + position 1)", resp.Entries[0].Rank)
 	}
 }
 
-func TestService_GetTop_OversizedLimit_ClampedToMax(t *testing.T) {
+func TestService_GetTop_PageLessThanOne_DefaultsToPageOne(t *testing.T) {
 	repo := newFakeRepository()
-	entries := make([]leaderboard.Entry, 150)
-	for i := range entries {
-		entries[i] = leaderboard.Entry{UserID: "user"}
-	}
-	repo.top[leaderboard.WindowAllTime] = entries
+	repo.top[leaderboard.WindowAllTime] = []leaderboard.Entry{{UserID: "user-1"}}
 	svc := leaderboard.NewLeaderboardService(repo)
 
-	resp, _, err := svc.GetTop(context.Background(), "alltime", 1000)
+	resp, _, err := svc.GetTop(context.Background(), "alltime", 0)
 	if err != nil {
 		t.Fatalf("GetTop() error = %v", err)
 	}
-	if len(resp.Entries) != 100 {
-		t.Errorf("len(Entries) = %d, want max limit 100", len(resp.Entries))
+	if resp.Page != 1 {
+		t.Errorf("Page = %d, want 1", resp.Page)
 	}
 }
 

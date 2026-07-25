@@ -51,7 +51,15 @@ const topAllTimeQuery = `
 	JOIN users u ON u.id = la.user_id
 	WHERE la.total_races > 0
 	ORDER BY la.total_wins DESC, avg_wpm DESC
-	LIMIT $1
+	LIMIT $1 OFFSET $2
+`
+
+// countAllTimeQuery mirrors topAllTimeQuery's WHERE clause with no
+// ORDER BY/LIMIT/OFFSET — the total GetTop needs to compute a page count,
+// since a windowed/offset query alone can't tell the caller how many pages
+// exist beyond the one it fetched.
+const countAllTimeQuery = `
+	SELECT count(*) FROM leaderboard_alltime WHERE total_races > 0
 `
 
 // topWeeklyQuery has no maintained aggregate to read from, so it's computed
@@ -69,21 +77,40 @@ const topWeeklyQuery = `
 	WHERE r.status = 'finished' AND r.ended_at >= now() - interval '7 days'
 	GROUP BY u.id, u.display_name
 	ORDER BY wins DESC, avg_wpm DESC
-	LIMIT $1
+	LIMIT $1 OFFSET $2
 `
 
-// GetTop returns window's top `limit` entries, already ordered by wins
-// (avg WPM as tiebreaker) — LeaderboardService only assigns rank by
-// position, it never re-sorts.
-func (r *LeaderboardRepository) GetTop(ctx context.Context, window leaderboard.Window, limit int) ([]leaderboard.Entry, error) {
-	query := topAllTimeQuery
+// countWeeklyQuery mirrors topWeeklyQuery's WHERE clause — count(DISTINCT
+// user_id) matches that query's GROUP BY u.id, since each distinct user
+// becomes exactly one row there.
+const countWeeklyQuery = `
+	SELECT count(DISTINCT rp.user_id)
+	FROM race_participants rp
+	JOIN races r ON r.id = rp.race_id
+	WHERE r.status = 'finished' AND r.ended_at >= now() - interval '7 days'
+`
+
+// GetTop returns window's entries for one page (limit rows starting at
+// offset), already ordered by wins (avg WPM as tiebreaker) —
+// LeaderboardService only assigns rank by absolute position, it never
+// re-sorts. total is a separate COUNT query rather than a window function
+// (e.g. count(*) OVER()) — a page beyond the last one returns zero rows,
+// and a window function's count would be unavailable exactly when the
+// caller needs it most to realize the requested page doesn't exist.
+func (r *LeaderboardRepository) GetTop(ctx context.Context, window leaderboard.Window, limit, offset int) ([]leaderboard.Entry, int, error) {
+	query, countQuery := topAllTimeQuery, countAllTimeQuery
 	if window == leaderboard.WindowWeekly {
-		query = topWeeklyQuery
+		query, countQuery = topWeeklyQuery, countWeeklyQuery
 	}
 
-	rows, err := r.pool.Query(ctx, query, limit)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres: get top leaderboard: count: %w", err)
+	}
+
+	rows, err := r.pool.Query(ctx, query, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: get top leaderboard: %w", err)
+		return nil, 0, fmt.Errorf("postgres: get top leaderboard: %w", err)
 	}
 	defer rows.Close()
 
@@ -91,13 +118,13 @@ func (r *LeaderboardRepository) GetTop(ctx context.Context, window leaderboard.W
 	for rows.Next() {
 		var e leaderboard.Entry
 		if err := rows.Scan(&e.UserID, &e.DisplayName, &e.Races, &e.Wins, &e.AvgWPM); err != nil {
-			return nil, fmt.Errorf("postgres: get top leaderboard: scan: %w", err)
+			return nil, 0, fmt.Errorf("postgres: get top leaderboard: scan: %w", err)
 		}
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: get top leaderboard: rows: %w", err)
+		return nil, 0, fmt.Errorf("postgres: get top leaderboard: rows: %w", err)
 	}
 
-	return entries, nil
+	return entries, total, nil
 }

@@ -123,8 +123,39 @@ func TestHandler_Top_OK(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if resp.Window != "alltime" || len(resp.Entries) != 1 || resp.Entries[0].Rank != 1 {
-		t.Errorf("resp = %+v, want window=alltime, one rank-1 entry", resp)
+	if resp.Window != "alltime" || resp.Page != 1 || len(resp.Entries) != 1 || resp.Entries[0].Rank != 1 {
+		t.Errorf("resp = %+v, want window=alltime, page=1, one rank-1 entry", resp)
+	}
+}
+
+func TestHandler_Top_PageQueryParam(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	entries := make([]leaderboard.Entry, 7)
+	for i := range entries {
+		entries[i] = leaderboard.Entry{UserID: "user"}
+	}
+	repo.top[leaderboard.WindowAllTime] = entries
+	h := newTestHandler(repo)
+	token := signTestToken(t, secret, "user-1")
+
+	req := httptest.NewRequest(http.MethodGet, "/leaderboard?window=alltime&page=2", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Top)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp leaderboard.LeaderboardTopResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	// 7 entries, 5 per page: page 2 has the remaining 2, first ranked 6.
+	if resp.Page != 2 || resp.TotalPages != 2 || len(resp.Entries) != 2 || resp.Entries[0].Rank != 6 {
+		t.Errorf("resp = %+v, want page=2, total_pages=2, 2 entries starting at rank 6", resp)
 	}
 }
 

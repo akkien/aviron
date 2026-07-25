@@ -24,8 +24,12 @@ type LeaderboardEntryResponse struct {
 
 // LeaderboardTopResponse is GET /leaderboard's response body — the
 // requested window is echoed back so a client doesn't have to remember
-// what it asked for.
+// what it asked for. Page/TotalPages are server-computed (fixed page size,
+// see LeaderboardService.pageSize) — the client only ever asks for a page
+// number, not an offset or limit.
 type LeaderboardTopResponse struct {
-	Window  string                     `json:"window"`
-	Entries []LeaderboardEntryResponse `json:"entries"`
+	Window     string                     `json:"window"`
+	Page       int                        `json:"page"`
+	TotalPages int                        `json:"total_pages"`
+	Entries    []LeaderboardEntryResponse `json:"entries"`
 }

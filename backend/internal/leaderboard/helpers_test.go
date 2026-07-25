@@ -30,15 +30,23 @@ func (f *fakeRepository) GetUserStats(ctx context.Context, userID string) (leade
 	return f.stats[userID], nil
 }
 
-// GetTop truncates to limit, mirroring the real repository's SQL LIMIT —
-// lets a test seed more entries than a given limit and assert truncation.
-func (f *fakeRepository) GetTop(ctx context.Context, window leaderboard.Window, limit int) ([]leaderboard.Entry, error) {
+// GetTop slices [offset:offset+limit], mirroring the real repository's SQL
+// LIMIT/OFFSET — lets a test seed more entries than one page and assert
+// windowing/total both behave correctly. total is always the full seeded
+// count for window, regardless of what page is sliced out.
+func (f *fakeRepository) GetTop(ctx context.Context, window leaderboard.Window, limit, offset int) ([]leaderboard.Entry, int, error) {
 	if f.err != nil {
-		return nil, f.err
+		return nil, 0, f.err
 	}
-	entries := f.top[window]
-	if len(entries) > limit {
-		entries = entries[:limit]
+	all := f.top[window]
+	total := len(all)
+
+	if offset >= total {
+		return nil, total, nil
 	}
-	return entries, nil
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return all[offset:end], total, nil
 }

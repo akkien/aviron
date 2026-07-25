@@ -39,8 +39,11 @@ type LeaderboardRepository interface {
 	// account, not an error condition.
 	GetUserStats(ctx context.Context, userID string) (Stats, error)
 
-	// GetTop returns the top `limit` entries for window, ranked by wins
-	// (AvgWPM as tiebreaker) — already sorted, LeaderboardService only
-	// needs to assign rank by position.
-	GetTop(ctx context.Context, window Window, limit int) ([]Entry, error)
+	// GetTop returns one page of entries for window (limit rows starting
+	// at offset), ranked by wins (AvgWPM as tiebreaker) — already sorted,
+	// LeaderboardService only needs to assign rank by absolute position
+	// (offset-aware, not just position within the page). total is the
+	// count of all entries matching window, regardless of limit/offset,
+	// so the caller can compute a total page count.
+	GetTop(ctx context.Context, window Window, limit, offset int) (entries []Entry, total int, err error)
 }
