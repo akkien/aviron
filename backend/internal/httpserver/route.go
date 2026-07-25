@@ -53,6 +53,7 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	leaderboardHandler := leaderboard.NewLeaderboardHandler(leaderboardSvc)
 
 	server.Handle("GET /leaderboard/me", requireAuth(http.HandlerFunc(leaderboardHandler.Me)))
+	server.Handle("GET /leaderboard", requireAuth(http.HandlerFunc(leaderboardHandler.Top)))
 
 	// Not wrapped in requireAuth: this endpoint authenticates via the
 	// query-string session_token (websocket/ws-endpoint.md), not the

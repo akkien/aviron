@@ -39,3 +39,65 @@ func (r *LeaderboardRepository) GetUserStats(ctx context.Context, userID string)
 
 	return s, nil
 }
+
+// topAllTimeQuery reads straight off the already-maintained leaderboard_alltime
+// aggregate (kept current by RaceRepository.FinishRace's own transaction) —
+// total_races > 0 both guards the division and is implied anyway, since a
+// row only ever exists once FinishRace has inserted one.
+const topAllTimeQuery = `
+	SELECT u.id, u.display_name, la.total_races, la.total_wins,
+	       la.total_pace_watt_sum / la.total_races AS avg_wpm
+	FROM leaderboard_alltime la
+	JOIN users u ON u.id = la.user_id
+	WHERE la.total_races > 0
+	ORDER BY la.total_wins DESC, avg_wpm DESC
+	LIMIT $1
+`
+
+// topWeeklyQuery has no maintained aggregate to read from, so it's computed
+// live from race_participants/races each call — a rolling 7-day window
+// (ranked-leaderboard.md's "no timezone/calendar-boundary handling needed"
+// reasoning), not a calendar week. status = 'finished' excludes cancelled
+// races a user may have joined, which never got a finish_rank.
+const topWeeklyQuery = `
+	SELECT u.id, u.display_name, count(*) AS races,
+	       count(*) FILTER (WHERE rp.finish_rank = 1) AS wins,
+	       avg(rp.avg_pace_watt) AS avg_wpm
+	FROM race_participants rp
+	JOIN races r ON r.id = rp.race_id
+	JOIN users u ON u.id = rp.user_id
+	WHERE r.status = 'finished' AND r.ended_at >= now() - interval '7 days'
+	GROUP BY u.id, u.display_name
+	ORDER BY wins DESC, avg_wpm DESC
+	LIMIT $1
+`
+
+// GetTop returns window's top `limit` entries, already ordered by wins
+// (avg WPM as tiebreaker) — LeaderboardService only assigns rank by
+// position, it never re-sorts.
+func (r *LeaderboardRepository) GetTop(ctx context.Context, window leaderboard.Window, limit int) ([]leaderboard.Entry, error) {
+	query := topAllTimeQuery
+	if window == leaderboard.WindowWeekly {
+		query = topWeeklyQuery
+	}
+
+	rows, err := r.pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get top leaderboard: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []leaderboard.Entry
+	for rows.Next() {
+		var e leaderboard.Entry
+		if err := rows.Scan(&e.UserID, &e.DisplayName, &e.Races, &e.Wins, &e.AvgWPM); err != nil {
+			return nil, fmt.Errorf("postgres: get top leaderboard: scan: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: get top leaderboard: rows: %w", err)
+	}
+
+	return entries, nil
+}

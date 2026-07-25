@@ -99,3 +99,62 @@ func TestHandler_Me_MissingAuth(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
 	}
 }
+
+func TestHandler_Top_OK(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	repo.top[leaderboard.WindowAllTime] = []leaderboard.Entry{
+		{UserID: "user-1", DisplayName: "Alice", Races: 5, Wins: 3, AvgWPM: 60},
+	}
+	h := newTestHandler(repo)
+	token := signTestToken(t, secret, "user-1")
+
+	req := httptest.NewRequest(http.MethodGet, "/leaderboard?window=alltime", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Top)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp leaderboard.LeaderboardTopResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.Window != "alltime" || len(resp.Entries) != 1 || resp.Entries[0].Rank != 1 {
+		t.Errorf("resp = %+v, want window=alltime, one rank-1 entry", resp)
+	}
+}
+
+func TestHandler_Top_InvalidWindow(t *testing.T) {
+	secret := []byte("test-secret")
+	repo := newFakeRepository()
+	h := newTestHandler(repo)
+	token := signTestToken(t, secret, "user-1")
+
+	req := httptest.NewRequest(http.MethodGet, "/leaderboard?window=monthly", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	middleware.Auth(secret)(http.HandlerFunc(h.Top)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandler_Top_MissingAuth(t *testing.T) {
+	repo := newFakeRepository()
+	h := newTestHandler(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/leaderboard?window=alltime", nil)
+	rec := httptest.NewRecorder()
+
+	h.Top(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
