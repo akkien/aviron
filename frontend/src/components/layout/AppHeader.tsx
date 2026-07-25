@@ -27,7 +27,9 @@ export function AppHeader() {
     // lines up with the rest of the page instead of spanning the viewport.
     <header className="flex shrink-0 justify-center border-b bg-card px-10 py-3">
       <div className="flex w-full max-w-325 items-center justify-between">
-        <span className="font-heading text-xl font-bold text-primary">Aviron</span>
+        <span className="heading-pop font-heading text-2xl font-extrabold text-primary">
+          Aviron
+        </span>
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
             {initialsFromEmail(email)}

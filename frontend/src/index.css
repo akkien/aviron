@@ -114,3 +114,11 @@
   animation: card-float var(--card-float-duration, 6s) ease-in-out infinite;
   animation-delay: var(--card-float-delay, 0s);
 }
+
+/* Soft sticker-style pop for headings — a slight dark offset for depth plus
+   a blue-tinted glow matching shadow-water, instead of a flat text color. */
+.heading-pop {
+  text-shadow:
+    0 2px 0 rgba(0, 0, 0, 0.1),
+    0 4px 12px rgba(0, 149, 214, 0.35);
+}

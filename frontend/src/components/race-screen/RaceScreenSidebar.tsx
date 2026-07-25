@@ -205,7 +205,7 @@ export function RaceScreenSidebar({
           <div className="text-xs font-bold uppercase tracking-wider text-primary">
             Race Room
           </div>
-          <div className="font-heading text-2xl font-bold">{raceDetail.name}</div>
+          <div className="heading-pop font-heading text-3xl font-extrabold">{raceDetail.name}</div>
           {raceDetail.pending_expires_at && (
             <div className="text-xs text-muted-foreground">
               Closes in{" "}
@@ -346,7 +346,7 @@ export function RaceScreenSidebar({
         }))
     return (
       <div className="flex flex-col gap-3">
-        <div className="font-heading text-xl font-bold">Race finished</div>
+        <div className="heading-pop font-heading text-2xl font-extrabold">Race finished</div>
         <ul className="flex flex-col gap-1.5 text-sm">
           {[...results]
             .sort((a, b) => (a.finish_rank ?? Infinity) - (b.finish_rank ?? Infinity))
@@ -380,7 +380,7 @@ export function RaceScreenSidebar({
     return (
       <div className="flex h-full min-h-0 flex-col gap-3">
         <div className="flex items-center justify-between">
-          <div className="font-heading text-xl font-bold">{raceDetail.name}</div>
+          <div className="heading-pop font-heading text-2xl font-extrabold">{raceDetail.name}</div>
           <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
             Spectating
           </span>
