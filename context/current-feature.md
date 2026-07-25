@@ -1,4 +1,4 @@
-# Current Feature
+# Current Feature: Redis Room Registry (Ownership Only)
 
 ## Status
 
@@ -6,19 +6,135 @@ Not Started
 
 ## Goals
 
-<!-- populated by /feature load -->
+- Every backend instance can answer "do I own this room, and if not, who
+  does?" correctly, via Redis — the first piece of Phase 4's
+  horizontal-scaling chain (`context/features/phase4/phase-4-plan.md`).
+- Ownership is recorded durably the instant a room is spawned (`SET
+  room:<raceID> instance:<instanceID> NX EX 60`) and kept alive via a
+  heartbeat, then cleaned up when the room tears down.
+- Publish the `room:events` (`created`/`removed`) notifications
+  `race-router.md` (the next spec in this chain) depends on for its own
+  routing cache — this spec builds that wire surface but doesn't consume
+  it itself.
+- Zero behavior change for local/single-instance dev and the existing test
+  suite — a `NoopLocator` keeps every current `NewRegistry(...)` call site
+  working with one mechanical parameter addition, not a real Redis
+  dependency.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- Spec: `context/features/phase4/horizontal-scaling/redis-room-registry.md`.
+  Implements `context/project-overview.md` §5's registry half only — not
+  cross-instance traffic itself (that's `race-router.md`, which supersedes
+  the originally-planned `cross-instance-relay.md`; see that file's own
+  "Superseded" section and `docs/knowledge-summary.md`'s "Horizontally
+  Scaling" section for the full reasoning).
+- **No leader election needed.** A room has exactly one instance that ever
+  calls `Registry.Spawn` for it — whichever instance received the
+  `POST /races` request that created it — so ownership is decided by
+  construction, not contested. Redis's only job is making that fact
+  durably visible to every other instance.
+- New package `internal/roomlocator` (kept out of `internal/room` so that
+  package stays free of Redis imports, same reasoning that already keeps
+  it free of HTTP imports): a `Locator` wrapping `*redis.Client` and this
+  instance's `InstanceID`, with `Claim`/`Refresh`/`Release`/`Owner`.
+  `Claim`/`Release` additionally publish to a single shared `room:events`
+  channel (`{"type":"created"|"removed",...}`) — the only new wire surface
+  this spec adds beyond the original four methods, needed because
+  `race-router.md`'s cache has no way to know in advance which `raceID`s
+  might matter to it.
+- `internal/room/registry.go` gains a small structural `RoomLocator`
+  interface (mirrors the existing `TickObserver` pattern — `internal/room`
+  never imports `redis` or `internal/roomlocator` directly) and a
+  `NoopLocator` for single-instance dev/tests.
+- **Design update already baked into the spec, not something to decide at
+  `start`:** this registry now has two consumers instead of one — the
+  owning instance itself (`Claim`/`Refresh`/`Release`, unchanged) and
+  `race-router.md`'s routing cache (`Owner`, plus `room:events`) instead of
+  the originally-planned same-process relay. The `Claim`/`Refresh`/
+  `Release`/`Owner` surface itself is unchanged by that update.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. `internal/config/config.go` — add `InstanceID string` (env
+   `INSTANCE_ID`, generated via `internal/race.GenerateRaceID()`
+   — confirmed this function exists at `internal/race/id.go:23` and is
+   reusable as-is, no new randomness scheme needed) and `RedisURL string`
+   (env `REDIS_URL`, default `redis://localhost:6379/0`).
+2. `go.mod` — add `github.com/redis/go-redis/v9` (confirmed via grep: not
+   already a dependency).
+3. New `internal/redisclient/client.go` — `NewClient(ctx, url) (*redis.Client,
+   error)`, `Ping`s before returning, mirroring `internal/db.NewPool`'s
+   error-wrapping convention (`fmt.Errorf("redisclient: ping: %w", err)`).
+4. New `internal/roomlocator/locator.go` — `Locator` struct, `NewLocator`,
+   `Claim`/`Refresh`/`Release`/`Owner`, with `Claim`/`Release` publishing to
+   `room:events`.
+5. `internal/room/registry.go`:
+   - Add the `RoomLocator` interface and `NoopLocator` (spec leans toward
+     putting `NoopLocator` here rather than `internal/roomlocator`, since
+     that's where the interface it implements lives — follow that leaning
+     unless `start` surfaces a reason not to).
+   - `NewRegistry` grows a `locator RoomLocator` parameter.
+   - `Spawn` calls `locator.Claim` right after registering the actor in the
+     local map, and starts a heartbeat goroutine (`Refresh` every ~20s,
+     stopped via `actor.Context()` — no new lifecycle primitive).
+   - `cleanupWhenDone` (confirmed current shape at
+     `internal/room/registry.go:73-80`) calls `locator.Release` right where
+     it already deletes the local map entry.
+6. `internal/app.go` — construct the Redis client + `Locator`, pass into
+   `room.NewRegistry(...)` alongside the existing logger/`TickObserver`
+   params.
+7. `docker-compose.yml` — add a `redis:7-alpine` service (confirmed not
+   already present).
+8. Update every existing `NewRegistry(...)` test call site across
+   `internal/room`, `internal/ws`, `internal/race` fixtures to pass
+   `NoopLocator{}` — mechanical churn, same cost this project's own history
+   shows `structured-logging.md`/`prometheus-metrics.md` already paid for
+   their own `NewRegistry` parameter additions.
+9. `internal/roomlocator` gets its own test file — spec leans toward
+   `miniredis` (in-memory fake) over a real local Redis dependency, to keep
+   `go test ./...` runnable without real infra (matching this project's
+   existing no-real-infra-in-tests convention for Postgres); confirm this
+   at `start`.
+10. New test confirming `Claim`/`Release` actually publish the expected
+    `room:events` payloads — the one piece of this spec `race-router.md`
+    directly depends on, so it needs explicit coverage rather than
+    inference from the key-write assertions alone.
+
+Open questions the spec itself flags for `start` (not resolved here):
+`NoopLocator`'s exact package, and `miniredis` vs. real Redis for
+`internal/roomlocator`'s own tests.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- **This spec deliberately does not fix cross-instance traffic.** Verified
+  fresh by reading both call sites the spec names: `internal/race/handler.go`'s
+  `Start` (now at line 150, not the spec's original ~188 estimate — pure
+  line-number drift from other work landing since, not a design
+  discrepancy) and `internal/ws/endpoint.go`'s `ServeHTTP` (`registry.Get`
+  call at line 95, inside `ServeHTTP` starting at line 80 — spec said
+  ~93, same harmless drift). Both still assume a `Get` miss means "race
+  not found" after this spec ships — correct today, and still uncorrected
+  after this spec, on purpose. Fixing that is `race-router.md`'s job: it
+  proxies a connection to the correct instance *before* either of these
+  files ever sees a request for a room they don't own, so neither needs to
+  change at all, in this spec or the next one.
+- Confirmed via grep: no `redis` dependency in `go.mod`, no `redis` service
+  in `docker-compose.yml` yet — this spec adds both.
+- `Registry.Spawn`'s real current signature already carries
+  `finisher`/`leaver`/`canceller` params (from `race-completion/
+  finish-race.md`, `leave-race.md`, `cancelled-race-status.md`) beyond what
+  the spec file's own simplified `Data` section Go sketch shows — the
+  `locator` parameter this spec adds slots in alongside those three, not in
+  place of them.
+- **Single Redis instance, deliberately — not Cluster/Sentinel.** A real
+  deployment of this design should run Redis as a Cluster with per-shard
+  replication; this project implements a single instance for simplicity,
+  the same category of accepted single-point-of-failure risk already
+  carried for its one non-HA Postgres instance
+  (`docs/knowledge-summary.md`'s "Horizontally Scaling" section has the
+  full reasoning). Not something to build around here — just to document,
+  again, at the point it's actually implemented.
 
 ## History
 
