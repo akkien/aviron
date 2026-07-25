@@ -4,9 +4,9 @@ export interface Vehicle {
   emoji: string
 }
 
-// 10 vehicles — one per MaxParticipants (internal/race.MaxParticipants) so
-// a full room can plausibly show 10 distinct icons, though vehicleForUser's
-// hash doesn't guarantee uniqueness (purely cosmetic, no server-side slot
+// 12 vehicles — a couple more than MaxParticipants (internal/race.MaxParticipants,
+// 10) since they're purely cosmetic and vehicleForUser's hash never
+// guaranteed one-per-participant uniqueness anyway (no server-side slot
 // reservation).
 export const VEHICLES: readonly Vehicle[] = [
   { id: "car", label: "Car", emoji: "🏎️" },
@@ -19,6 +19,8 @@ export const VEHICLES: readonly Vehicle[] = [
   { id: "train", label: "Train", emoji: "🚂" },
   { id: "scooter", label: "Scooter", emoji: "🛵" },
   { id: "helicopter", label: "Helicopter", emoji: "🚁" },
+  { id: "sailboat", label: "Sailboat", emoji: "⛵" },
+  { id: "kayak", label: "Kayak", emoji: "🛶" },
 ]
 
 // vehicleForUser deterministically hashes userId into VEHICLES so every
