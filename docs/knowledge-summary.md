@@ -261,3 +261,132 @@ sequenceDiagram
 ```
 
 Fixed by giving `statusWriter` its own `Hijack()` forwarding to the underlying writer. This is the honest lesson from building this whole system: pprof and Prometheus are built to answer "why is it slow" or "why is it leaking" — neither would have been the fastest path to a total connection failure. The right tool depended on the *shape* of the failure, not just having every tool available.
+
+## Horizontally Scaling
+
+**Status: planned (Phase 4), not yet implemented.** This section works through the architecture a real large-scale multiplayer game backend uses, why most of it doesn't fit a project at this scale, and the right-sized version actually planned for this codebase. Nothing below exists yet — no `internal/roomlocator`, `cmd/race-router`, or Redis dependency is in the code — this is design groundwork ahead of the build.
+
+### The architecture researched for large-scale multiplayer games
+
+Real-world, internet-scale multiplayer game backends (battle royale titles, MMOs) are built around one hard constraint this project doesn't have: a global, geographically distributed player base where connection latency to the nearest server matters as much as correctness does. That constraint produces a specific, layered shape:
+
+```mermaid
+flowchart TB
+    Internet(["Internet"]) --> DNS["Global DNS / Anycast<br/>routes each player to their nearest region"]
+
+    DNS --> LBUS["Regional LB — US"]
+    DNS --> LBASIA["Regional LB — Asia"]
+
+    LBUS --> GW1["WS Gateway #1"]
+    LBUS --> GW2["WS Gateway #2"]
+    LBASIA --> GW5["WS Gateway #5"]
+    LBASIA --> GW6["WS Gateway #6"]
+
+    GW1 --> Bus["Message Bus<br/>(Redis / NATS / Kafka)"]
+    GW2 --> Bus
+    GW5 --> Bus
+    GW6 --> Bus
+
+    Bus --> RoomSvc["Room Service"]
+    Bus --> MM["Matchmaking"]
+    Bus --> Presence["Presence"]
+
+    RoomSvc --> Registry["Room Registry<br/>(Redis / Etcd / Consul)"]
+    MM --> Registry
+    Presence --> Registry
+
+    Registry --> GSA["Game Server A — Room 1"]
+    Registry --> GSB["Game Server B — Room 2"]
+    Registry --> GSC["Game Server C — Room 3"]
+```
+
+| Component | Role | Why it exists |
+| --- | --- | --- |
+| Global DNS / Anycast | Routes a player's very first connection to whichever region is topologically closest to them | Minimizes the one latency cost a player feels on every packet for the rest of the session — worth solving once, at the network layer, rather than per-request |
+| Regional LB | Spreads a region's connections across that region's pool of WS Gateways | HA and throughput within a region — no single gateway process is a bottleneck or a single point of failure |
+| WS Gateway | Terminates the player's actual WebSocket connection; does lightweight auth, then forwards everything onto the message bus | Connection-holding (I/O-bound, scales with player count) and simulation (CPU-bound, scales with active-room count and per-room complexity) have different cost curves at real scale — splitting them lets each scale to its own bottleneck instead of over-provisioning one to satisfy the other |
+| Message Bus (Redis/NATS/Kafka) | The transport between every Gateway and every backend service, regardless of which physical machine either side is on | A Gateway never needs to know which Game Server currently owns a given room, or even which region it's in — it just publishes/subscribes by room id and lets the bus deliver |
+| Room Service | Tracks a room's lifecycle at the metadata level — which rooms exist, what state they're in | Separate from the Game Server itself so "does this room exist and what's its status" can be answered without touching the process actually running the simulation |
+| Matchmaking | Groups players into a room by skill/region/queue rules *before* a room is created | A room-assignment decision that has to happen before there's a room id to route by at all |
+| Presence | Tracks who's online/offline/in-a-room platform-wide | Feeds friends lists, invites, and notifications — a cross-cutting concern unrelated to any single room |
+| Room Registry (Redis/Etcd/Consul) | The durable, authoritative map of room id → owning Game Server | Lets any Gateway, Room Service, or Matchmaking node discover the correct owner without hardcoding server topology anywhere |
+| Game Server | The process actually running one room's simulation tick | One room (or a small number) per server, since real simulation — physics, AI, anti-cheat — is CPU/GPU-heavy enough that a server can only host so many at once |
+
+How it works together, end to end: DNS sends a player to their nearest region → the regional LB picks any healthy Gateway in that region → the Gateway authenticates the connection and, once Matchmaking/Room Service assigns or looks up a room, consults the Room Registry to learn which Game Server owns it → from then on, all of that connection's game traffic flows Gateway ↔ Message Bus ↔ Game Server, with the room's actual state never leaving the Game Server process. Note that only the LB/Gateway tier is regional for latency reasons — the Message Bus and everything behind it (Room Service, Matchmaking, Presence, Room Registry, Game Servers) is one shared pool every region's Gateways reach through the same bus, which is exactly what makes the cross-region join case below possible at all.
+
+Step by step — two players landing on Gateways in **different regions**, joining the **same** room:
+
+```mermaid
+sequenceDiagram
+    participant A as Player A (US)
+    participant GW1 as WS Gateway #1 (US)
+    participant Bus as Message Bus
+    participant RS as Room Service
+    participant Reg as Room Registry
+    participant GSB as Game Server B (owns Room X)
+    participant GW6 as WS Gateway #6 (Asia)
+    participant B as Player B (Asia)
+
+    A->>GW1: connect, join Room X
+    GW1->>Bus: publish join(Room X)
+    Bus->>RS: join(Room X)
+    RS->>Reg: who owns Room X?
+    Reg-->>RS: Game Server B
+    RS->>Bus: route to Game Server B
+    Bus->>GSB: join(Room X, Player A)
+
+    B->>GW6: connect, join Room X
+    GW6->>Bus: publish join(Room X)
+    Bus->>GSB: join(Room X, Player B)
+
+    loop every simulation tick
+        GSB->>Bus: broadcast Room X state
+        Bus->>GW1: Room X state
+        GW1->>A: Room X state
+        Bus->>GW6: Room X state
+        GW6->>B: Room X state
+    end
+```
+
+Neither Gateway ever talks to Game Server B directly, and neither player's region matters once the Room Registry has answered "who owns this room" once — every subsequent tick flows through the same Message Bus regardless of where each Gateway physically sits.
+
+### Why not every component fits this project
+
+| Component | Verdict for this project | Reasoning |
+| --- | --- | --- |
+| Global DNS / Anycast, regional split | **Drop entirely** | Solves cross-continent latency for a worldwide player base. This project has no multi-region requirement — one deployment, one set of users, collapses to nothing. |
+| Regional LB | **Simplify to one LB** | Same job, just singular — one load balancer in front of the whole instance pool, not one per region. |
+| WS Gateway as a tier separate from the Game Server | **Merge into one tier** | The split only earns its cost when connection-load and simulation-load scale at genuinely different rates. `RoomActor.Run()` here is a `select` loop mutating a small struct and marshaling a JSON snapshot every 250ms — no physics, no AI, nothing CPU-bound. Room count and connection count scale together almost 1:1 (max 10 participants per race), so there's no divergent curve to split apart. Splitting would also mean *every* message pays a message-bus hop, not just the cross-instance case — strictly worse here. |
+| Message Bus | **Keep, but in a narrower role** | See "Our approach" below — used for keeping a routing cache warm, not for relaying every in-flight game message. |
+| Room Service | **Keep, but merged into the existing tier** | This is exactly `internal/room.RoomActor` + `Registry` — already built, already living inside `race-service` itself, not a separate microservice. |
+| Matchmaking | **Drop entirely** | No automatic/skill-based matchmaking exists or is planned — races are manually created, joined by id, or browsed from a list. Nothing in this project's scope needs it. |
+| Presence | **Drop entirely** | No cross-room, platform-wide "who's online" feature exists or is planned. Per-room connected/disconnected state is already handled by `RoomActor`'s own `disconnected_at`/`evicted` tracking, which is all this project needs. |
+| Room Registry | **Keep — maps directly** | This is `redis-room-registry.md`'s `SET room:<id> instance:<id> NX EX 60` design, already planned for Phase 4. |
+| Game Server (dedicated process per room) | **Simplify to a goroutine** | A real game server needs a whole process/container per room because simulation is CPU-heavy. A typing race's room actor is cheap enough that many rooms share one `race-service` process — no per-room server needed. |
+
+### Our approach for this project
+
+Right-sized version: one region, one LB, one merged connection-and-simulation tier, and a Redis registry doing double duty — but the biggest change from what this project's Phase 4 specs originally planned is *how* a client actually reaches the instance that owns their room.
+
+`cross-instance-relay.md` (the existing Phase 4 spec) relays every individual client message through Redis pub/sub for the lifetime of a cross-instance connection — explicitly flagged in that spec as *"the hardest and highest-risk spec in the entire project"*. The design below avoids that entirely: instead of relaying messages after the fact, route the connection to the correct instance **once, up front**, and let everything after that be ordinary local traffic.
+
+```mermaid
+flowchart TB
+    Client["Browser client"] --> LB["Load balancer / ingress<br/>TLS termination, plain round-robin"]
+    LB --> Router["race-router<br/>(new: net/http/httputil.ReverseProxy)"]
+    Router -->|"local cache hit"| S1["race-service instance 1<br/>(REST + WS + RoomActors)"]
+    Router -->|"cache miss → query"| Redis["Redis<br/>room registry + cache-invalidation pub/sub"]
+    Redis -->|"owner found"| Router
+    Router --> S2["race-service instance 2<br/>(REST + WS + RoomActors)"]
+    S1 -->|"Claim / heartbeat /<br/>room created & removed events"| Redis
+    S2 -->|"Claim / heartbeat /<br/>room created & removed events"| Redis
+    S1 --> PG["Postgres"]
+    S2 --> PG
+```
+
+- **Room ownership is still decided by construction**, exactly as today: whichever instance handles `POST /races` becomes the owner and claims it in Redis (`redis-room-registry.md`'s `SET room:<id> instance:<id> NX EX 60`, refreshed on a heartbeat). No hash formula ever decides ownership, so there's no ring-reshuffle-orphans-a-live-room risk to design around in the first place.
+- **`race-router` replaces the message relay with a one-time routing decision.** It keeps a local in-memory cache of `race_id → instance`, kept warm by subscribing to Redis pub/sub for room-created/room-removed events, falling back to a direct Redis query on a cache miss. A request with no `race_id` (register/login/browse) skips all of this and goes round-robin to any healthy instance.
+- **Once proxied, a connection is 100% local for its entire lifetime** — including the WebSocket's full duration. `internal/room`/`internal/ws` need no relay-awareness at all; `cross-instance-relay.md`'s `Relay.Dispatch`/`SubscribeOut`/eviction-mirroring machinery becomes unnecessary and is superseded by this design, not layered on top of it.
+- **Message Bus's role shrinks accordingly**: Redis pub/sub here only carries small, infrequent "room created"/"room removed" notifications to keep `race-router`'s cache warm — not the high-frequency per-tick `race_state` traffic the original relay design would have pushed through it.
+- **Graceful draining on scale-down**: an instance being removed is marked not-ready for *new* room placement immediately, but keeps serving rooms it already owns until they finish or a bounded drain timeout elapses (`readinessProbe` + `preStop` + `terminationGracePeriodSeconds` — the same graceful-shutdown principle `project-overview.md` §7 already calls for, just extended from request-length to room-length timescales).
+- **Redis itself should run as a Cluster with per-shard replication in a real deployment of this design** — the registry (and `race-router`'s cache-invalidation feed) becoming unavailable stops new joins/reconnects from resolving correctly, and a single node has no automatic failover. **For this project, a single Redis instance is implemented instead, deliberately, for simplicity** — the same category of accepted single-point-of-failure risk this project already carries for its one, non-HA Postgres instance. This is a disclosed scope decision, not an oversight, and the upgrade path (Sentinel or Cluster) is already known if it's ever needed.

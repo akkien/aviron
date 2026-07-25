@@ -1,5 +1,46 @@
 # Cross-Instance Relay
 
+## Superseded — replaced by `race-router.md`
+
+**This spec's design is not being built.** After working through the
+tradeoffs in detail (see `docs/knowledge-summary.md`'s "Horizontally
+Scaling" section), the per-message Redis pub/sub relay described below was
+replaced with a simpler design: instead of relaying every individual
+client message through Redis for the lifetime of a cross-instance
+connection, a new component (`race-router`) routes each connection to the
+instance that actually owns its room **once, up front** — after that,
+traffic is 100% local, and no relay/message-forwarding code inside
+`internal/room`/`internal/ws` is needed at all. See `race-router.md` for
+the current design.
+
+Two reasons this replacement won.
+
+1. **This spec is explicitly self-flagged as *"the hardest and
+   highest-risk spec in the entire project"*** (see the very next
+   paragraph below, kept as written) — an entire new relay subsystem
+   (`internal/roomrelay`, two Redis pub/sub channels per room, an
+   `EvictionMirror`, a hub-side second construction path) whose failure
+   mode is exactly the class of subtle two-goroutine ordering bug
+   `docs/concurrency.md` already shows this codebase is capable of
+   producing. Routing a connection once, up front, has a dramatically
+   smaller surface: a cache lookup and a reverse proxy, not a live
+   message-forwarding pipeline that has to stay correct for a race's
+   entire duration.
+2. **It also happens to be cheaper at runtime** for the common case this
+   project actually has (small, short-lived rooms) — once `race-router`
+   places a connection, that connection's entire WebSocket lifetime is
+   ordinary local traffic, identical to the single-instance code path
+   today. The relay design below pays a Redis hop on *every* message for
+   the whole race whenever a client landed on a non-owning instance;
+   routing pays that cost exactly once, at connect time.
+
+The rest of this file is kept as-is below — both as the historical record
+of the original design, and because several of its ideas carried forward
+directly into `race-router.md` (the "prefer local first" principle, the
+`IsEvicted` synchronous-exception reasoning, and the accepted-gap framing
+for an owning instance dying mid-race all reappear there, adapted rather
+than reinvented).
+
 ## Overview
 
 **This is the hardest and highest-risk spec in the entire project.**

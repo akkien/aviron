@@ -9,7 +9,19 @@ and only that — it makes every instance able to answer "do I own this room,
 and if not, who does?" correctly. It deliberately does **not** make
 cross-instance traffic actually work yet (a client attached to a
 non-owning instance still gets a 404/miss after this spec) — that's
-`cross-instance-relay.md`, which depends on this one existing first.
+`race-router.md`'s job, which depends on this one existing first.
+
+**Design update (see `docs/knowledge-summary.md`'s "Horizontally Scaling"
+section):** the original plan had a same-process relay (`cross-instance-
+relay.md`, now superseded) read this registry to forward individual
+messages. The current design instead has a separate `race-router` process
+read it to route a connection to the correct instance **once, up front**
+— so this registry now has two consumers, not one: the owning instance
+itself (`Claim`/`Refresh`/`Release`, unchanged from the original design
+below) and `race-router` (`Owner`, plus the new cache-invalidation events
+below). Everything in this spec's actual `Claim`/`Refresh`/`Release`/
+`Owner` surface is unchanged by that update — only *who* calls `Owner` and
+*why* changed.
 
 No leader election is needed here, which keeps this spec smaller than it
 might look: a room has exactly one instance that ever calls
@@ -107,10 +119,35 @@ is to make that fact durably visible to every *other* instance.
   builds on top of this.
 - `Owner(ctx context.Context, raceID string) (instanceID string, ok bool,
   err error)` — `GET room:<raceID>`, parses out the instance id. This is
-  the method `cross-instance-relay.md` calls on a local `Registry.Get`
-  miss to find out where to relay to; unused by anything in this spec's
+  the method `race-router.md`'s routing cache calls on a local miss to
+  find out which instance to proxy to; unused by anything in this spec's
   own scope, included here because it belongs with the rest of this
   read/write surface, not because this spec calls it itself.
+
+### Cache-invalidation events (for `race-router.md`)
+
+- `Claim` additionally `PUBLISH`es a single small message to a
+  `room:events` channel: `{"type":"created","race_id":"<raceID>",
+  "instance_id":"<instanceID>"}`. `Release` publishes `{"type":"removed",
+  "race_id":"<raceID>"}`. This is the only new wire surface this spec adds
+  beyond the original `Claim`/`Refresh`/`Release`/`Owner` design — `race-
+  router.md` subscribes to `room:events` to keep its own in-memory routing
+  cache warm without querying Redis on every request.
+- Deliberately **one shared channel for every room**, not a
+  `room:<raceID>:events` channel per room — `race-router` needs to learn
+  about *every* room's create/remove events regardless of `raceID` (it has
+  no way to know which `raceID`s might matter to it in advance, unlike
+  `cross-instance-relay.md`'s original per-room subscriptions which only
+  ever needed one specific room's traffic). One shared channel means one
+  subscription for the router's entire lifetime, not one per room.
+- Same at-most-once, no-persistence caveat as any other Redis pub/sub use
+  in this project: a `race-router` instance that's mid-restart when a
+  `created`/`removed` event fires simply misses it. Bounded by the
+  registry's own `EX 60` TTL either way — a stale cache entry pointing at
+  an instance that no longer owns a room will eventually get corrected the
+  next time that `raceID` is looked up and re-verified, and `race-
+  router.md` is expected to put its own short TTL on cache entries as a
+  second, independent bound (see that spec for the exact value).
 
 ### Wiring `Registry` to `Locator`
 
@@ -198,6 +235,11 @@ type NoopLocator struct{}
 - `internal/room`'s existing test suite: confirm `NoopLocator` slots into
   every existing `newTestActor()`-style fixture with no behavior change —
   this should be close to a pure mechanical update, not new test logic.
+- New: a test confirming `Claim`/`Release` actually publish the expected
+  `room:events` payloads (subscribe in the test, assert on what arrives) —
+  this is the one piece of this spec `race-router.md` directly depends on,
+  so it needs its own explicit coverage, not just inference from
+  `Claim`/`Release`'s existing key-write assertions.
 
 ## Notes
 
@@ -206,6 +248,16 @@ type NoopLocator struct{}
   this spec to have anything to `Claim`/`Refresh`/`Release` against at all,
   even before `multi-instance-dev-setup.md` (which is about running a
   *second backend instance*, not about Redis existing at all).
+- **Single Redis instance, deliberately — not Cluster or Sentinel.** A real
+  deployment of this design should run Redis as a Cluster with per-shard
+  replication, since this registry becoming unavailable stops new
+  joins/reconnects/room-creation from resolving correctly and a single
+  node has no automatic failover. This project implements a single
+  instance anyway, for simplicity, accepting that as the same category of
+  disclosed single-point-of-failure risk it already carries for its one,
+  non-HA Postgres instance (see `docs/knowledge-summary.md`'s
+  "Horizontally Scaling" section for the full reasoning) — not an
+  oversight, and the upgrade path is already known if it's ever needed.
 - This spec intentionally does not change `Registry.Get`'s behavior or
   either of the two call sites listed under "Current state" above — after
   this spec ships, a two-instance setup still behaves exactly as broken as

@@ -40,22 +40,37 @@ Phase 4 is what removes that assumption, one layer at a time.
 
 ### `horizontal-scaling/` (§5) — do this first
 
+**Design update, decided after this plan was first written (see
+`docs/knowledge-summary.md`'s "Horizontally Scaling" section for the full
+comparison and reasoning):** `cross-instance-relay.md` — originally the
+second spec below, a per-message Redis pub/sub relay — is **superseded**
+by `race-router.md`, a separate routing process that sends each connection
+to the correct instance once, up front, instead of relaying every message
+after the fact. It depends on the same `redis-room-registry.md`
+foundation and slots into the same position in this list; nothing else
+about the ordering below changed.
+
 1. `redis-room-registry.md` — Redis becomes the source of truth for "which
    instance owns this room" (`SET room:<id> instance:<id> NX EX 60`,
-   refreshed on a heartbeat). This alone does not make cross-instance
-   traffic work; it only lets an instance answer "is this room mine?"
-   correctly. Foundation for everything else in this sub-area.
-2. `cross-instance-relay.md` — the actual cross-instance behavior: a client
-   connected to an instance that does not own the room gets relayed to the
-   instance that does, via Redis pub/sub, transparently. Depends on #1 —
-   there is nothing to relay *to* until an instance can tell it doesn't own
-   a room.
+   refreshed on a heartbeat), plus a `room:events` pub/sub channel
+   (`created`/`removed`) added specifically for `race-router.md`'s cache.
+   This alone does not make cross-instance traffic work; it only lets an
+   instance (and now the router) answer "who owns this room?" correctly.
+   Foundation for everything else in this sub-area.
+2. `race-router.md` — the actual cross-instance behavior: a new
+   `cmd/race-router` process routes every request/connection to the
+   instance that owns its `race_id`, using a cache backed by #1. Depends
+   on #1 — there's nothing to route by until an instance can be looked up.
+   Replaces the originally-planned `cross-instance-relay.md` (kept on disk,
+   marked superseded, for its historical design reasoning).
 3. `multi-instance-dev-setup.md` — Redis added to `docker-compose.yml`, a
-   documented way to run 2 local backend processes on different ports, and
-   a concrete verification plan (create on instance A, connect on instance
-   B, confirm state stays in sync). Depends on #1 and #2 — this is where
-   they get proven to actually work together, deliberately before
-   `phase5/`'s Kubernetes work (`replicas: 2`) enters the picture at all.
+   documented way to run 2 local backend processes plus `race-router` in
+   front of them, and a concrete verification plan (create through the
+   router, connect through the router from either backend's own port,
+   confirm the router always reaches the correct owning instance). Depends
+   on #1 and #2 — this is where they get proven to actually work together,
+   deliberately before `phase5/`'s Kubernetes work (`replicas: 2`) enters
+   the picture at all.
 
 ### `event-pipeline/` (§6, ClickHouse dropped)
 
@@ -77,7 +92,7 @@ Phase 4 is what removes that assumption, one layer at a time.
 redis-room-registry
        |
        v
-cross-instance-relay
+race-router   (supersedes cross-instance-relay, kept on disk as historical record)
        |
        v
 multi-instance-dev-setup
