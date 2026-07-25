@@ -18,7 +18,7 @@ import (
 
 // roomEventsChannel is the single shared pub/sub channel every instance
 // publishes room ownership changes to — race-router.md's routing cache is
-// the consumer.
+// the consumer, via SubscribeRoomEvents.
 const roomEventsChannel = "room:events"
 
 // claimTTL bounds how long a claim survives without a heartbeat refresh —
@@ -38,12 +38,18 @@ func NewLocator(client *redis.Client, instanceID string) *Locator {
 	return &Locator{client: client, instanceID: instanceID}
 }
 
-// roomEvent is room:events' wire payload.
-type roomEvent struct {
-	Type       string `json:"type"` // "created" | "removed"
+// RoomEvent is room:events' wire payload.
+type RoomEvent struct {
+	Type       string `json:"type"` // RoomEventCreated | RoomEventRemoved
 	RaceID     string `json:"race_id"`
 	InstanceID string `json:"instance_id"`
 }
+
+// RoomEvent.Type values.
+const (
+	RoomEventCreated = "created"
+	RoomEventRemoved = "removed"
+)
 
 func roomKey(raceID string) string {
 	return "room:" + raceID
@@ -63,7 +69,7 @@ func (l *Locator) Claim(ctx context.Context, raceID string) (bool, error) {
 		return false, nil
 	}
 
-	if err := l.publish(ctx, roomEvent{Type: "created", RaceID: raceID, InstanceID: l.instanceID}); err != nil {
+	if err := l.publish(ctx, RoomEvent{Type: RoomEventCreated, RaceID: raceID, InstanceID: l.instanceID}); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -89,7 +95,7 @@ func (l *Locator) Release(ctx context.Context, raceID string) error {
 	if err := l.client.Del(ctx, roomKey(raceID)).Err(); err != nil {
 		return fmt.Errorf("roomlocator: release %s: %w", raceID, err)
 	}
-	return l.publish(ctx, roomEvent{Type: "removed", RaceID: raceID, InstanceID: l.instanceID})
+	return l.publish(ctx, RoomEvent{Type: RoomEventRemoved, RaceID: raceID, InstanceID: l.instanceID})
 }
 
 // Owner returns the instance id currently owning raceID, and false if no
@@ -105,7 +111,48 @@ func (l *Locator) Owner(ctx context.Context, raceID string) (string, bool, error
 	return strings.TrimPrefix(val, "instance:"), true, nil
 }
 
-func (l *Locator) publish(ctx context.Context, ev roomEvent) error {
+// SubscribeRoomEvents subscribes to room:events and returns a channel of
+// decoded RoomEvents — race-router.md's routing cache is the consumer, so
+// this keeps the wire schema and raw *redis.Client access encapsulated in
+// roomlocator rather than duplicated in cmd/race-router. The returned
+// channel closes once ctx is done or the underlying subscription ends;
+// malformed payloads are skipped, not treated as fatal.
+func (l *Locator) SubscribeRoomEvents(ctx context.Context) (<-chan RoomEvent, error) {
+	sub := l.client.Subscribe(ctx, roomEventsChannel)
+	if _, err := sub.Receive(ctx); err != nil {
+		sub.Close()
+		return nil, fmt.Errorf("roomlocator: subscribe room events: %w", err)
+	}
+
+	out := make(chan RoomEvent)
+	go func() {
+		defer close(out)
+		defer sub.Close()
+		ch := sub.Channel()
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				var ev RoomEvent
+				if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+					continue
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (l *Locator) publish(ctx context.Context, ev RoomEvent) error {
 	payload, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("roomlocator: marshal event: %w", err)
