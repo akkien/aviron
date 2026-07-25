@@ -44,10 +44,10 @@ This project simulates that "workout telemetry" signal with a **typing race** ra
 See the diagram above. Main flow:
 
 1. Client (mock FE) calls REST to log in, create/join a race → receives `race_id` + token.
-2. Client opens a WebSocket to the API Gateway; the gateway forwards it to the **Race Service instance** currently holding that room (or routes via Redis if the room lives on a different instance).
+2. Client opens a WebSocket directly to a **Race Service instance** — this project has no separate API Gateway service; race-service serves REST and WebSocket itself (§8). If that instance doesn't own the room, it routes the connection via Redis to whichever instance does (§5).
 3. The Race Service keeps room state in memory (one "room actor" goroutine per race), receives telemetry input from each client, ticks periodically, and broadcasts the new state to every client in the room.
 4. When a race finishes, the Race Service writes the results to PostgreSQL (transaction) and emits an event to Kafka/NATS.
-5. A separate consumer reads the events and loads them into ClickHouse to serve large-scale leaderboard/analytics queries (this is the "strong plus" part, done after the MVP is stable).
+5. A separate consumer reads the events and batches them into PostgreSQL — **this project drops ClickHouse** (see §6), so there is no dedicated analytics store; the consumer's sink is the same Postgres database, just via a decoupled, asynchronous path instead of the room actor's own synchronous write (this is the "strong plus" part, done after the MVP is stable).
 6. Redis is used for two things: (a) pub/sub so instances stay in sync when a room has clients on different instances, (b) storing "room → which instance owns it" as a lightweight service registry.
 
 ## 3. Domain model & PostgreSQL schema
@@ -182,7 +182,7 @@ Server -> Client: {"type":"race_finished","results":[...]}
 Once running ≥2 Go instances:
 
 - You need a way to know **which instance is running which room** — use Redis (`SET room:<id> instance:<id> NX EX 60`, refreshed periodically) as a simple registry; no need for Kafka here.
-- When joining a room, the API Gateway (or client) must be routed to the correct instance holding that room (sticky routing), or more simply: every instance publishes/subscribes to a Redis pub/sub channel keyed by `room_id`, so a client can connect to any instance and that instance just forwards messages via Redis to whichever instance currently "owns" the room.
+- When joining a room, the client must be routed to the correct instance holding that room (sticky routing), or more simply: every instance publishes/subscribes to a Redis pub/sub channel keyed by `room_id`, so a client can connect to any instance and that instance just forwards messages via Redis to whichever instance currently "owns" the room.
 - This directly exercises "exposure to horizontally scaled real-time services, stateful sessions running across multiple instances" from the JD — do it after the single-instance version is solid; doing it too early risks getting bogged down.
 
 ## 6. Event pipeline & leaderboard analytics (strong plus)
@@ -191,15 +191,15 @@ Once running ≥2 Go instances:
   - `workout.sample` — batched telemetry (distance, pace, stroke_rate) during the race
   - `race.finished` — the final result of the whole race (final rank, finish time)
 - The message key should be `race_id` or `user_id` (depending on the query pattern you want to optimize for) to ensure messages for the same entity land in the same partition → preserving ordering within that entity, matching the "message ordering" theme the JD mentions.
-- A dedicated Go consumer group reads both topics and writes into ClickHouse (a wide table optimized for queries like "top N this week/month", "personal PR"). Use batch inserts into ClickHouse rather than row-by-row inserts.
+- **ClickHouse is dropped from this project.** A dedicated Go consumer group reads both topics and batch-inserts into PostgreSQL instead — specifically `workout_samples` (§3), a table that exists in the schema but is otherwise never written to. `race.finished` is handled as an idempotent reconciliation write, not a second primary writer of `race_participants`, since that table is already written synchronously and transactionally by the room actor the instant a race finishes (§4.1) — the async Kafka path exists to make `workout_samples` real and to decouple the room actor from a per-event Postgres write, not to duplicate state that's already correctly persisted. The ranked/windowed "top N this week/month" query pattern that would have motivated a columnar store like ClickHouse isn't part of this project's scope — §8's leaderboard endpoint is a per-user summary only. Use batch inserts (e.g. `pgx`'s `CopyFrom`) rather than row-by-row.
 - Consider adding a Dead Letter Topic (`*.dlq`) for messages that fail to parse/write — good practice for handling pipeline errors instead of letting the consumer crash-loop.
 - This is an advanced step, done **after** the core multiplayer + Postgres piece is solid — the JD lists it under "strong plus," not must-have.
 
-## 7. Kubernetes for local development (strong plus)
+## 7. Kubernetes for local development (strong plus, its own phase — see §12)
 
-The goal is to practice real K8s workflows, not run a production cluster. Use **kind** (Kubernetes in Docker) or **minikube** locally.
+The goal is to practice real K8s workflows, not run a production cluster. Use **kind** (Kubernetes in Docker) or **minikube** locally. This work is planned as **Phase 5**, split out from the rest of the "strong plus" items in §12 — it's deployment orchestration, not application logic, and it has a real dependency on §5's horizontal-scaling work being done and proven with two plain local processes first (see §12).
 
-Suggested manifest layout (or package as a Helm chart if you also want to practice Helm):
+Suggested manifest layout (or package as a Helm chart if you also want to practice Helm). No `api-gateway/` folder — this project never builds a separate gateway service; `race-service` serves REST and WebSocket directly (see §2, §8), so `Ingress` routes straight to its `Service`:
 
 ```text
 deploy/k8s/
@@ -211,7 +211,6 @@ deploy/k8s/
     deployment.yaml     # readiness/liveness probes, resource limits
     service.yaml
     hpa.yaml             # HorizontalPodAutoscaler on CPU or a custom metric (connection count)
-  api-gateway/
   configmap.yaml
   secret.yaml
 ```
@@ -221,7 +220,7 @@ Things worth practicing here because they connect directly to the spirit of the 
 - **Multiple replicas for race-service**: run `replicas: 2` to force yourself to handle the Redis cross-instance pub/sub designed in section 5 correctly — a single pod never exposes sync bugs.
 - **Readiness probe separate from liveness**: race-service should only be "ready" once it's connected to Postgres/Redis/Kafka, to avoid traffic being routed to a pod that isn't ready yet.
 - **Graceful shutdown**: a pod receiving `SIGTERM` (sent by K8s on scale-down/rolling update) must close its active room actors properly, without cutting off the WebSocket of someone mid-race — a good place to practice `context` cancellation at the whole-service level.
-- **Port-forward / Ingress (nginx-ingress or Traefik)** to expose the API Gateway outside the cluster so the React app running on the host machine can reach it.
+- **Port-forward / Ingress (nginx-ingress or Traefik)** to expose `race-service` outside the cluster so the React app running on the host machine can reach it.
 - No need for a complex CI/CD setup for a side project — `kind load docker-image` or building straight into the local cluster is enough.
 
 ## 8. API surface
@@ -239,7 +238,7 @@ Things worth practicing here because they connect directly to the spirit of the 
 
 **WebSocket:** `GET /ws?race_id=...&session_token=...`
 
-**gRPC (internal, optional — for the "gRPC is a plus" line):** communication between the Race Service and a separate Analytics/Leaderboard service, e.g. `GetLiveRankings(race_id) returns (stream RankingUpdate)`.
+There is no separate API Gateway or Analytics/Leaderboard service — `race-service` (`cmd/server`) serves all of the above directly, and no internal gRPC service is built (dropped from this project's scope, see §12 — it had no real consumer: the frontend already gets live rankings over the WebSocket above, and a browser can't reach raw gRPC without infrastructure this project isn't adding).
 
 ## 9. Observability & production-style operations
 
@@ -260,9 +259,8 @@ Things worth practicing here because they connect directly to the spirit of the 
 - Go 1.22+, `net/http` + `gorilla/websocket` or `nhooyr.io/websocket`
 - PostgreSQL 16, `pgx` as the driver, `sqlc` or raw SQL (avoid a heavy ORM to actually practice SQL)
 - Redis 7 (pub/sub + registry)
-- Kafka (using `segmentio/kafka-go` or `confluent-kafka-go`); run locally via the Strimzi operator or the Bitnami Kafka Helm chart on K8s — avoid manually managing Zookeeper/brokers yourself
-- ClickHouse (final phase, optional)
-- Local Kubernetes (kind or minikube) for the whole stack (Postgres, Redis, Kafka, race-service, api-gateway); Docker Compose is only a temporary stand-in for Phase 1 while the code doesn't yet need multiple instances
+- Kafka (using `segmentio/kafka-go` or `confluent-kafka-go`); run locally via the Strimzi operator or the Bitnami Kafka Helm chart on K8s — avoid manually managing Zookeeper/brokers yourself. No ClickHouse — dropped from this project entirely (see §6); the consumer's sink is PostgreSQL.
+- Local Kubernetes (kind or minikube) for the whole stack (Postgres, Redis, Kafka, race-service); Docker Compose is only a temporary stand-in for Phases 1-4 while the code doesn't yet run in the cluster (see §12's Phase 5)
 - Frontend: React (Vite), styled with Tailwind CSS (v4, CSS-based `@theme` config — see context/coding-standards.md) and shadcn/ui for form/button primitives, using the browser's native WebSocket API directly (no need for a heavy real-time library yet); open multiple tabs/browsers to simulate multiple players.
 
 ## 12. Phased roadmap (mapped directly to the JD)
@@ -281,13 +279,18 @@ Things worth practicing here because they connect directly to the spirit of the 
 
 - Structured logging, Prometheus metrics, pprof, load testing, fixing backpressure/goroutine leaks uncovered by load testing.
 
-### Phase 4 — Strong plus (JD: horizontal scale, Redis, Kafka, ClickHouse, gRPC, Kubernetes)
+### Phase 4 — Strong plus: horizontal scale + event pipeline (JD: Redis, Kafka)
 
-- Run multiple instances + Redis pub/sub for cross-instance sync.
-- Add a Kafka → ClickHouse event pipeline for the leaderboard, add an internal gRPC service.
-- Move the entire stack (Postgres, Redis, Kafka, race-service, api-gateway) onto local Kubernetes (kind/minikube) — this is when multi-instance behavior actually becomes meaningful to test (HPA, rolling updates that don't drop active WebSocket connections, etc.).
+- Run multiple instances + Redis pub/sub for cross-instance sync, proven first with two plain local processes before any Kubernetes is involved.
+- Add a Kafka event pipeline for telemetry/results. **No ClickHouse and no internal gRPC service** — both dropped from this project's scope (see §6 and §8 for why); the consumer's sink is PostgreSQL.
+- See `context/features/phase4/phase-4-plan.md` for the detailed spec breakdown.
 
-Work through the phases in order — don't jump straight to Phase 4. Phase 2 is what the JD values most (concurrency + real-time consistency), so spend the most time there and write plenty of tests for it. Kafka and Kubernetes only pay off once you actually have ≥2 instances that need to stay in sync — doing them earlier tends to turn into infrastructure overhead rather than Go practice.
+### Phase 5 — Strong plus: Kubernetes (JD: exposure to Kubernetes)
+
+- Move the entire stack (Postgres, Redis, Kafka, race-service, and the Kafka consumer) onto local Kubernetes (kind/minikube) — this is when multi-instance behavior actually becomes meaningful to test (HPA, rolling updates that don't drop active WebSocket connections, etc.).
+- Split out from Phase 4 as its own phase deliberately: it's deployment orchestration, not application logic, and has a hard dependency on Phase 4's horizontal-scaling work already being proven correct — see `context/features/phase5/phase-5-plan.md`.
+
+Work through the phases in order — don't jump straight to Phase 4/5. Phase 2 is what the JD values most (concurrency + real-time consistency), so spend the most time there and write plenty of tests for it. Kafka and Kubernetes only pay off once you actually have ≥2 instances that need to stay in sync — doing them earlier tends to turn into infrastructure overhead rather than Go practice.
 
 ## 13. This project's race mechanic: typing race
 
