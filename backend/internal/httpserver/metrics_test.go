@@ -35,7 +35,7 @@ func TestMetrics_EndToEndThroughRealRouteRegistration(t *testing.T) {
 	defer pool.Close()
 
 	m := newTestMetrics()
-	registry := room.NewRegistry(testLogger, m)
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{})
 
 	mux := httpserver.NewServer()
 	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, registry, testLogger, m)

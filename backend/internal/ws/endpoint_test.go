@@ -12,7 +12,7 @@ import (
 )
 
 func newTestWSHandler() *WSHandler {
-	return NewWSHandler(room.NewRegistry(testLogger, testTickObserver), []byte("test-secret"), "http://localhost:5173", testLogger)
+	return NewWSHandler(room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}), []byte("test-secret"), "http://localhost:5173", testLogger)
 }
 
 func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {

@@ -12,7 +12,9 @@ import (
 	"github.com/akkien/aviron/internal/httpserver"
 	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/middleware"
+	"github.com/akkien/aviron/internal/redisclient"
 	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/roomlocator"
 )
 
 func Run(cfg *config.Config) {
@@ -30,8 +32,15 @@ func Run(cfg *config.Config) {
 		log.Fatalf("migrate: %v", err)
 	}
 
+	redisClient, err := redisclient.NewClient(ctx, cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("redisclient: %v", err)
+	}
+	defer redisClient.Close()
+	locator := roomlocator.NewLocator(redisClient, cfg.InstanceID)
+
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(logger, m)
+	registry := room.NewRegistry(logger, m, locator)
 
 	server := httpserver.NewServer()
 	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger, m)
