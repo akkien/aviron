@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react"
 
-import { Card } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { apiFetch } from "@/lib/api"
 import type { LeaderboardMeResponse } from "@/types/leaderboard"
 
-// Only 3 cards ship — the mockup's 4th card (Avg Accuracy) is dropped
+// Only 3 rows ship — the mockup's 4th stat (Avg Accuracy) is dropped
 // outright, not built here, since user-stats.md already decided it will
 // never be real (unmeasurable under this project's never-verify-typed-text
 // trust model).
@@ -25,20 +25,23 @@ export function StatCards() {
       .catch(() => setData({ races_joined: 0, races_won: 0, avg_wpm: 0 }))
   }, [])
 
-  if (data === null) {
-    return <p className="text-sm text-muted-foreground">Loading...</p>
-  }
-
   return (
-    <div className="grid gap-3 sm:grid-cols-3">
-      {buildStats(data).map((stat) => (
-        <Card key={stat.label} className="flex flex-row items-center justify-between px-4 py-3">
-          <span className="text-sm text-muted-foreground">{stat.label}</span>
-          <span className={`font-heading text-2xl font-bold ${stat.valueClassName}`}>
-            {stat.value}
-          </span>
-        </Card>
-      ))}
-    </div>
+    <Card className="h-full">
+      <CardHeader className="px-4 pb-0">
+        <CardTitle className="text-base">Your Stats</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-1.5 px-4 pt-2">
+        {data === null && <p className="text-xs text-muted-foreground">Loading...</p>}
+        {data !== null &&
+          buildStats(data).map((stat) => (
+            <div key={stat.label} className="flex items-center justify-between">
+              <span className="text-sm font-medium text-muted-foreground">{stat.label}</span>
+              <span className={`font-heading text-xl font-bold ${stat.valueClassName}`}>
+                {stat.value}
+              </span>
+            </div>
+          ))}
+      </CardContent>
+    </Card>
   )
 }

@@ -19,16 +19,24 @@ export function AppHeader() {
   }
 
   return (
-    <header className="flex items-center justify-between rounded-lg border bg-card px-4 py-2.5 shadow-xs">
-      <span className="font-heading text-lg font-bold text-primary">Aviron</span>
-      <div className="flex items-center gap-2">
-        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-          {initialsFromEmail(email)}
+    // No longer position:fixed — RacesPage's root is now h-screen with
+    // overflow-hidden, so the whole page never scrolls in the first place
+    // and a normal-flow header stays in view without needing to escape the
+    // document flow. Constrained to the same max-w-325 as the page content
+    // below (not the design's own edge-to-edge treatment), so the navbar
+    // lines up with the rest of the page instead of spanning the viewport.
+    <header className="flex shrink-0 justify-center border-b bg-card px-10 py-3">
+      <div className="flex w-full max-w-325 items-center justify-between">
+        <span className="font-heading text-xl font-bold text-primary">Aviron</span>
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+            {initialsFromEmail(email)}
+          </div>
+          <span className="text-sm font-medium text-muted-foreground">{email}</span>
+          <Button variant="outline" size="sm" className="rounded-full" onClick={handleLogout}>
+            Log Out
+          </Button>
         </div>
-        <span className="text-sm text-muted-foreground">{email}</span>
-        <Button variant="outline" size="sm" onClick={handleLogout}>
-          Log Out
-        </Button>
       </div>
     </header>
   )

@@ -46,38 +46,44 @@ export function CreateRaceForm({ onCreated }: CreateRaceFormProps) {
   }
 
   return (
-    <Card className="border-2">
-      <CardHeader className="pb-2">
-        <CardTitle>Create a Race</CardTitle>
+    <Card>
+      <CardHeader className="px-4 pb-0">
+        <CardTitle className="text-base">Create a Race</CardTitle>
       </CardHeader>
       <form onSubmit={handleSubmit}>
-        <CardContent className="flex flex-col gap-3">
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-2 flex flex-col gap-1.5">
-              <Label htmlFor="race-name">Name</Label>
+        <CardContent className="flex flex-col gap-2 px-4 pt-2">
+          <div className="grid grid-cols-3 gap-2">
+            <div className="col-span-2 flex flex-col gap-1">
+              <Label htmlFor="race-name" className="text-xs">
+                Name
+              </Label>
               <Input
                 id="race-name"
+                className="h-8 text-xs"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
               />
             </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="race-distance">Words</Label>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="race-distance" className="text-xs">
+                Words
+              </Label>
               <Input
                 id="race-distance"
                 type="number"
                 min={1}
+                className="h-8 font-mono text-xs"
                 value={distanceMeters}
                 onChange={(e) => setDistanceMeters(e.target.value)}
                 required
               />
             </div>
           </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <p className="text-xs text-destructive">{error}</p>}
         </CardContent>
-        <CardFooter className="pt-0">
-          <Button type="submit" disabled={!isValid || submitting}>
+        <CardFooter className="px-4 pt-0">
+          <Button type="submit" size="sm" className="w-full" disabled={!isValid || submitting}>
             {submitting ? "Creating..." : "Create race"}
           </Button>
         </CardFooter>

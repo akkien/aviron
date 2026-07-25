@@ -61,11 +61,16 @@ export function OpenRacesList({ onJoined }: OpenRacesListProps) {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Open Races</CardTitle>
+    // h-full + flex flex-col here, with the actual list as the flex-1
+    // min-h-0 overflow-y-auto child below, is what lets this card stretch
+    // to match the row's height (RacesPage's items-stretch) and scroll
+    // *internally* if there are more races than fit, instead of growing
+    // past its row and forcing the whole page to scroll.
+    <Card className="flex h-full flex-col">
+      <CardHeader className="shrink-0 px-4 pb-0">
+        <CardTitle className="text-base">Open Races</CardTitle>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 pt-2">
         {races === null && <p className="text-sm text-muted-foreground">Loading...</p>}
         {races !== null && races.length === 0 && (
           <p className="text-sm text-muted-foreground">No open races right now — create one!</p>
