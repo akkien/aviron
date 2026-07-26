@@ -1,135 +1,32 @@
-# Current Feature: Dockerize race-service & race-router (Compose, 2 replicas)
+# Current Feature
 
 ## Status
 
-In Progress
+Not Started
 
 ## Goals
 
-- Containerize `cmd/server` and `cmd/race-router` (neither has ever been
-  dockerized — confirmed via `find`, no `Dockerfile` exists anywhere in
-  the repo yet) so the user can drive the exact same cross-instance
-  scenario `load/multi-instance-check.sh` already proved locally, but via
-  real Docker networking and `docker compose up` instead of local
-  processes — for the user's own hands-on testing, not another automated
-  script.
-- `docker-compose.yml` gains 2 `race-service` replicas (`server-a`,
-  `server-b`) and 1 `race-router` service, wired to the existing
-  `postgres`/`redis` services already in the file.
-- Correct env wiring for the Docker-network context specifically —
-  **not** a copy of the bash script's `localhost:PORT` values:
-  `INSTANCE_ID` must be each server's own address as reachable *on the
-  Docker network* (its Compose service name, e.g. `server-a:8080`), since
-  containers reach each other via Docker's embedded DNS by service name,
-  never `localhost` (each container has its own network namespace).
-  `RACE_SERVICE_INSTANCES`/`DATABASE_URL`/`REDIS_URL` follow the same
-  service-name convention.
-- Real `depends_on: condition: service_healthy` ordering (Postgres/Redis
-  healthchecks), not the manual retry-loop polling
-  `multi-instance-check.sh` had to hand-roll for the same readiness
-  problem — Compose has a real primitive for this.
+<!-- populated by /feature load -->
 
 ## Explain
 
-- Not a spec file — inline request, loaded directly per the user's own
-  instruction after finishing `multi-instance-dev-setup.md`.
-- Confirmed via `go version`: the local toolchain is `go1.26.4`, exactly
-  matching `backend/go.mod`'s `go 1.26.4` directive — the build stage
-  should use a `golang:1.26-alpine` base to match; confirm the tag
-  actually resolves at `start` (build it for real, don't assume).
-- **Real constraint carried over from this session's own
-  `multi-instance-check.sh` work**: `internal/db/migrate.go` uses a
-  relative `"file://migrations"` path, so whatever runs the compiled
-  binary needs a `migrations/` directory alongside it at runtime, in the
-  container's working directory — the final image has to `COPY` that
-  directory in, not just the two binaries.
-- One shared multi-stage `Dockerfile` for both binaries, not two separate
-  images — `cmd/server` and `cmd/race-router` are two small binaries in
-  the same Go module; building both in one image and picking which to run
-  via each Compose service's `command:` override avoids duplicating the
-  build stage and its layer cache. All three services (`server-a`,
-  `server-b`, `race-router`) share one `image:` tag so Compose builds it
-  once, not three times.
-- **A genuine simplification versus the bash script, not just a port
-  of it**: `multi-instance-check.sh` needed *different* host ports
-  (`8080`/`8081`) for its two instances because both ran directly on the
-  host, sharing one network namespace. In Compose, `server-a` and
-  `server-b` are separate containers with separate network namespaces, so
-  both can listen on the *same* internal port (`8080`) — only the
-  *host-exposed* mapped ports need to differ (for optional direct
-  debugging access, mirroring the bash script's own "bypass the router to
-  isolate a bug" precedent), not the containers' own internal ports or
-  each other's view of one another.
-- `JWT_SECRET` must be identical across `server-a`/`server-b` (a JWT
-  signed by one must verify on the other, since the router round-robins
-  room-less requests like login across both) — set it explicitly as a
-  shared value in both services' `environment:` rather than relying on
-  both incidentally falling back to the same hardcoded dev default.
-- Postgres/Redis in `docker-compose.yml` currently have no `healthcheck:`
-  blocks at all (confirmed via reading the file) — needed now for real
-  `condition: service_healthy` dependency ordering; alpine's `wget
-  --spider` (no `curl` in the base image) is the healthcheck mechanism for
-  the two server instances themselves, matching the `/healthz` endpoint
-  that already exists.
+<!-- populated by /feature load -->
 
 ## Plan
 
-1. New `backend/Dockerfile` — multi-stage:
-   - Builder: `FROM golang:1.26-alpine AS builder`, copy `go.mod`/`go.sum`
-     first (`go mod download`, layer-cached separately from source
-     changes), copy the rest of `backend/`, `go build -o /out/server
-     ./cmd/server` and `go build -o /out/race-router ./cmd/race-router`.
-   - Final: a minimal `alpine` base, `WORKDIR /app`, copy both binaries
-     from the builder plus `migrations/` (per the relative-path constraint
-     in Explain), default `CMD ["/app/server"]` (the common case;
-     `race-router`'s Compose service overrides via `command:`).
-2. New `backend/.dockerignore` — excludes the locally-built `server`
-   binary, `.server.pid`, `server.log`, and `.env` (never bake local
-   secrets into an image layer).
-3. `docker-compose.yml`:
-   - Add `healthcheck:` to `postgres` (`pg_isready -U aviron`) and `redis`
-     (`redis-cli ping`).
-   - New `server-a`/`server-b` services: `build: { context: ./backend }`,
-     shared `image: aviron-backend:local`, `environment:` —
-     `DATABASE_URL=postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable`,
-     `REDIS_URL=redis://redis:6379/0`, `JWT_SECRET` (shared explicit
-     value), `INSTANCE_ID=server-a:8080` / `server-b:8080`, `PORT=8080`
-     (internal — both containers can reuse the same internal port, per
-     Explain); `depends_on: postgres/redis: condition: service_healthy`;
-     own `healthcheck:` via `wget --spider -q http://localhost:8080/healthz`;
-     host ports mapped to `8080`/`8081` for optional direct debugging.
-   - New `race-router` service: same image, `command: ["/app/race-router"]`,
-     `environment:` — `RACE_SERVICE_INSTANCES=server-a:8080,server-b:8080`,
-     `RACE_ROUTER_LISTEN_ADDR=:8080`, `REDIS_URL=redis://redis:6379/0`;
-     `depends_on: server-a/server-b` (`service_started` — no `/healthz` on
-     the router itself to condition on, confirmed in `race-router.md`);
-     host port mapped to `9090`, the same port the user already knows from
-     the bash script.
-4. Verify: `docker compose build`, then `docker compose up -d postgres
-   redis server-a server-b race-router`, confirm all become healthy/up,
-   and do one basic smoke test (`curl` register/login/create through
-   `localhost:9090`) — enough to confirm the wiring actually works, not a
-   full re-run of `multi-instance-check.sh` (that script assumes local
-   processes, not Compose services, and isn't this feature's job to
-   adapt). Beyond that smoke test, this is deliberately handed to the user
-   for their own hands-on testing, per their own stated intent.
+<!-- populated by /feature load -->
 
 ## Notes
 
-- Doesn't replace `load/multi-instance-check.sh` — that script stays the
-  automated, repeatable acceptance test for CI-style/dev-loop verification
-  against plain local processes; this is a separate, Docker-based way for
-  the user to explore the same behavior by hand.
-- Still not Kubernetes, still not a production load balancer —
-  `race-router` is still the same single, deliberately-non-redundant
-  process (per `race-router.md`'s own disclosed limitation), just now
-  containerized like everything else. `phase5/`'s actual Kubernetes work
-  is still the next real infrastructure step after this, not this feature.
-- No TLS between any of these services — same as the bash-script
-  verification, consistent with `race-router.md`'s Notes that TLS is the
-  outer layer's job in a real deployment.
+<!-- populated by /feature load -->
 
 ## History
+
+- **Dockerize race-service & race-router (Compose, 2 replicas), plus a Register Page** (2026-07-26) — Not a spec file, an inline request loaded directly after `multi-instance-dev-setup.md`, to let the user drive the same cross-instance scenario `load/multi-instance-check.sh` proved via real Docker networking (`docker compose up`) instead of local processes. New shared multi-stage `backend/Dockerfile` (`golang:1.26-alpine` builder, `alpine:latest` runtime — confirmed the tag actually resolves by building for real, not assumed) builds both `cmd/server` and `cmd/race-router` into one image, `COPY`ing `migrations/` alongside them since `internal/db/migrate.go`'s `"file://migrations"` path is relative to cwd. `docker-compose.yml` gained real `healthcheck:` blocks on `postgres`/`redis` (previously none existed) plus three new services: `server-a`/`server-b` (both listening on the *same* internal port `8080` — a genuine simplification over the bash script's need for different host ports, since separate containers have separate network namespaces — host-mapped to `8080`/`8081` for optional direct debugging, `INSTANCE_ID` set to each one's own Docker-network address like `server-a:8080` rather than a bare label, matching `race-router.md`'s already-shipped design of trusting `Owner()`'s raw value as the proxy target directly) and `race-router` (host port `9090`, the same port the bash script's user already knows). `depends_on: condition: service_healthy` replaces the manual retry-loop polling `multi-instance-check.sh` had to hand-roll for the same readiness problem. Verified live, not just structurally: `docker compose build` succeeded confirming `golang:1.26-alpine` resolves; `docker compose up -d postgres redis server-a server-b race-router` brought all 5 containers to `healthy` via the new dependency ordering; a live smoke test through the router (`localhost:9090`) — register → login → create race — succeeded end to end, confirming cross-instance JWT verification (shared `JWT_SECRET`) and routing both work for real. `go build ./...`/`go test ./...` clean.
+
+  **Bundled onto the same branch, per explicit user choice when asked, rather than a separate `/feature` cycle**: a Register page. New `frontend/src/pages/RegisterPage.tsx` mirrors `LoginPage.tsx`'s exact shape, submitting `POST /auth/register` then immediately `POST /auth/login` with the same credentials (register itself returns no token) before navigating to `/`; `App.tsx` gained the `/register` route, and `LoginPage`/`RegisterPage` now cross-link. `types/auth.ts` gained `RegisterRequest`/`RegisterResponse` mirroring `backend/internal/auth/dtos.go`. Verified: `yarn build`/`yarn lint` clean (same pre-existing shadcn warning as every prior frontend feature), plus a live curl of the exact register-then-login sequence the page performs against the running Docker stack. Same disclosed gap as every frontend feature this project: no browser automation available in this environment, so the actual page render/click-through wasn't directly verified.
+
+  **A real, disclosed gap surfaced during live user testing of the dockerized stack, not fixed in this feature**: a `POST /races` 500 was root-caused, via a debugging session, to a foreign-key violation (`races_created_by_fkey`) — the user's browser held a stale JWT (self-contained, signature-only-verified, no server-side session) from a `user_id` that no longer existed in the fresh Docker Postgres volume. Finding this required grepping raw Postgres container logs directly, because `RaceHandler.Create` (`backend/internal/race/handler.go:69-72`) swallows the real `err` before writing its generic `500 internal_error` — the app's own structured JSON logs had zero signal beyond the summary `http_request` line. Offered to add `slog.Error` logging at that call site (and the handler's other unlogged-500 spots); not requested/implemented this session — a real, still-open gap for whenever that handler is next touched.
 
 - **Multi-Instance Local Dev Setup & Verification** (2026-07-26) — Third and final Phase 4 `horizontal-scaling/` spec (`context/features/phase4/horizontal-scaling/multi-instance-dev-setup.md`), the actual acceptance test for `redis-room-registry.md` and `race-router.md` — deliberately proven on a laptop with two plain local processes before `phase5/`'s Kubernetes work ever enters the picture, per that phase's own hard-dependency note. No new Go application code: a new `load/multi-instance-check.sh` orchestrates two real `cmd/server` processes plus a real `cmd/race-router`, driving the full 10-step verification plan (register/create/join/start/telemetry/finish, all through the router, never a backend directly) via `curl`/`jq`, with a new `load/scenarios/multi-instance-check.js` (reusing the existing `ws-client.js`/`auth.js` k6 helpers) handling the WebSocket legs, plus a new `load/lib/reconnect-client.js` mirroring the frontend's exact bounded reconnect shape (3 attempts, 2s apart) for the step-10 kill test. `load/multi-instance-check.md` is the runbook, sibling to the existing `load/README.md`. Two real bugs corrected in the spec's own example commands before any of this could work at all: `INSTANCE_ID` must be a reachable `host:port` (a bare label like `a`/`b` breaks `race-router`'s already-shipped design of using `Owner()`'s raw return value directly as the proxy target), and `race-router` reads `RACE_ROUTER_LISTEN_ADDR`, not `PORT` — the spec's own example would have silently started it on the wrong port. **This feature's real verification was a live run, not `go test`, and that live run caught three more real bugs no amount of code review would have found**: (1) a silent orphaned-process bug — backgrounding `(cd backend && ... "$BIN") &` without `exec` doesn't guarantee `$!` is the real server binary's PID, and `kill "$PID_B"` reported success while the actual process survived as an orphan (confirmed via `ps` showing `PPID 1`), which made the first kill-test attempt look like a false pass (the k6 run "finished cleanly" because the instance was never actually dead) — fixed by adding `exec` inside each subshell, forcing it to replace itself with the binary in place; (2) the ownership log-grep assertion checked for a `"race_id":"<id>"` JSON key that — confirmed by reading a real captured log line — only ever appears on a room actor's *error*-path logging (a failed Claim/Refresh/Release), never during healthy operation, so it failed on literally every single run for the wrong reason; fixed by grepping for the race ID as it actually appears in a healthy run, inside the `RequestLog` middleware's `http_request` access-log `path` field; (3) that wrong assertion's failure never stopped the script, because macOS's default `/bin/bash` is 3.2.57 (frozen pre-GPLv3, predates `inherit_errexit` which bash 4.4 added) — a failing bare statement inside a function whose own invocation is captured via `$(...)` doesn't abort under this bash version the way `set -e` would suggest elsewhere — fixed with an explicit `if` check instead of relying on `errexit` propagation. Also caught and fixed a timing bug in the kill test itself: the fast 10-word races used for steps 1-9 can finish in as little as ~4 seconds, so a kill issued a few seconds in could land *after* natural completion rather than mid-race — fixed with a dedicated 60-word `KILL_TEST_DISTANCE_METERS` for that step only, giving an unambiguous margin. With all of that fixed, two full back-to-back live runs (fresh `docker compose down -v && up -d` between them, per this spec's own "done" bar) both passed cleanly end to end — round-robin correctly alternated both instances as owner across repeated runs, and the kill test correctly showed the live connections breaking when the owner died, followed by a bounded reconnect attempt failing cleanly (not hanging) once both TTLs lapsed, confirming `race-router.md`'s documented mid-race-crash limitation behaves exactly as written, not as a bug. Also added a `multicheck` Makefile target and a cross-reference from `load/README.md`. This completes Phase 4's entire `horizontal-scaling/` sub-area (`redis-room-registry.md`, `race-router.md`, `multi-instance-dev-setup.md`) — per `phase-4-plan.md`, only the `event-pipeline/` sub-area (Kafka: `kafka-producer.md`, `kafka-consumer-postgres-sink.md`) remains before Phase 4 is fully done, independent of this horizontal-scaling chain.
 
