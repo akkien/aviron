@@ -7,9 +7,9 @@ import (
 )
 
 func TestDecodeClientMessage_JoinRace_OK(t *testing.T) {
-	m, err := decodeClientMessage([]byte(`{"type":"join_race","race_id":"race-1"}`))
+	m, err := DecodeClientMessage([]byte(`{"type":"join_race","race_id":"race-1"}`))
 	if err != nil {
-		t.Fatalf("decodeClientMessage() error = %v", err)
+		t.Fatalf("DecodeClientMessage() error = %v", err)
 	}
 	if m.Type != "join_race" {
 		t.Errorf("Type = %q, want %q", m.Type, "join_race")
@@ -20,9 +20,9 @@ func TestDecodeClientMessage_JoinRace_OK(t *testing.T) {
 }
 
 func TestDecodeClientMessage_Telemetry_OK(t *testing.T) {
-	m, err := decodeClientMessage([]byte(`{"type":"telemetry","seq":42,"distance_m":812,"pace_watt":210,"ts":1234}`))
+	m, err := DecodeClientMessage([]byte(`{"type":"telemetry","seq":42,"distance_m":812,"pace_watt":210,"ts":1234}`))
 	if err != nil {
-		t.Fatalf("decodeClientMessage() error = %v", err)
+		t.Fatalf("DecodeClientMessage() error = %v", err)
 	}
 	if m.Type != "telemetry" {
 		t.Errorf("Type = %q, want %q", m.Type, "telemetry")
@@ -42,9 +42,9 @@ func TestDecodeClientMessage_Telemetry_OK(t *testing.T) {
 }
 
 func TestDecodeClientMessage_LeaveRace_OK(t *testing.T) {
-	m, err := decodeClientMessage([]byte(`{"type":"leave_race"}`))
+	m, err := DecodeClientMessage([]byte(`{"type":"leave_race"}`))
 	if err != nil {
-		t.Fatalf("decodeClientMessage() error = %v", err)
+		t.Fatalf("DecodeClientMessage() error = %v", err)
 	}
 	if m.Type != "leave_race" {
 		t.Errorf("Type = %q, want %q", m.Type, "leave_race")
@@ -52,32 +52,32 @@ func TestDecodeClientMessage_LeaveRace_OK(t *testing.T) {
 }
 
 func TestDecodeClientMessage_MalformedJSON(t *testing.T) {
-	_, err := decodeClientMessage([]byte(`not json`))
+	_, err := DecodeClientMessage([]byte(`not json`))
 	if err == nil {
-		t.Fatal("decodeClientMessage() error = nil, want an error for malformed JSON")
+		t.Fatal("DecodeClientMessage() error = nil, want an error for malformed JSON")
 	}
 }
 
 func TestDecodeClientMessage_UnknownType(t *testing.T) {
-	_, err := decodeClientMessage([]byte(`{"type":"ping"}`))
+	_, err := DecodeClientMessage([]byte(`{"type":"ping"}`))
 	if err == nil {
-		t.Fatal("decodeClientMessage() error = nil, want an error for an unknown type")
+		t.Fatal("DecodeClientMessage() error = nil, want an error for an unknown type")
 	}
 }
 
 func TestDecodeClientMessage_EmptyType(t *testing.T) {
-	_, err := decodeClientMessage([]byte(`{"race_id":"race-1"}`))
+	_, err := DecodeClientMessage([]byte(`{"race_id":"race-1"}`))
 	if err == nil {
-		t.Fatal("decodeClientMessage() error = nil, want an error for a missing/empty type")
+		t.Fatal("DecodeClientMessage() error = nil, want an error for a missing/empty type")
 	}
 }
 
 func TestClientMessage_ToRoomEvent_JoinRace(t *testing.T) {
 	m := ClientMessage{Type: "join_race", RaceID: "race-1"}
 
-	ev, err := m.toRoomEvent("user-1", "Alice")
+	ev, err := m.ToRoomEvent("user-1", "Alice")
 	if err != nil {
-		t.Fatalf("toRoomEvent() error = %v", err)
+		t.Fatalf("ToRoomEvent() error = %v", err)
 	}
 
 	joined, ok := ev.(room.ParticipantJoined)
@@ -95,9 +95,9 @@ func TestClientMessage_ToRoomEvent_JoinRace(t *testing.T) {
 func TestClientMessage_ToRoomEvent_Telemetry(t *testing.T) {
 	m := ClientMessage{Type: "telemetry", Seq: 7, DistanceM: 12}
 
-	ev, err := m.toRoomEvent("user-1", "Alice")
+	ev, err := m.ToRoomEvent("user-1", "Alice")
 	if err != nil {
-		t.Fatalf("toRoomEvent() error = %v", err)
+		t.Fatalf("ToRoomEvent() error = %v", err)
 	}
 
 	telemetry, ok := ev.(room.TelemetryReceived)
@@ -118,9 +118,9 @@ func TestClientMessage_ToRoomEvent_Telemetry(t *testing.T) {
 func TestClientMessage_ToRoomEvent_LeaveRace(t *testing.T) {
 	m := ClientMessage{Type: "leave_race"}
 
-	ev, err := m.toRoomEvent("user-1", "Alice")
+	ev, err := m.ToRoomEvent("user-1", "Alice")
 	if err != nil {
-		t.Fatalf("toRoomEvent() error = %v", err)
+		t.Fatalf("ToRoomEvent() error = %v", err)
 	}
 
 	left, ok := ev.(room.ParticipantLeft)
@@ -135,8 +135,8 @@ func TestClientMessage_ToRoomEvent_LeaveRace(t *testing.T) {
 func TestClientMessage_ToRoomEvent_UnknownType(t *testing.T) {
 	m := ClientMessage{Type: "ping"}
 
-	_, err := m.toRoomEvent("user-1", "Alice")
+	_, err := m.ToRoomEvent("user-1", "Alice")
 	if err == nil {
-		t.Fatal("toRoomEvent() error = nil, want an error for an unknown type")
+		t.Fatal("ToRoomEvent() error = nil, want an error for an unknown type")
 	}
 }

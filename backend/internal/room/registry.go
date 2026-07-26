@@ -38,6 +38,47 @@ func (NoopLocator) Claim(ctx context.Context, raceID string) (bool, error) { ret
 func (NoopLocator) Refresh(ctx context.Context, raceID string) error       { return nil }
 func (NoopLocator) Release(ctx context.Context, raceID string) error       { return nil }
 
+// RoomBus carries every real-time, room-scoped message to/from whichever
+// process holds this room's WebSocket connections (room-message-bus.md,
+// room-service-adapter.md). Defined here using only this package's own
+// RoomEvent type, never internal/roomrelay's envelope types or
+// internal/ws's protocol types directly: internal/ws already imports
+// internal/room (for RoomEvent itself), so internal/room importing either
+// package back would cycle. The concrete adapter that decodes raw client
+// frames into RoomEvent — the only place that needs both — lives one level
+// up, in internal/app.go's composition root, the same import-direction
+// constraint kafka-consumer-postgres-sink.md's own composition already
+// established a precedent for.
+type RoomBus interface {
+	// SubscribeIn returns raceID's inbound RoomEvents, already decoded,
+	// plus an idempotent unsubscribe func. The returned channel closes once
+	// ctx is done, the subscription ends, or unsubscribe is called —
+	// whichever happens first.
+	SubscribeIn(ctx context.Context, raceID string) (<-chan RoomEvent, func(), error)
+	// PublishOut publishes an already-marshaled broadcast frame for raceID
+	// — called once per message RoomActor.Broadcast() produces.
+	PublishOut(ctx context.Context, raceID string, payload []byte) error
+	// PublishRoomClosed signals raceID's room is finished. Always called
+	// only after every PublishOut call for this raceID has already gone
+	// out — see Spawn's drainBroadcast.
+	PublishRoomClosed(ctx context.Context, raceID string) error
+}
+
+// NoopRoomBus is the RoomBus for tests and any Registry with nothing real
+// behind it — mirrors NoopLocator/NoopPublisher exactly. SubscribeIn hands
+// back an already-closed channel (nothing ever arrives, so nothing can
+// leak), PublishOut/PublishRoomClosed are no-ops.
+type NoopRoomBus struct{}
+
+func (NoopRoomBus) SubscribeIn(ctx context.Context, raceID string) (<-chan RoomEvent, func(), error) {
+	ch := make(chan RoomEvent)
+	close(ch)
+	return ch, func() {}, nil
+}
+
+func (NoopRoomBus) PublishOut(ctx context.Context, raceID string, payload []byte) error { return nil }
+func (NoopRoomBus) PublishRoomClosed(ctx context.Context, raceID string) error          { return nil }
+
 // Registry maps a race_id to the RoomActor currently running that race. It
 // only ever holds *RoomActor pointers and dispatches to them — it never
 // reads or writes a RoomActor's participants directly, preserving the
@@ -51,6 +92,7 @@ type Registry struct {
 	tickObserver TickObserver
 	locator      RoomLocator
 	publisher    EventPublisher
+	bus          RoomBus
 }
 
 // NewRegistry constructs an empty Registry. logger is the process-wide
@@ -64,8 +106,11 @@ type Registry struct {
 // running multiple instances. publisher is likewise a single process-wide
 // dependency (kafka-producer.md) — NoopPublisher for no-Kafka local dev, or
 // a real *kafka.Producer.
-func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLocator, publisher EventPublisher) *Registry {
-	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver, locator: locator, publisher: publisher}
+// bus is likewise a single process-wide dependency (room-message-bus.md,
+// room-service-adapter.md) — NoopRoomBus for tests, or the real adapter
+// internal/app.go composes around *roomrelay.Bus.
+func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLocator, publisher EventPublisher, bus RoomBus) *Registry {
+	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver, locator: locator, publisher: publisher, bus: bus}
 }
 
 // Spawn constructs a RoomActor for raceID seeded with the race's
@@ -94,8 +139,25 @@ func (reg *Registry) Spawn(ctx context.Context, raceID string, distanceMeters in
 		roomLogger.Error("roomlocator: claim failed", slog.Any("error", err))
 	}
 
+	// SubscribeIn is called synchronously, here, rather than inside
+	// feedInbox's own goroutine: NATS Core has no message replay
+	// (room-message-bus.md), so if the subscription weren't established
+	// until some arbitrary later moment on a background goroutine, a
+	// caller could publish a race's very first join_race the instant Spawn
+	// returns and lose it to a subscription that hadn't actually reached
+	// the bus yet — the same synchronous-before-return treatment Claim
+	// above already gets, for the same reason.
+	sub, unsubscribeIn, err := reg.bus.SubscribeIn(ctx, raceID)
+	if err != nil {
+		roomLogger.Error("roombus: subscribe in failed", slog.Any("error", err))
+	}
+
 	go actor.Run()
 	go reg.cleanupWhenDone(raceID, actor)
+	if err == nil {
+		go reg.feedInbox(sub, unsubscribeIn, actor)
+	}
+	go reg.drainBroadcast(actor.Context(), raceID, actor, roomLogger)
 	// heartbeatInterval is read here, synchronously on the caller's
 	// goroutine, and passed in rather than read inside the heartbeat
 	// goroutine itself — mirrors NewRoomActor reading noShowTimeoutDuration
@@ -121,6 +183,66 @@ func (reg *Registry) heartbeat(ctx context.Context, raceID string, roomLogger *s
 			}
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// feedInbox feeds every already-decoded RoomEvent arriving on sub into
+// actor's single-writer inbox via the same Send entry point every other
+// caller already uses. sub is subscribed synchronously by Spawn, before it
+// returns (see the comment there) — this goroutine only drains it and
+// unsubscribes once done. A plain range is enough — sub's channel already
+// closes once ctx is done, the subscription ends, or unsubscribe is
+// called, mirroring roomlocator.SubscribeRoomEvents — no separate
+// select-on-ctx.Done() needed in this loop.
+func (reg *Registry) feedInbox(sub <-chan RoomEvent, unsubscribe func(), actor *RoomActor) {
+	defer unsubscribe()
+
+	for ev := range sub {
+		actor.Send(ev)
+	}
+}
+
+// drainBroadcast publishes every message the room actor broadcasts onto
+// the bus, then — once actor's context is done AND every already-buffered
+// broadcast has actually been published — publishes room_closed exactly
+// once. actor.Broadcast()'s channel is never closed by RoomActor itself
+// (its shutdown signal is always ctx, not a channel close), so a plain
+// `for range actor.Broadcast()` would hang forever and never reach the
+// room_closed publish. This mirrors internal/wsgateway/hub.go's hub.run
+// done case exactly: broadcast (still carrying the final
+// race_state/race_finished) and ctx.Done() (just cancelled) become ready
+// at essentially the same moment, and select picks a ready case
+// pseudo-randomly, not in send order — draining explicitly here guarantees
+// delivery instead of losing whatever was still buffered.
+func (reg *Registry) drainBroadcast(ctx context.Context, raceID string, actor *RoomActor, roomLogger *slog.Logger) {
+	broadcast := actor.Broadcast()
+	for {
+		select {
+		case msg := <-broadcast:
+			if err := reg.bus.PublishOut(ctx, raceID, msg); err != nil {
+				roomLogger.Error("roombus: publish out failed", slog.Any("error", err))
+			}
+		case <-ctx.Done():
+			// ctx is cancelled from here on, so every remaining publish —
+			// including room_closed — uses a fresh background context
+			// instead, mirroring cleanupWhenDone's own precedent for
+			// Release: Bus.PublishOut checks ctx.Err() first and would
+			// otherwise silently drop exactly the messages this drain
+			// exists to deliver.
+			for {
+				select {
+				case msg := <-broadcast:
+					if err := reg.bus.PublishOut(context.Background(), raceID, msg); err != nil {
+						roomLogger.Error("roombus: publish out failed", slog.Any("error", err))
+					}
+				default:
+					if err := reg.bus.PublishRoomClosed(context.Background(), raceID); err != nil {
+						roomLogger.Error("roombus: publish room_closed failed", slog.Any("error", err))
+					}
+					return
+				}
+			}
 		}
 	}
 }

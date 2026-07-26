@@ -17,11 +17,13 @@ import (
 // TestMetrics_EndToEndThroughRealRouteRegistration proves the full
 // composition wired in route.go — Metrics constructed before Registry
 // (Registry needs it as a room.TickObserver), RegisterRoomGauges called
-// once Registry exists, RegisterWSGauges called once WSHandler exists —
-// actually works together, not just internal/metrics's own unit tests in
-// isolation. Doesn't need a reachable Postgres: GET /metrics never touches
-// pool, and pgxpool.New doesn't eagerly connect (TestHealthz_DBUnreachable
-// already establishes this same pattern).
+// once Registry exists — actually works together, not just
+// internal/metrics's own unit tests in isolation. No WS gauges here:
+// race-service no longer holds any WebSocket connections to report on
+// (room-service-adapter.md relocated that code to internal/wsgateway).
+// Doesn't need a reachable Postgres: GET /metrics never touches pool, and
+// pgxpool.New doesn't eagerly connect (TestHealthz_DBUnreachable already
+// establishes this same pattern).
 func TestMetrics_EndToEndThroughRealRouteRegistration(t *testing.T) {
 	dsn := "postgres://aviron:aviron@localhost:1/aviron?sslmode=disable&connect_timeout=1"
 
@@ -35,7 +37,7 @@ func TestMetrics_EndToEndThroughRealRouteRegistration(t *testing.T) {
 	defer pool.Close()
 
 	m := newTestMetrics()
-	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{})
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{})
 
 	mux := httpserver.NewServer()
 	httpserver.RegisterRoutes(mux, config.Config{}, pool, ctx, registry, testLogger, m)
@@ -59,10 +61,8 @@ func TestMetrics_EndToEndThroughRealRouteRegistration(t *testing.T) {
 
 	for _, want := range []string{
 		"aviron_rooms_active 0",
-		"aviron_connections_active 0",
 		`aviron_channel_buffer_used{channel="inbox"} 0`,
 		`aviron_channel_buffer_used{channel="broadcast"} 0`,
-		`aviron_channel_buffer_used{channel="conn"} 0`,
 		"aviron_tick_latency_seconds",
 		"go_goroutines ",
 	} {

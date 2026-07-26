@@ -11,7 +11,6 @@ import (
 
 	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/room"
-	"github.com/akkien/aviron/internal/ws"
 )
 
 var testLogger = slog.New(slog.DiscardHandler)
@@ -30,26 +29,27 @@ func scrape(t *testing.T, m *metrics.Metrics) string {
 	return string(body)
 }
 
-func TestMetrics_ExposesAllFiveRequiredMetrics(t *testing.T) {
+func TestMetrics_ExposesRoomAndRuntimeMetrics(t *testing.T) {
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{})
-	wsHandler := ws.NewWSHandler(registry, []byte("test-secret"), "http://localhost:5173", testLogger)
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{})
 
 	m.RegisterRoomGauges(registry)
-	m.RegisterWSGauges(wsHandler)
 
 	body := scrape(t, m)
 
-	// Active room count, connection count, channel buffer usage (3 labels),
-	// and broadcast tick latency — project-overview.md §9's 5 metrics,
-	// minus goroutine count (satisfied by the auto-registered go_goroutines
-	// below, not a duplicate custom gauge).
+	// Active room count, channel buffer usage (2 labels: inbox/broadcast —
+	// "conn" was race-service-side WS connection buffering, removed along
+	// with RegisterWSGauges when room-service-adapter.md relocated
+	// connection-holding code out of this process), and broadcast tick
+	// latency — project-overview.md §9's metrics minus connection
+	// count/goroutine count (goroutine count is satisfied by the
+	// auto-registered go_goroutines below, not a duplicate custom gauge;
+	// connection count moves to whatever process holds WS connections next,
+	// per ws-gateway.md).
 	wantSubstrings := []string{
 		"aviron_rooms_active 0",
-		"aviron_connections_active 0",
 		`aviron_channel_buffer_used{channel="inbox"} 0`,
 		`aviron_channel_buffer_used{channel="broadcast"} 0`,
-		`aviron_channel_buffer_used{channel="conn"} 0`,
 		"aviron_tick_latency_seconds",
 		"go_goroutines ",
 	}
@@ -73,7 +73,7 @@ func TestMetrics_ObserveTick_AppearsInScrape(t *testing.T) {
 
 func TestMetrics_RegisterRoomGauges_ReflectsRoomCount(t *testing.T) {
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{})
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{})
 	m.RegisterRoomGauges(registry)
 
 	ctx, cancel := context.WithCancel(context.Background())

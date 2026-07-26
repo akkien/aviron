@@ -24,12 +24,12 @@ type ClientMessage struct {
 	TS        int64   `json:"ts,omitempty"`
 }
 
-// decodeClientMessage parses raw inbound JSON into a ClientMessage. It only
+// DecodeClientMessage parses raw inbound JSON into a ClientMessage. It only
 // validates the envelope itself (valid JSON, a known Type) — malformed JSON
 // or an unrecognized Type is returned as an error for the caller
-// (websocket/ws-endpoint.md) to log and drop without ending the connection,
-// per this feature's spec.
-func decodeClientMessage(data []byte) (ClientMessage, error) {
+// (websocket/ws-endpoint.md, internal/room's bus-message handler) to log and
+// drop without ending the connection or the room, per this feature's spec.
+func DecodeClientMessage(data []byte) (ClientMessage, error) {
 	var m ClientMessage
 	if err := json.Unmarshal(data, &m); err != nil {
 		return ClientMessage{}, fmt.Errorf("ws: decode client message: %w", err)
@@ -44,13 +44,13 @@ func decodeClientMessage(data []byte) (ClientMessage, error) {
 	return m, nil
 }
 
-// toRoomEvent converts a decoded ClientMessage into the room.RoomEvent it
+// ToRoomEvent converts a decoded ClientMessage into the room.RoomEvent it
 // represents. userID and displayName come from the connection's already
 // -authenticated session (the session_token from the WS handshake query
 // string), not from the message itself — the wire format's join_race message
 // only carries race_id (already known from the handshake), so it can't
 // supply a display name on its own.
-func (m ClientMessage) toRoomEvent(userID, displayName string) (room.RoomEvent, error) {
+func (m ClientMessage) ToRoomEvent(userID, displayName string) (room.RoomEvent, error) {
 	switch m.Type {
 	case "join_race":
 		return room.ParticipantJoined{UserID: userID, DisplayName: displayName}, nil

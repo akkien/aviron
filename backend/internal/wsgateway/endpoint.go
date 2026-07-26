@@ -1,4 +1,4 @@
-package ws
+package wsgateway
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/ws"
 )
 
 // writeTimeout bounds a single frame write so one hung client can't leave a
@@ -183,13 +184,13 @@ func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, d
 			return
 		}
 
-		msg, err := decodeClientMessage(data)
+		msg, err := ws.DecodeClientMessage(data)
 		if err != nil {
 			logger.Warn("dropping malformed message", slog.Any("error", err))
 			continue
 		}
 
-		ev, err := msg.toRoomEvent(userID, displayName)
+		ev, err := msg.ToRoomEvent(userID, displayName)
 		if err != nil {
 			logger.Warn("dropping message", slog.Any("error", err))
 			continue

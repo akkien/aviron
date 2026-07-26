@@ -14,7 +14,6 @@ import (
 	"github.com/akkien/aviron/internal/postgres"
 	"github.com/akkien/aviron/internal/race"
 	"github.com/akkien/aviron/internal/room"
-	"github.com/akkien/aviron/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
@@ -55,12 +54,11 @@ func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool
 	server.Handle("GET /leaderboard/me", requireAuth(http.HandlerFunc(leaderboardHandler.Me)))
 	server.Handle("GET /leaderboard", requireAuth(http.HandlerFunc(leaderboardHandler.Top)))
 
-	// Not wrapped in requireAuth: this endpoint authenticates via the
-	// query-string session_token (websocket/ws-endpoint.md), not the
-	// Authorization header middleware.Auth expects.
-	wsHandler := ws.NewWSHandler(registry, []byte(cfg.JWTSecret), cfg.CORSAllowedOrigin, logger)
-	m.RegisterWSGauges(wsHandler)
-	server.Handle("GET /ws", wsHandler)
+	// GET /ws no longer lives here: race-service no longer terminates
+	// WebSocket connections directly (room-service-adapter.md) — that
+	// handler code relocated to internal/wsgateway, to be stood up as its
+	// own process by ws-gateway.md. Disclosed temporary gap: nothing in
+	// this repo serves real WebSocket traffic until that spec ships.
 
 	server.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
 

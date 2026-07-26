@@ -33,8 +33,8 @@ type InboundEnvelope struct {
 	DisplayName string      `json:"display_name,omitempty"`
 	// Message is the raw client JSON frame, present only when
 	// Kind == InboundKindMessage — kept as the exact bytes
-	// ws.decodeClientMessage already knows how to parse, so a bus-message
-	// consumer can reuse ws.ClientMessage.toRoomEvent(userID, displayName)
+	// ws.DecodeClientMessage already knows how to parse, so a bus-message
+	// consumer can reuse ws.ClientMessage.ToRoomEvent(userID, displayName)
 	// unchanged instead of a second wire format for the same message types.
 	Message json.RawMessage `json:"message,omitempty"`
 }

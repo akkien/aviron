@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/akkien/aviron/internal/room"
-	"github.com/akkien/aviron/internal/ws"
 )
 
 // Metrics owns a private prometheus.Registry (not the global
@@ -17,14 +16,21 @@ import (
 // constructor-threaded rather than relying on mutable package-level state,
 // consistent with this project's existing no-hidden-globals convention.
 //
-// Construction is split across NewMetrics, RegisterRoomGauges, and
-// RegisterWSGauges rather than one shot because of a real ordering
-// constraint: room.Registry needs a room.TickObserver (this type) at its
-// own construction time, but the room/connection gauges below need a
-// *room.Registry / *ws.WSHandler to read from — those don't exist until
-// after Registry (and, in turn, WSHandler) are constructed. NewMetrics has
-// zero dependencies so it can run first; the two Register* calls run once
-// their argument actually exists.
+// Construction is split across NewMetrics and RegisterRoomGauges rather than
+// one shot because of a real ordering constraint: room.Registry needs a
+// room.TickObserver (this type) at its own construction time, but the room
+// gauges below need a *room.Registry to read from — that doesn't exist
+// until after Registry is constructed. NewMetrics has zero dependencies so
+// it can run first; RegisterRoomGauges runs once its argument actually
+// exists.
+//
+// Connection-count/conn-buffer-usage gauges (project-overview.md §9)
+// previously lived here as RegisterWSGauges, wired against
+// internal/ws.WSHandler — removed when room-service-adapter.md relocated
+// that connection-holding code to internal/wsgateway, since race-service no
+// longer holds any WebSocket connections to report on. ws-gateway.md owns
+// bringing an equivalent gauge back, scoped to whatever process actually
+// holds those connections next.
 type Metrics struct {
 	reg         *prometheus.Registry
 	tickLatency prometheus.Histogram
@@ -78,21 +84,6 @@ func (m *Metrics) RegisterRoomGauges(registry *room.Registry) {
 		Help:        "Messages currently queued in a channel, summed across every live room/connection.",
 		ConstLabels: prometheus.Labels{"channel": "broadcast"},
 	}, func() float64 { return float64(registry.BroadcastBufferUsage()) }))
-}
-
-// RegisterWSGauges wires the connection-count and per-connection
-// channel-buffer-usage gauges against wsHandler, computed at scrape time.
-func (m *Metrics) RegisterWSGauges(wsHandler *ws.WSHandler) {
-	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "aviron_connections_active",
-		Help: "Number of WebSocket connections currently being served.",
-	}, func() float64 { return float64(wsHandler.ConnectionCount()) }))
-
-	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name:        "aviron_channel_buffer_used",
-		Help:        "Messages currently queued in a channel, summed across every live room/connection.",
-		ConstLabels: prometheus.Labels{"channel": "conn"},
-	}, func() float64 { return float64(wsHandler.ConnBufferUsage()) }))
 }
 
 // Handler serves the Prometheus text-format exposition of this registry —

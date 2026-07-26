@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/db"
 	"github.com/akkien/aviron/internal/httpserver"
@@ -17,6 +19,7 @@ import (
 	"github.com/akkien/aviron/internal/redisclient"
 	"github.com/akkien/aviron/internal/room"
 	"github.com/akkien/aviron/internal/roomlocator"
+	"github.com/akkien/aviron/internal/roomrelay"
 )
 
 func Run(cfg *config.Config) {
@@ -44,8 +47,15 @@ func Run(cfg *config.Config) {
 	producer := kafka.NewProducer(strings.Split(cfg.KafkaBrokers, ","), logger)
 	defer producer.Close()
 
+	natsConn, err := nats.Connect(cfg.NATSURL)
+	if err != nil {
+		log.Fatalf("nats: %v", err)
+	}
+	defer natsConn.Close()
+	bus := newNATSRoomBus(roomrelay.NewBus(natsConn), logger)
+
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(logger, m, locator, producer)
+	registry := room.NewRegistry(logger, m, locator, producer, bus)
 
 	server := httpserver.NewServer()
 	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger, m)
