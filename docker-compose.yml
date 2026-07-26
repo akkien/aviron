@@ -54,6 +54,21 @@ services:
       timeout: 10s
       retries: 15
 
+  nats:
+    image: nats:latest
+    # -m 8222 turns on the monitoring HTTP endpoint solely so this
+    # healthcheck has something to poll — no other service reads it.
+    # JetStream is intentionally not enabled: room-message-bus.md accepts
+    # at-most-once delivery, and this project runs NATS Core only.
+    command: ["-m", "8222"]
+    ports:
+      - "4222:4222"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   server-a:
     build:
       context: ./backend

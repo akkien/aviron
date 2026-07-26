@@ -29,6 +29,11 @@ type Config struct {
 	// KafkaBrokers is a comma-separated list of broker addresses the event
 	// producer publishes workout.sample/race.finished to (kafka-producer.md).
 	KafkaBrokers string
+	// NATSURL points at the shared NATS instance carrying room-scoped
+	// realtime traffic between ws-gateway and race-service
+	// (room-message-bus.md) — a separate transport from RedisURL, which
+	// stays scoped to the room registry.
+	NATSURL string
 }
 
 func Load() *Config {
@@ -45,6 +50,7 @@ func Load() *Config {
 		InstanceID:        getEnvInstanceID(),
 		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		KafkaBrokers:      getEnv("KAFKA_BROKERS", "localhost:9092"),
+		NATSURL:           getEnv("NATS_URL", "nats://localhost:4222"),
 	}
 }
 
