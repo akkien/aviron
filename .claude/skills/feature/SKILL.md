@@ -8,9 +8,10 @@ argument-hint: load|start|review|explain|doc|complete
 
 Manages the full lifecycle of a feature from spec to merge.
 
-## Working File
+## Working Files
 
 @context/current-feature.md
+@context/feature-history.md
 
 ### File Structure
 
@@ -22,7 +23,11 @@ current-feature.md has these sections:
 - `## Explain` - Bullet points explaining the feature/spec (populated by `load`)
 - `## Plan` - Detailed plan for implementation, including any notes on architecture, design, tradeoffs. Call out anything that diverges from the design in context/project-overview.md and why.
 - `## Notes` - Additional context, constraints, or details from spec
-- `## History` - Completed features (append only)
+
+feature-history.md holds every completed feature's summary, newest first
+(append — really prepend — only). Moved out of current-feature.md's own
+`## History` section (2026-07-26) once that section grew large enough to
+hit read-truncation limits on its own.
 
 ## Task
 
