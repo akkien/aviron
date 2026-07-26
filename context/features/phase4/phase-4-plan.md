@@ -1,158 +1,157 @@
-# Phase 4 — Strong Plus (Horizontal Scale, Kafka)
+# Phase 4 — Horizontal Scaling & Event Pipeline (WS Gateway revision)
 
 ## Overview
 
-Per `context/project-overview.md` §12: "Run multiple instances + Redis
-pub/sub for cross-instance sync. Add a Kafka → ClickHouse event pipeline for
-the leaderboard... Move the entire stack onto local Kubernetes."
-**ClickHouse is explicitly dropped from this project** — every place
-§6/§12 names it as the pipeline's sink, this phase substitutes Postgres
-instead (see `event-pipeline/kafka-consumer-postgres-sink.md`'s Overview
-for the specific reasoning). **Kubernetes is broken out into its own
-`phase5/`**, not part of this phase at all — it's deployment
-orchestration, not application logic, and depends on this phase's
-`horizontal-scaling/` work being done and proven first; see
-`context/features/phase5/phase-5-plan.md`. **The internal gRPC service
-(§8) is dropped entirely**, not deferred as optional — it had no product
-need (the frontend already gets live rankings over WebSocket, and a
-browser can't reach raw gRPC without infrastructure this project isn't
-adding) and existed only to check a JD box; see "Explicitly out of scope"
-below. Everything else in §5/§6 stays in scope here.
+**This replaces the previous Phase 4 spec set in full** — every file
+under `context/features/phase4/` was deleted and is being rewritten here,
+not incrementally patched. The previous set built and shipped a working
+design (`redis-room-registry.md` + `race-router.md`, both actually
+implemented — `internal/roomlocator`, `internal/racerouter`,
+`cmd/race-router` all exist in the codebase today); this revision
+replaces `race-router`'s "route once, then local" approach with a genuine
+WS Gateway + Message Bus split, per `docs/knowledge-summary.md`'s new
+"Revision: adopting a WS Gateway tier" subsection (inside `##
+Horizontally Scaling`) — read that section first, it's the authoritative
+design reference every spec below points back to, including its diagram.
 
-This is the largest application-logic phase in the project by a wide
-margin — two genuinely different infrastructure concerns (Redis, Kafka),
-several of which touch the same files. It is broken into 5 specs across 2
-sub-areas specifically so no single spec tries to hold more than one
-architectural decision at a time — a lesson from how large
-`prometheus-metrics.md` (Phase 3) got trying to cover 5 metrics and 3 open
-design questions in one file.
+**Why the revision, stated plainly (not re-litigated here):** this
+project's own architecture research (`docs/knowledge-summary.md`'s
+"Why not every component fits this project" table) concluded a typing
+race doesn't structurally *need* a separate connection-holding tier —
+room count and connection count scale together, `RoomActor.Run()` is a
+cheap 250ms `select` loop. That conclusion isn't wrong and isn't being
+overturned. This revision is a deliberate choice to build the
+higher-fidelity, harder pattern anyway, for what it teaches — per-message
+relay across a bus, message ordering across process boundaries,
+eviction-mirroring, a connection tier that's never the same process as
+the simulation tier — because that's exactly what `project-overview.md`
+§0/§1 and the JD this whole project targets are about. Treat this plan's
+job as building that pattern correctly, not as re-arguing whether to
+build it.
 
-Every phase up to now assumed a single backend process: one in-memory
-`room.Registry`, one in-process `hub` fan-out, one Postgres connection pool.
-That assumption is load-bearing in more places than it looks — confirmed by
-grep before writing any spec in this phase, not assumed from the doc
-comments alone (`internal/room/registry.go`'s own comment already flags
-this: "a `sync.RWMutex` is enough for this single-instance phase; the
-Redis-backed cross-instance registry is Phase 4's concern, not this one's").
-Phase 4 is what removes that assumption, one layer at a time.
+## A real reversal this plan makes to `project-overview.md`
 
-## Specs, by sub-area
+`project-overview.md` §2/§8 say plainly: "this project has no separate
+API Gateway service — race-service serves REST and WebSocket itself."
+`race-router.md` (superseded) was careful to say it didn't reopen that
+decision, because it never terminated the WebSocket. **This revision
+does reopen it.** `ws-gateway` (below) terminates `GET /ws` itself —
+decodes and encodes the protocol, holds the live connection — which is
+exactly the thing §2/§8 said this project would never build. This is
+flagged here explicitly rather than silently: `project-overview.md`
+itself is out of this plan's scope to edit (it's the project's own
+top-level source of truth, not a `context/features/` spec), but whoever
+picks this plan up should update §2/§8 to describe the new architecture
+once this phase ships, the same way `race-router.md` once updated §8's
+"no separate API Gateway" framing for its own (smaller) change. Noted
+here so it isn't lost.
 
-### `horizontal-scaling/` (§5) — do this first
+## What's changing vs. what's staying
 
-**Design update, decided after this plan was first written (see
-`docs/knowledge-summary.md`'s "Horizontally Scaling" section for the full
-comparison and reasoning):** `cross-instance-relay.md` — originally the
-second spec below, a per-message Redis pub/sub relay — is **superseded**
-by `race-router.md`, a separate routing process that sends each connection
-to the correct instance once, up front, instead of relaying every message
-after the fact. It depends on the same `redis-room-registry.md`
-foundation and slots into the same position in this list; nothing else
-about the ordering below changed.
+| Piece | Status | Notes |
+| --- | --- | --- |
+| `cmd/race-router`, `internal/racerouter` | **Removed as part of this phase** | Replaced by `cmd/ws-gateway`, `internal/wsgateway` — see `ws-gateway.md` |
+| `internal/roomlocator` | **Unchanged, reused as-is** | See `redis-room-registry.md` — still the registry client, still `SET room:<id> instance:<id> NX EX 60` |
+| `internal/room` (`RoomActor`) | **Modified** | Single-writer event-application logic (`applyEvent`) is untouched; only its `inbox`/`broadcast` I/O plumbing changes — see `room-service-adapter.md` |
+| `internal/ws` | **Split** | Protocol types/decoding (`protocol.go`) move to wherever they're actually used now (see `room-service-adapter.md`'s "Current state" section for the concrete call); connection-handling code (`hub.go`, `endpoint.go`'s reader/writer loops) moves into `internal/wsgateway` — see `ws-gateway.md` |
+| `internal/roomrelay` (new) | **New package** | The message bus itself — see `room-message-bus.md`. This is the package name `phase-5-plan.md`'s docs once referenced by mistake, before anything by that name existed; it's real now, and it's the generalized revival of `cross-instance-relay.md`'s original (superseded, never-built) per-message relay design |
+| NATS (new infrastructure) | **New dependency** | `internal/roomrelay`'s transport — see `room-message-bus.md`'s "Correction (this pass)" note. **Not** Redis pub/sub, despite that being this spec's own original choice; the registry (`redis-room-registry.md`) stays on Redis, unchanged — this is a separate piece of infrastructure, not a reuse of the existing Redis instance |
+| `internal/kafka`, `internal/consumer`, `cmd/consumer` | **Unaffected** | The event pipeline doesn't care which tier terminates the WebSocket — see `event-pipeline/`, recreated faithfully below since nothing about its design changes |
 
-1. `redis-room-registry.md` — Redis becomes the source of truth for "which
-   instance owns this room" (`SET room:<id> instance:<id> NX EX 60`,
-   refreshed on a heartbeat), plus a `room:events` pub/sub channel
-   (`created`/`removed`) added specifically for `race-router.md`'s cache.
-   This alone does not make cross-instance traffic work; it only lets an
-   instance (and now the router) answer "who owns this room?" correctly.
-   Foundation for everything else in this sub-area.
-2. `race-router.md` — the actual cross-instance behavior: a new
-   `cmd/race-router` process routes every request/connection to the
-   instance that owns its `race_id`, using a cache backed by #1. Depends
-   on #1 — there's nothing to route by until an instance can be looked up.
-   Replaces the originally-planned `cross-instance-relay.md` (kept on disk,
-   marked superseded, for its historical design reasoning).
-3. `multi-instance-dev-setup.md` — Redis added to `docker-compose.yml`, a
-   documented way to run 2 local backend processes plus `race-router` in
-   front of them, and a concrete verification plan (create through the
-   router, connect through the router from either backend's own port,
-   confirm the router always reaches the correct owning instance). Depends
-   on #1 and #2 — this is where they get proven to actually work together,
-   deliberately before `phase5/`'s Kubernetes work (`replicas: 2`) enters
-   the picture at all.
+## Specs, in build order
 
-### `event-pipeline/` (§6, ClickHouse dropped)
-
-1. `kafka-producer.md` — the Race Service publishes to two topics,
-   `workout.sample` (batched telemetry) and `race.finished` (final
-   results), keyed for ordering per §6's own requirement. Independent of
-   the Redis work technically, sequenced after it because horizontal
-   scaling is the more load-bearing architectural change and this project's
-   own convention (Phase 3's plan) is "foundation pieces first."
-2. `kafka-consumer-postgres-sink.md` — a consumer group reads both topics.
-   `workout_samples` (a table that has existed since the very first
-   migration and has never once been written to — confirmed by grep, not
-   assumed) becomes real. Depends on #1 (of this sub-area) existing to
-   have anything to consume; otherwise independent of the Redis work.
+1. `horizontal-scaling/redis-room-registry.md` — unchanged in design from
+   the previous phase (the code already exists and is being kept), but
+   recreated here since its own spec file was deleted, and its "who
+   consults it, for what" section is updated for the new architecture
+   (REST routing + ownership claims only — WebSocket traffic no longer
+   needs it).
+2. `horizontal-scaling/room-message-bus.md` — the new `internal/roomrelay`
+   package, on NATS: subject naming, payload envelopes, subscribe/
+   unsubscribe lifecycle on both sides, delivery-guarantee tradeoffs.
+   Built before the two things that depend on it.
+3. `horizontal-scaling/room-service-adapter.md` — the `race-service`-side
+   change: `RoomActor`'s `inbox` fed by a bus subscriber instead of a
+   local WS reader, its `broadcast` channel drained by a bus publisher
+   instead of `internal/ws.hub`'s local fan-out.
+4. `horizontal-scaling/ws-gateway.md` — the new `cmd/ws-gateway` binary:
+   REST reverse-proxying (reused design from the removed `race-router`),
+   WebSocket termination, local per-race fan-out (a gateway-side
+   `internal/ws.hub`-shaped component fed by the bus), and
+   eviction-mirroring.
+5. `horizontal-scaling/multi-instance-dev-setup.md` — the real
+   acceptance test for 1–4: N `ws-gateway` + M `race-service` processes,
+   run locally, proving cross-process room consistency by hand before any
+   Kubernetes work (once `context/features/phase5/` is recreated — see
+   below) touches this.
+6. `event-pipeline/kafka-producer.md`, `event-pipeline/
+   kafka-consumer-postgres-sink.md` — recreated faithfully, unaffected by
+   the WS Gateway pivot. Sequenced last because nothing above depends on
+   them and nothing about them depends on 1–5 either; kept in this phase
+   only because they're part of the same "Phase 4" scope
+   `project-overview.md` §12 defines.
 
 ## Dependency order
 
 ```text
-redis-room-registry
-       |
-       v
-race-router   (supersedes cross-instance-relay, kept on disk as historical record)
-       |
-       v
-multi-instance-dev-setup
-       |
-       v
-  (phase5/ — Kubernetes, once this chain is proven)
+redis-room-registry (unchanged design, recreated spec)
+        |
+        v
+  room-message-bus (new: internal/roomrelay)
+        |
+        +-------------------------+
+        v                         v
+room-service-adapter         ws-gateway
+(race-service side)          (new binary)
+        |                         |
+        +-----------+-------------+
+                     v
+        multi-instance-dev-setup
+        (real proof both sides agree on the wire format)
 
-kafka-producer -> kafka-consumer-postgres-sink   (independent chain)
+event-pipeline/ (kafka-producer, kafka-consumer-postgres-sink)
+        — independent of the chain above, sequenced last only for scope
+          reasons, not a real dependency
 ```
 
-- `horizontal-scaling/` is the one dependency chain everything else needs
-  proven before it matters (`phase5/k8s-race-service-deploy.md`'s
-  `replicas: 2`) — build it first, in the 3-spec order above.
-- `event-pipeline/` has no dependency on `horizontal-scaling/` and could
-  technically be built in parallel with the Redis work — sequenced after
-  it here only because this project's convention (every prior phase plan)
-  is to finish one coherent sub-area before starting the next, not because
-  of a real technical blocker.
-- This entire phase is a prerequisite for `phase5/`, not the other way
-  around — see that plan's own Overview for why Kubernetes is sequenced
-  last across both phases combined.
+`room-service-adapter.md` and `ws-gateway.md` can be built in either
+order or in parallel once `room-message-bus.md`'s envelope format is
+fixed — they're two independent consumers of the same bus contract, the
+same way a client and server can be built in parallel once an API
+contract is agreed. `multi-instance-dev-setup.md` is the first point
+either side's assumptions about the other get proven against reality
+instead of against a fake in unit tests.
 
 ## Explicitly out of scope
 
-- **ClickHouse**, anywhere §6/§12 mention it — per explicit instruction.
-  `kafka-consumer-postgres-sink.md` explains the substitution in full.
-- **The internal gRPC service (§8, `GetLiveRankings`)** — dropped
-  entirely, not built even in a minimal form. Reasoning worked through in
-  conversation before this plan was finalized: the frontend already
-  receives live rankings over its existing WebSocket connection
-  (`race_state` broadcasts), so there was no consumer-side gap to fill;
-  the one scenario that looked like it might justify gRPC — letting a
-  non-participant "spectator" watch a race live without joining — turned
-  out not to need gRPC either, since a browser can't call raw gRPC
-  without a gRPC-Web proxy this project was never going to add, and the
-  more direct fix for that scenario (if ever built) is relaxing the
-  existing WebSocket's `session_token` requirement for a read-only
-  attach, not standing up a second protocol. With no remaining use case,
-  the service would have existed purely to check "gRPC is a plus" on the
-  JD — not worth the new binary, protobuf toolchain, and dependency
-  surface for that alone.
-- **Kubernetes, entirely** — moved to `context/features/phase5/
-  phase-5-plan.md`. Not a sub-area of this phase at all; see that plan for
-  its own scope, including the `api-gateway`/CI-CD/Helm-chart decisions
-  that used to live in this file before the split.
-- **A real message-ordering stress test.** §6's ordering guarantee (same
-  `race_id`/`user_id` key → same partition) is a Kafka property this phase
-  configures correctly and can point at in code, not something that needs
-  its own dedicated load-test spec the way Phase 3's `k6-load-test.md`
-  covered WebSocket load — `load/`'s existing k6 scripts are not extended
-  here.
-
-## A note on scope discipline
-
-This phase touches more files than any before it (excluding `phase5/`,
-split out specifically to keep this file from also carrying deployment
-concerns). Each spec should still be buildable and independently
-verifiable (`go build`/`go test -race`/a concrete manual check) on its own
-branch, per this project's normal `/feature` workflow
-(`context/ai-interaction.md`) — resist the temptation to bundle two of
-these specs into one feature the way some smaller phases bundled
-same-package work, since the whole reason this plan has 5 specs instead of
-3 is to keep each one small enough to actually reason about.
+- **`context/features/phase5/` (Kubernetes).** Also deleted, intentionally
+  not recreated yet — per the user's own framing, it depends on this
+  phase's design being settled first (it was already sequenced after
+  Phase 4 for exactly this reason; recreating it before `ws-gateway`
+  exists would mean re-deriving another set of docs on top of a moving
+  target).
+- **Regional/multi-DNS routing, Matchmaking, Presence, dedicated
+  per-room Game Server processes.** Same verdicts as before — see
+  `docs/knowledge-summary.md`'s "Why not every component fits this
+  project" table, none of which this revision changes. This project is
+  adopting the WS-Gateway-terminates-connections *shape*, not the full
+  internet-scale architecture around it.
+- **Kafka as the message bus.** Kafka stays scoped to `event-pipeline/`'s
+  durable, batched, analytics-oriented traffic (`workout.sample`/
+  `race.finished`) — a fundamentally different traffic shape from the
+  real-time room bus (ephemeral, per-race, latency-sensitive, provisioned
+  and torn down constantly), and Kafka's topic/partition model doesn't
+  fit "cheap, dynamic, per-entity channel" the way NATS subjects or Redis
+  channels do. **Correction (this pass): NATS *is* the message bus now**,
+  not Redis pub/sub as this plan originally chose — see
+  `room-message-bus.md`'s "Correction (this pass)" note for the reasoning
+  and `docs/knowledge-summary.md`'s "## Game Message Bus" section for the
+  full comparison this decision is based on.
+- **A synchronous request/reply protocol over the bus.** NATS Core
+  supports native request/reply as a pattern (unlike Redis pub/sub, which
+  has none built in) — noted as a real capability this design still
+  doesn't use: nothing in this phase's design needs a Gateway to block
+  waiting for a specific Room Service reply. See `room-message-bus.md`'s
+  "Evicted-reconnect checks bypass the bus entirely" section for the one
+  place this could have been tempting, and why a small piece of shared
+  Redis state is used instead, deliberately not NATS request/reply.

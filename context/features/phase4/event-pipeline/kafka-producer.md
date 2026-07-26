@@ -2,184 +2,86 @@
 
 ## Overview
 
-`context/project-overview.md` §6: the Race Service publishes to two
-topics, `workout.sample` (telemetry) and `race.finished` (final results),
-"split... so consumers can scale independently and schemas don't get mixed
-up," keyed by `race_id` or `user_id` "to ensure messages for the same
-entity land in the same partition → preserving ordering within that
-entity." This spec is the producing side only —
-`kafka-consumer-postgres-sink.md` is what reads these topics back out.
+**Recreated, not redesigned — unaffected by the WS Gateway revision.**
+This spec's file was deleted along with the rest of the previous Phase 4
+set, but `internal/kafka` was never touched and is fully implemented and
+shipped. Nothing about whether `race-service` terminates a WebSocket
+itself or receives events over `internal/roomrelay`
+(`room-message-bus.md`) changes what happens once a `RoomActor` decides
+to publish a telemetry sample or a finished race's results — that
+decision is made inside `applyEvent`/`finishRace`, which
+`room-service-adapter.md` leaves completely untouched. See `docs/
+knowledge-summary.md`'s "Event Pipeline: Kafka → Postgres" section for
+the full "why Kafka instead of a direct Postgres write" reasoning — not
+repeated here, only the concrete shape of what's built.
 
-Independent of `horizontal-scaling/` — a room actor publishing to Kafka
-doesn't care which instance owns the room, it only publishes its own
-events regardless. Sequenced after `horizontal-scaling/` in
-`phase-4-plan.md` purely by this project's own convention of finishing one
-sub-area before starting the next, not a real dependency.
+## Current state (confirmed by reading the code)
 
-## Design
-
-### One shared `*kafka.Writer`, not a goroutine per room
-
-`segmentio/kafka-go`'s `Writer` already does its own internal batching and
-supports `Async: true` (fire-and-forget, non-blocking `WriteMessages`
-calls) — this directly satisfies both of §3's requirements at once
-("batch insert... instead of every tick" and the room actor's own
-non-blocking-send discipline, `broadcastSnapshot`'s existing pattern) with
-no hand-rolled ticker or buffer inside `RoomActor`. One process-wide
-`*kafka.Writer` per topic (or one multi-topic `Writer`, selecting `Topic`
-per-message — confirm which `kafka-go` supports more cleanly at `start`),
-constructed once in `internal/app.go`, not per-room.
-
-This means `RoomActor.applyEvent`'s `TelemetryReceived` case
-(`internal/room/room.go`, ~line 302) publishes one `workout.sample` message
-**per telemetry event as it happens** — not batched client-side into a
-slow ticker — while the *Postgres write* the consumer eventually does is
-where the actual "every 2-5s, not every event" batching from §3 happens.
-Producer = real-time publish, consumer = batched write. This is a
-deliberate reinterpretation of §3's "batch insert... every ~2-5s" wording,
-worth confirming at `load`/`start`: the alternative (a slow ticker inside
-`RoomActor` batching several samples into one Kafka message) would add a
-new per-room goroutine and buffer for a problem `kafka-go`'s own
-`Async`+batch-size/batch-timeout config already solves at the producer
-level, so the simpler reading is preferred.
-
-### The `EventPublisher` interface
-
-Same structural-interface-in-`internal/room` pattern this codebase already
-uses three times (`RaceFinisher`, `RaceLeaver`, `RaceCanceller`,
-`internal/room/finish.go`) — for the same reason: the concrete
-implementation needs to live in a new `internal/kafka` package, and
-`internal/room` must not import it directly (`internal/room` importing
-`internal/kafka` would be fine on its own, but defining the interface at
-the consumer keeps every one of these seams consistent and reviewable the
-same way).
+`internal/kafka/producer.go` is fully implemented:
 
 ```go
-// internal/room/events.go
-type EventPublisher interface {
-    PublishWorkoutSample(ctx context.Context, raceID, userID string, ts time.Time, wordsCorrect int, paceWatt float64) error
-    PublishRaceFinished(ctx context.Context, raceID string, results []ParticipantResult) error
-}
-```
+const (
+    TopicWorkoutSample = "workout.sample"
+    TopicRaceFinished  = "race.finished"
+)
 
-- `PublishRaceFinished` reuses the existing `ParticipantResult` type
-  (`internal/room/finish.go`) rather than a parallel Kafka-specific struct
-  — one shape for "a race's final results," used by both `RaceFinisher`
-  (Postgres) and `EventPublisher` (Kafka) call sites inside `finishRace`.
-- Like `RoomLocator`/`TickObserver`, this is a **`Registry`-level**
-  dependency, not a per-`Spawn` argument: `NewRegistry(logger,
-  tickObserver, locator, publisher)` — every room gets the same
-  process-wide publisher, consistent with how `TickObserver`/`RoomLocator`
-  were threaded in the two specs before this one, and avoids growing
-  `Registry.Spawn`'s already-long parameter list further.
-- A `NoopPublisher` (mirrors `NoopLocator` from `redis-room-registry.md`)
-  for single-instance/no-Kafka local dev and every existing test fixture
-  that constructs a `Registry` — same mechanical-churn tradeoff already
-  paid twice this phase.
+type Producer struct { /* wraps a *kafka.Writer, Async: true */ }
 
-### Call sites
-
-- `applyEvent`'s `TelemetryReceived` case: after updating
-  `ParticipantState` (unchanged), call
-  `r.publisher.PublishWorkoutSample(ctx, r.id, ev.UserID, time.Now(),
-  p.WordsCorrect, p.PaceWatt)` — non-blocking given `Async: true`, so this
-  doesn't change `applyEvent`'s existing "never blocks the single-writer
-  loop" property.
-- `finishRace` (`internal/room/room.go`, ~line 573): after the existing
-  `finisher.FinishRace(...)` Postgres call succeeds (same ordering
-  `race-completion/finish-race.md` already established — persist before
-  notify), call `r.publisher.PublishRaceFinished(ctx, r.id, results)`. If
-  the Postgres write itself fails, do **not** publish — a `race.finished`
-  event for a race that didn't actually finish in the source of truth
-  would be a real correctness gap, not just a missed nice-to-have.
-- Both calls: log-and-continue on error, no retry — same no-retry
-  precedent `finishRace`'s own Postgres write and `leave_race`'s
-  fire-and-forget persist already established in this codebase. A dropped
-  Kafka publish here is strictly less severe than either of those, since
-  nothing downstream of Kafka is this project's system of record (Postgres
-  still is — see `kafka-consumer-postgres-sink.md`'s Overview for why).
-
-### Message keys and topic naming
-
-- Both topics keyed by **`race_id`**, not `user_id` — confirm at `start`,
-  this is a real judgment call §6 leaves open ("depending on the query
-  pattern you want to optimize for"). Reasoning: `workout_samples`'s
-  existing index is `(race_id, user_id, ts)` — race-scoped queries are the
-  primary access pattern already established by the schema — and keying
-  by `race_id` also means every sample for a given race lands in one
-  partition, which is a natural, ready-made batching unit for the consumer
-  (see next spec) with zero extra bookkeeping. `user_id`-keying would
-  scale better for a user with many races across many partitions, but this
-  project has no per-user-across-races query that would benefit, and the
-  schema's own index ordering already signals which axis matters more
-  here.
-- Topic names exactly as §6 specifies: `workout.sample`, `race.finished`.
-  New `Config` fields: `KafkaBrokers string` (comma-separated, env
-  `KAFKA_BROKERS`, default `localhost:9092`).
-
-## Concurrency
-
-- `kafka.Writer` is documented safe for concurrent `WriteMessages` calls
-  from multiple goroutines — every room actor's own single goroutine calls
-  into the same shared `Writer`, which is exactly this safe-for-concurrent-
-  use case, not a violation of any single-writer principle (the *room
-  state* still has exactly one writer; the *Kafka client* is a shared,
-  externally-synchronized resource, the same category `*pgxpool.Pool`
-  already is for this codebase's Postgres writes).
-- `Async: true` means `WriteMessages` returns before the broker round trip
-  completes — errors surface via the `Writer`'s configured `Completion`
-  callback or `ErrorLogger`, not the call's own return value. Confirm at
-  `start` how those get wired into `structured-logging.md`'s existing
-  `slog.Logger` (a `Writer.Logger`/`Writer.ErrorLogger` adapter, likely a
-  small `slog`-backed shim implementing `kafka.Logger`'s `Printf`-shaped
-  interface).
-
-## Data
-
-```go
-// internal/room/events.go
-type EventPublisher interface {
-    PublishWorkoutSample(ctx context.Context, raceID, userID string, ts time.Time, wordsCorrect int, paceWatt float64) error
-    PublishRaceFinished(ctx context.Context, raceID string, results []ParticipantResult) error
-}
-type NoopPublisher struct{}
-
-// internal/kafka/producer.go
-type Producer struct { /* *kafka.Writer(s) */ }
-func NewProducer(brokers []string) *Producer
-func (p *Producer) PublishWorkoutSample(...) error
-func (p *Producer) PublishRaceFinished(...) error
+func NewProducer(brokers []string, logger *slog.Logger) *Producer
+func (p *Producer) PublishWorkoutSample(ctx context.Context, raceID, userID string, ts time.Time, wordsCorrect int, paceWatt float64) error
+func (p *Producer) PublishRaceFinished(ctx context.Context, raceID string, results []room.ParticipantResult) error
+func (p *Producer) PublishRaw(ctx context.Context, topic string, key, value []byte) error
 func (p *Producer) Close() error
 ```
 
+- `kafka.Writer` constructed with `Async: true` — fire-and-forget,
+  `WriteMessages` hands off to an in-memory client-side buffer and
+  returns immediately, never blocking the caller on a broker round trip.
+- Message key is `race_id` for both topics — ordering is preserved
+  within a race (`project-overview.md` §6), matching the "message
+  ordering" theme the JD emphasizes.
+- `PublishRaw` exists specifically so `internal/consumer`
+  (`kafka-consumer-postgres-sink.md`) can republish an unprocessable
+  message to its own dead-letter topic without needing a second
+  `Producer`-shaped type.
+
+## Call sites (unchanged by this revision)
+
+- `RoomActor.applyEvent`'s `TelemetryReceived` case calls
+  `PublishWorkoutSample` — fires once per client telemetry frame, same
+  as before. `room-service-adapter.md`'s `InboundKindMessage` handling
+  feeds `TelemetryReceived` into `applyEvent` exactly the way a local
+  `readLoop` used to; this call site inside `applyEvent` itself never
+  needed to know or care where the event originated.
+- `RaceService.FinishRace` calls `PublishRaceFinished` **after** its own
+  synchronous, transactional Postgres write (`races`/`race_participants`/
+  `leaderboard_alltime`) already succeeded — never before, never as a
+  substitute for it. This ordering is what makes the consumer's own
+  handling of `race.finished` a safe reconciliation path rather than a
+  second primary writer — see `kafka-consumer-postgres-sink.md`.
+
+## Requirements
+
+Already met by the existing implementation — restated for completeness:
+
+- Both topics keyed by `race_id`, partitioned/ordered accordingly.
+- Publish calls never block the room actor's hot path — `Async: true`
+  plus this project's existing non-blocking-send discipline
+  (`broadcastSnapshot`'s own pattern) means a slow or unavailable broker
+  degrades to dropped/delayed publishes, never a stalled `RoomActor.Run()`
+  `select` loop.
+- `NewProducer`'s `kafka.Writer` is constructed with a `slogErrorLogger`
+  adapter so `kafka-go`'s own internal error logging integrates with this
+  project's structured logging instead of going to a separate stream.
+
+## Testing
+
+Already covered by the existing test suite — no new tests needed under
+this revision, since no call site or payload shape changes.
+
 ## Notes
 
-- New dependency: `github.com/segmentio/kafka-go`, per
-  `project-overview.md` §11's suggestion.
-- No DLQ handling in this spec — §6's dead-letter-topic idea is about a
-  **consumer** failing to parse/write a message, which only exists once a
-  consumer exists (`kafka-consumer-postgres-sink.md`). A producer with a
-  well-typed `EventPublisher` interface has nothing to dead-letter on its
-  own side.
-- No local Kafka broker exists in `docker-compose.yml` yet — this spec
-  needs one added (a single-broker KRaft-mode image, e.g.
-  `bitnami/kafka` or `apache/kafka`, no Zookeeper — confirm the exact
-  image at `start`; project-overview.md §11 already steers away from
-  hand-managing Zookeeper/brokers).
-- **Docker Compose conventions now exist to build on, established by the
-  Dockerize feature (2026-07-26) after this spec was first written**:
-  every service in `docker-compose.yml` (`postgres`, `redis`, `server-a`,
-  `server-b`) now has a real `healthcheck:`, and anything that depends on
-  one waits via `depends_on: condition: service_healthy` rather than
-  hand-rolled readiness polling. The new Kafka service should follow the
-  same convention — a real `healthcheck:` (e.g. `kafka-broker-api-versions
-  --bootstrap-server localhost:9092`, confirm the exact command for
-  whichever image is chosen at `start`) so `server-a`/`server-b` can
-  `depends_on: kafka: condition: service_healthy` instead of racing a
-  broker that's still starting up.
-- This spec's own verification can't fully confirm ordering/partitioning
-  end to end without a consumer reading the topic back — a reasonable
-  interim check is inspecting messages directly via `kafka-console-consumer`
-  (or `kcat`) against the local broker, confirming the right topic/key/
-  payload shape, before `kafka-consumer-postgres-sink.md` builds the real
-  consumer.
+- This spec exists in the recreated set purely so `phase-4-plan.md`'s
+  spec list is complete and self-contained again — treat it as
+  documentation of already-shipped, unaffected behavior, not a build
+  task.

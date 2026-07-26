@@ -2,135 +2,173 @@
 
 ## Overview
 
-`redis-room-registry.md` and `race-router.md` build the mechanism (`race-
-router.md` supersedes the original `cross-instance-relay.md` design — see
-that file's own "Superseded" section); this spec is where the combination
-gets proven against real separate processes, deliberately **before**
-`context/features/phase5/` (Kubernetes) enters the picture at all — it's a
-hard prerequisite for that phase, not just a convenient ordering (see
-`phase5/phase-5-plan.md`'s "Hard dependency" section). Per
-`context/project-overview.md` §7's own warning ("doing them earlier tends
-to turn into infrastructure overhead rather than Go practice"), debugging
-a routing bug and Kubernetes networking at the same time would make it
-much harder to tell which layer a failure came from — this spec exists
-specifically to rule out the registry/router layer as a bug source before
-Kubernetes adds its own.
+The real acceptance test for `redis-room-registry.md` +
+`room-message-bus.md` + `room-service-adapter.md` + `ws-gateway.md`
+together: N real `ws-gateway` processes in front of M real `cmd/server`
+(`race-service`) processes, run locally as plain OS processes (no
+Kubernetes — `context/features/phase5/` is deleted and deliberately not
+recreated until this design is proven this way first, same sequencing
+`phase-4-plan.md` and the original `phase-5-plan.md` both already
+established). Genuinely different acceptance bar from the previous
+(`race-router`) version, not just a rename — see "What's actually being
+proven now, that wasn't before" below.
 
-No Kubernetes — this spec's whole point is the smallest possible setup
-that still has two genuinely separate backend processes plus the router
-in front of them, unlike the original design this supersedes, which
-needed no separate router process at all (a human/script picked the port
-directly). `race-router` itself **is** the load balancer this spec now
-needs — deliberately still not a real one (no TLS, no health checks),
-matching this project's convention of building the smallest thing that
-actually proves the design.
+## Current state (confirmed by reading the code)
+
+`load/multi-instance-check.sh`, `load/multi-instance-check.md`, and the
+k6 scenarios it drives (`load/scenarios/multi-instance-check.js`,
+`load/scenarios/multi-instance-reconnect-check.js`) all still exist and
+are fully written — for the previous, now-removed `race-router` design.
+They are the concrete starting point for this spec's own script, not a
+green field: most of the process-management scaffolding (build real
+binaries not `go run`, `exec` inside subshells so `$!` is the real killable
+PID, `check_ports_free`, `wait_for_http` retry loops, the Postgres/Redis
+readiness wait — now also waiting on NATS, per `room-message-bus.md`'s
+transport switch) is topology-independent and ports over unchanged. What
+needs real rework is everything that assumed *the client's own connection
+already sits on the owning instance* — which was `race-router`'s whole
+point, and is no longer true of any connection under this revision.
+
+## What's actually being proven now, that wasn't before
+
+`race-router.md`'s version only had to prove one thing: a client that
+only ever talks to the router reaches the room's actual owner, whichever
+instance that is. Correctness inside a room was then trivial — real
+callers' WS connections *were* local to `RoomActor`, same process, same
+memory. This revision removes that guarantee entirely: **every** WS
+connection is local to whichever `ws-gateway` happened to accept it, with
+zero relationship to which `race-service` instance owns the room. The
+thing that actually needs proving now is that two participants in the
+same race, connected through two *different* gateways, to a room owned by
+either backend, still see fully consistent, correctly-ordered real-time
+state — purely because the bus carried it correctly. That's a strictly
+harder property than the one being tested before, and it's the one this
+spec's script has to be rewritten to actually exercise, not just relabel.
 
 ## Requirements
 
-### Infra
+### Topology
 
-- `redis:7-alpine` added to `docker-compose.yml` (likely already present
-  from `redis-room-registry.md` — confirm at `start`, don't duplicate).
-- No new Postgres instance — both backend processes share the one existing
-  `docker-compose.yml` Postgres, exactly like real horizontally-scaled
-  instances would share one database.
+```text
+server-A (:8080)   server-B (:8081)      -- race-service, unchanged
+gateway-1 (:9090)  gateway-2 (:9091)     -- new: 2 ws-gateway instances,
+                                             each RACE_SERVICE_INSTANCES=
+                                             localhost:8080,localhost:8081
+nats (:4222)                              -- new: message bus (room-message-bus.md),
+                                             both server-A/B and both gateways
+                                             point NATS_URL at it
+```
 
-### Running two instances, plus the router
+Two gateways, not one — `race-router.md`'s original script only ever
+needed a single router instance (it was a pure pass-through, so testing
+two would have proven nothing extra). This revision specifically needs
+**≥2 gateways** so the script can deliberately connect different
+participants of the *same* race through *different* gateways — the exact
+scenario described above. `nats` is new infrastructure this topology
+didn't need before — `docker-compose.yml`'s `start_infra` step needs a
+`nats` service (the plain `nats:latest` image is enough, no JetStream
+configuration needed per `room-message-bus.md`'s "NATS Core, not
+JetStream" decision) alongside its existing `postgres`/`redis`.
 
-- Document (in this spec, or a new `docs/multi-instance-dev.md` if this
-  project's convention of putting durable how-tos in `docs/` — see
-  `docs/concurrency.md` — extends here; confirm at `start`) the exact
-  commands to run two `cmd/server` processes and one `cmd/race-router`
-  locally against the same Postgres/Redis:
+### Verification script, rewritten
 
-  ```bash
-  INSTANCE_ID=a PORT=8080 go run ./cmd/server
-  INSTANCE_ID=b PORT=8081 go run ./cmd/server
-  RACE_SERVICE_INSTANCES=localhost:8080,localhost:8081 \
-    PORT=9090 go run ./cmd/race-router
-  ```
+Adapting `load/multi-instance-check.sh`'s existing structure:
 
-- Every test in the verification plan below connects through the router's
-  port (`:9090`), not directly to `:8080`/`:8081` — that's the entire
-  point of this spec's acceptance test: proving a client that only ever
-  talks to one address (the router) reaches the correct room regardless
-  of which of the two backend processes actually owns it. Direct
-  connections to `:8080`/`:8081` are still useful for isolating whether a
-  bug is in `race-router` or in `race-service` itself (bypass the router
-  to rule it out), but aren't the primary path being verified.
+1. `build_binaries`: `cmd/server` and `cmd/ws-gateway` (not
+   `cmd/race-router`).
+2. `start_backends`: start `server-A`/`server-B` exactly as today: then
+   start **two** `ws-gateway` processes, both configured with
+   `RACE_SERVICE_INSTANCES=localhost:8080,localhost:8081`, listening on
+   distinct ports.
+3. `register_and_login`/race creation: unchanged in shape, but issued
+   directly against **one specific gateway** per user — deliberately
+   picking *different* gateways for different participants of the same
+   race, where the previous script always used a single shared `$ROUTER`
+   base URL for everyone.
+4. Ownership assertion (`owning_instance_letter` via `redis-cli GET
+   room:$race_id`): unchanged, the registry itself didn't change.
+5. **New assertion, not in the previous script**: confirm the bus
+   actually carried traffic, not just that clients happened to see
+   correct results (which could otherwise mask a bug where, say, the
+   test race is small enough that reconnect/retry logic silently papers
+   over a broken relay). Options to decide at `start`: structured-log
+   grep for a `roomrelay: published`/`roomrelay: received`-shaped line on
+   both the owning `race-service` and each participating gateway
+   (cheapest, consistent with this project's existing log-based
+   cross-checks), or a raw traffic tap via the `nats` CLI's `nats sub
+   "room.>"` — a genuine, if modest, upgrade over the Redis-based
+   version's `redis-cli PSUBSCRIBE room:*` equivalent, since NATS'
+   hierarchical subjects mean this one wildcard subscription captures
+   every race's `in`/`out` traffic in a single readable stream, started
+   before the race and killed after, for manual inspection on first-run
+   debugging.
+6. Full lifecycle check (join, start, telemetry, finish): unchanged
+   externally — `k6`'s `multi-instance-check.js` still just needs
+   `BASE_URL` per participant, now pointed at *each participant's own*
+   gateway instead of one shared router URL. `k6`'s own VU-isolation
+   constraint (`k6-load-test.md`'s already-established reasoning) means
+   this was already naturally structured as "each VU gets its own base
+   URL," so this is a small parameterization change, not a rewrite of the
+   scenario itself.
+7. Kill-test: **the expected outcome changes, and this is the most
+   important finding this spec's own first real run needs to record, not
+   assume.** See "A real gap this revision's kill-test will likely
+   surface" below before writing this step's assertions.
 
-### Verification plan (the actual acceptance test for the previous two specs)
+### A real gap this revision's kill-test will likely surface
 
-Write this as a repeatable script (`load/multi-instance-check.sh` or
-similar — reuse the `load/` directory's existing shape rather than
-inventing a new top-level location) rather than a purely manual checklist,
-so it can be re-run after any future change touches the relay:
+Under `race-router`, killing the owning instance broke the *proxied raw
+socket* immediately — an unambiguous, fast signal every affected client
+felt right away, which is exactly what `race-router.md`'s own kill-test
+verified ("a fresh reconnect attempt... must eventually fail cleanly —
+not hang"). Under this revision, killing the owning `race-service`
+instance does **not** touch any client's actual connection — those live
+on `ws-gateway` processes, which have no direct relationship to any
+specific `race-service` instance at all. The only observable effect is
+that NATS subject `room.{race_id}.out` simply stops receiving publishes.
+Nothing in
+this phase's specs so far (`room-message-bus.md`, `ws-gateway.md`) gives
+a `raceHub` any way to notice "the room's actual owner died" — it just
+sits there, subscribed, silent, forever, unless a client eventually gives
+up and disconnects on its own (a client-side timeout this project's
+frontend may or may not currently have).
 
-1. Register/login a user against the router (`:9090`) → confirm it landed
-   on one of the two instances (either is fine, round-robin has no
-   correctness requirement here).
-2. `POST /races` against the router → the room is created and owned by
-   whichever instance actually received it (confirm both which instance
-   via that instance's own logs, and via a direct `redis-cli GET
-   room:<id>` — a real, inspectable assertion, not just "it seemed to
-   work"). Call this the **owning instance** for the rest of this plan,
-   regardless of whether it turns out to be A or B.
-3. Register/login a second user against the router.
-4. `POST /races/{id}/join` against the router — the router must route
-   this to the owning instance (confirmed via that instance's logs, not
-   the other one's) even though the request came from a fresh connection
-   that has no reason to land there on its own.
-5. Open a WebSocket to `GET /ws?race_id=...` **through the router**, using
-   user 2's session token — this is the real cross-instance test:
-   `race-router.md`'s `Director` must resolve `race_id` to the owning
-   instance and proxy the WS upgrade there, transparently. Confirm via the
-   owning instance's own logs that it — not the other instance — accepted
-   the connection and ran its normal local `IsEvicted` check.
-6. `POST /races/{id}/start` against the router — confirm the WebSocket
-   opened in step 5 receives `race_started`, exactly as it would talking
-   directly to the owning instance.
-7. Send `telemetry` messages from that WebSocket connection — confirm (via
-   a second WebSocket, also opened through the router) that the other
-   participant's `race_state` broadcasts reflect user 2's progress. Since
-   both connections are now proxied straight to the same owning instance,
-   this is really confirming the router got the routing decision right
-   twice in a row (once per connection), not testing any relay/forwarding
-   logic inside `race-service` itself — there isn't any left to test.
-8. Race to completion — confirm both connections receive `race_finished`
-   with correct, matching results.
-9. Repeat steps 2-8 several times to get a mix of "owning instance is A"
-   and "owning instance is B" outcomes from the router's round robin,
-   ruling out an accidental "only routes correctly to one specific
-   instance" bug in `Director`.
-10. Kill the owning instance's process mid-race (simulating the owner
-    dying — the same accepted gap `cross-instance-relay.md` originally
-    flagged as its open question #3, carried forward unchanged by
-    `race-router.md`'s own Notes) and confirm the other connection's
-    reconnect attempt (through the router) eventually fails the way that
-    gap predicts: the router's cache TTL expires, `Owner` starts missing
-    too, and the client's reconnect-with-backoff exhausts and surfaces as
-    evicted/disconnected, not a hang. This is the one step in this plan
-    about confirming a *documented gap* behaves as expected, not about
-    proving something works.
+**This spec doesn't invent a fix for that gap up front** — consistent
+with this project's own established convention (`k6-load-test.md`'s
+"don't pre-write that spec, scope it to whatever a real run actually
+shows," `k8s-race-service-deploy.md`'s equivalent note): run the kill
+test, observe exactly what happens (silent hang is the predicted
+outcome, not yet a confirmed one), and record the real result. If it is
+a silent hang, that becomes a concrete, scoped follow-up for
+`room-message-bus.md`/`ws-gateway.md` to solve — likely a `raceHub`-side
+staleness timeout (no message received within N× the expected 250ms tick
+interval → re-verify via `Owner()` whether the room still has a live
+owner, and if not, synthesize a `room_closed`-equivalent local signal
+rather than waiting forever) — but that's a design decision for whichever
+spec ends up owning it once this run confirms the gap is real, not
+something to guess at blind here.
 
-### What "done" means for this spec
+## Verification
 
-Every step above passing, run at least twice back-to-back against a fresh
-`docker-compose down -v && docker-compose up -d` to rule out state leaking
-between runs — this project's existing verification bar for concurrency-
-sensitive features (`internal/room`/`internal/ws` re-run 3-5x per feature)
-extends naturally to this spec's actual infra-level test.
+- Repeated full-lifecycle runs (matching the previous script's
+  `REPEAT_RUNS` pattern) with participants deliberately split across both
+  gateways, confirming both `server-A`/`server-B` get seen as an owner
+  across enough runs, and — new — confirming both `gateway-1`/`gateway-2`
+  successfully relay for races they didn't happen to receive the
+  creating request on.
+- The kill test, run to observe and document the real outcome per above,
+  not to assert a predetermined pass/fail.
+- `go test ./... -race` and this script's own clean exit are both part of
+  this spec's done bar, same as the previous version.
 
 ## Notes
 
-- This is the spec where `horizontal-scaling/`'s design gets to fail
-  loudly and cheaply, on a laptop, instead of first inside Kubernetes where
-  a failure could be networking, DNS, or the relay design, tangled
-  together. Do not skip ahead to Phase 5's
-  `k8s-race-service-deploy.md` (`replicas: 2`) until every step above
-  passes cleanly.
-- If any step reveals a real design gap in `race-router.md` (not just a
-  bug in its implementation), fix that spec's design and revise its file
-  before continuing — same "grounding must reflect reality" principle
-  every prior phase plan in this project already follows, not unique to
-  this spec.
+- `load/multi-instance-check.md`'s existing runbook prose needs the same
+  topology update as the script itself — two gateways, the
+  different-gateways-same-race scenario explained up front, not left
+  implicit.
+- This is the spec where `room-message-bus.md`'s own closing note
+  ("don't treat either side's unit tests as sufficient proof the wire
+  format actually round-trips") gets its real answer — treat a clean run
+  here as the actual milestone that closes out this phase's horizontal-
+  scaling work, not the individual specs' own unit tests.

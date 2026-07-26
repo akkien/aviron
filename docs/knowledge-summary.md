@@ -264,7 +264,7 @@ Fixed by giving `statusWriter` its own `Hijack()` forwarding to the underlying w
 
 ## Horizontally Scaling
 
-**Status: planned (Phase 4), not yet implemented.** This section works through the architecture a real large-scale multiplayer game backend uses, why most of it doesn't fit a project at this scale, and the right-sized version actually planned for this codebase. Nothing below exists yet — no `internal/roomlocator`, `cmd/race-router`, or Redis dependency is in the code — this is design groundwork ahead of the build.
+**Status: implemented** (`redis-room-registry.md` shipped 2026-07-25, `race-router.md` shipped 2026-07-26 — Phase 4's `horizontal-scaling/` sub-area, both ahead of `event-pipeline/` below). This section works through the architecture a real large-scale multiplayer game backend uses, why most of it doesn't fit a project at this scale, and the right-sized version this codebase actually built. `internal/roomlocator` (the registry client), `internal/racerouter` (the routing/reverse-proxy logic, invoked from `cmd/race-router`), and the Redis dependency are all in the code today — this section was originally written as design groundwork ahead of the build; the "Our approach" design below is what actually shipped, not just what was planned.
 
 ### The architecture researched for large-scale multiplayer games
 
@@ -391,6 +391,162 @@ flowchart TB
 - **Graceful draining on scale-down**: an instance being removed is marked not-ready for *new* room placement immediately, but keeps serving rooms it already owns until they finish or a bounded drain timeout elapses (`readinessProbe` + `preStop` + `terminationGracePeriodSeconds` — the same graceful-shutdown principle `project-overview.md` §7 already calls for, just extended from request-length to room-length timescales).
 - **Redis itself should run as a Cluster with per-shard replication in a real deployment of this design** — the registry (and `race-router`'s cache-invalidation feed) becoming unavailable stops new joins/reconnects from resolving correctly, and a single node has no automatic failover. **For this project, a single Redis instance is implemented instead, deliberately, for simplicity** — the same category of accepted single-point-of-failure risk this project already carries for its one, non-HA Postgres instance. This is a disclosed scope decision, not an oversight, and the upgrade path (Sentinel or Cluster) is already known if it's ever needed.
 
+### Revision: adopting a WS Gateway tier
+
+**Status: superseding "Our approach for this project" above.** The
+project has moved from `race-router` (removed — `cmd/race-router` and
+`internal/racerouter` no longer exist) to a genuine WS Gateway + Message
+Bus split, the fuller-fidelity pattern this section's own "architecture
+researched for large-scale multiplayer games" walked through earlier.
+This isn't a correction of that earlier analysis — the "Why not every
+component fits this project" table's reasoning still holds: a typing
+race's `RoomActor` is a cheap 250ms `select` loop, room count and
+connection count still scale together almost 1:1, and nothing about this
+project's actual load requires splitting connection-holding from
+simulation. This revision overrides that conclusion on purpose instead:
+the project is deliberately taking on the harder pattern — per-message
+relay over a bus, message ordering across process boundaries,
+eviction-mirroring, a connection tier that's never the same process as
+the simulation tier — for what it teaches, which is exactly what this
+whole project targets (per `project-overview.md` §0/§1). `cross-instance-
+relay.md`'s original design (previously written, then explicitly
+superseded by `race-router.md` before it was ever built) is the design
+being revived here, generalized from "only when a connection lands on
+the wrong instance" to "always."
+
+#### What changes, concretely
+
+- New binary `cmd/ws-gateway` (`internal/wsgateway`) replaces
+  `cmd/race-router` (`internal/racerouter`).
+- **REST traffic is unaffected in spirit.** `ws-gateway` still
+  reverse-proxies REST requests using the same design `race-router` had:
+  room-scoped requests (`/races/{id}/...`) resolve via the registry's
+  `Owner()` lookup (cached, kept warm by the same `room:events`
+  subscription) and get proxied to that instance; room-less requests
+  (register, login, browse, leaderboard) round-robin across every healthy
+  instance.
+- **`GET /ws` is the actual pivot.** `ws-gateway` now *terminates* the
+  WebSocket itself — does the upgrade, holds the live connection, decodes
+  and encodes the JSON protocol frames (`project-overview.md` §4.2)
+  itself — instead of proxying the raw connection through to whichever
+  `race-service` instance owns the room the way `race-router` did.
+- A new **message bus** (package `internal/roomrelay` — the name
+  `phase-5-plan.md`'s docs once referenced by mistake, before it
+  described anything real; it's real now), running on **NATS Core, not
+  Redis pub/sub** — see "## Game Message Bus" below for the comparison
+  this choice is based on — carries every decoded frame between
+  `ws-gateway` and the owning `race-service` instance: subject
+  `room.{race_id}.in` (join/telemetry/leave, Gateway → Room Service) and
+  `room.{race_id}.out` (state snapshots, and a `room_closed` signal when
+  the room ends, Room Service → Gateway). The room **registry** stays on
+  Redis, completely unaffected — this is a transport swap for the
+  high-frequency real-time bus specifically, isolating that traffic from
+  the registry's own Redis load, not a move off Redis generally.
+- `internal/room.RoomActor` keeps its exact single-writer
+  event-application logic unchanged (`room-actor-core.md`'s design is
+  untouched) — only its I/O plumbing changes: its `inbox` is fed by a
+  bus-subscriber goroutine instead of a local WS reader goroutine, and
+  its 250ms tick publishes one snapshot onto the bus instead of writing
+  to N local per-connection channels.
+- The Redis **room registry** (`redis-room-registry.md`'s `SET
+  room:<id> instance:<id> NX EX 60`) is unchanged and still required, but
+  its job narrows: it's consulted for REST routing and for `race-service`
+  ownership claim/refresh/release, never for WebSocket traffic anymore —
+  the bus's subject-name addressing (`room.{race_id}.*`) replaces the
+  lookup for that path entirely. `ws-gateway` never needs to know *which*
+  instance owns a room to relay a WS message to it, only the room's id.
+
+#### Diagram
+
+```mermaid
+flowchart TB
+    Client["Browser client(s)"]
+    LB["Load balancer / Ingress<br/>TLS termination, plain round-robin"]
+
+    subgraph gwtier["ws-gateway pool — stateless"]
+        GW1["ws-gateway-1"]
+        GW2["ws-gateway-2"]
+    end
+
+    subgraph bus["Message bus — NATS Core<br/>internal/roomrelay"]
+        ChIn["room.{race_id}.in<br/>join / telemetry / leave"]
+        ChOut["room.{race_id}.out<br/>state snapshot / room_closed"]
+    end
+
+    Reg[("Room registry — Redis<br/>room:&lt;id&gt; -&gt; instance:&lt;id&gt;<br/>redis-room-registry.md, unchanged")]
+
+    subgraph rstier["race-service pool — stateful"]
+        RS1["race-service-1<br/>REST handlers + RoomActor(s) it owns"]
+        RS2["race-service-2<br/>REST handlers + RoomActor(s) it owns"]
+    end
+
+    PG[("Postgres")]
+    Kafka["Kafka<br/>workout.sample / race.finished<br/>event-pipeline/, unchanged"]
+
+    Client --> LB --> GW1 & GW2
+
+    GW1 -- "REST, room-scoped: Owner() lookup + proxy;<br/>room-less: round robin" --> RS1
+    GW2 --> RS2
+
+    GW1 -- "WS: publish decoded frame" --> ChIn
+    GW2 -- "WS: publish decoded frame" --> ChIn
+    ChIn -- "owner subscribes only<br/>to rooms it owns" --> RS1
+    ChIn --> RS2
+
+    RS1 -- "publish snapshot,<br/>every 250ms tick" --> ChOut
+    RS2 --> ChOut
+    ChOut -- "gateway subscribes only while it<br/>holds >=1 local client for that race" --> GW1
+    ChOut --> GW2
+    GW1 -- "fan out to local sockets" --> Client
+    GW2 -- "fan out to local sockets" --> Client
+
+    RS1 <-- "claim / heartbeat / release" --> Reg
+    RS2 <-- "claim / heartbeat / release" --> Reg
+    GW1 -- "Owner() lookup, REST only" --> Reg
+    GW2 -- "Owner() lookup, REST only" --> Reg
+
+    RS1 --> PG
+    RS2 --> PG
+    RS1 --> Kafka
+    RS2 --> Kafka
+```
+
+#### What this reintroduces, honestly
+
+Not quite the generic "eviction-mirroring" cost the large-scale research
+above describes — this codebase's actual `RoomActor` semantics make the
+real shape of the problem narrower than that. `IsEvicted` only ever gates
+a *new* connection attempt from someone whose 30s reconnect grace period
+already expired (`ParticipantEvicted` only fires after
+`ParticipantDisconnected`, never against someone still connected) — there
+is no code path in `internal/room` today that force-closes an already-live
+socket for a single evicted user. The real thing that *does* force-close
+every live socket in a room is room lifecycle end (finished, cancelled,
+or otherwise torn down): `internal/ws/hub.go`'s `done`/`hub.closed`
+already drains the final `race_state`/`race_finished` broadcast and then
+signals every locally-attached connection to close, today, in-process.
+Once the connection lives on a different process than the room, that
+signal has to cross the bus too — `ws-gateway` needs its own
+`user_id -> local connection` bookkeeping per race so it knows which
+sockets to close when a `room_closed` message arrives, mirroring what
+`hub.go` already does locally. The evicted-reconnect check, by contrast,
+doesn't need the bus at all: it's a cheap synchronous lookup `ws-gateway`
+can make directly against Redis at connection-attempt time (the same
+Redis the registry already uses), not a message relayed through
+`room.{race_id}.*`. New specs under `context/features/phase4/horizontal-
+scaling/` are where both of these get designed and built for real this
+time, not deferred again.
+
+#### Where this leaves the earlier reasoning in this section
+
+The "Why not every component fits this project" table above isn't
+wrong, and this revision doesn't invalidate it — a typing race's
+`RoomActor` genuinely doesn't need this split to scale at this project's
+actual size. `cross-instance-relay.md`'s original verdict, *"the hardest
+and highest-risk spec in the entire project,"* still applies too; it's
+no longer a reason to avoid building it, only a reason to build it
+carefully, with its own dedicated specs and its own dedicated tests.
+
 ## Event Pipeline: Kafka → Postgres
 
 **Status: implemented** (`kafka-producer.md`, `kafka-consumer-postgres-sink.md` — Phase 4's `event-pipeline/` sub-area, both shipped 2026-07-26). This section answers a question worth asking explicitly rather than taking on faith: given that Postgres is still where telemetry ends up either way, what does routing it through Kafka first actually buy this project?
@@ -445,3 +601,366 @@ This is a separate claim from the async/non-blocking point above, and worth pull
 | Concurrency control | MVCC bookkeeping, row/page locking | None — an append-only log has no in-place updates to guard |
 
 None of this replaces the eventual Postgres write — it still happens, via `CopyFrom`, and every row still lands in `workout_samples`. What Kafka buys is *reshaping* that write: instead of `N` small transactional inserts issued directly and concurrently from `N` room-actor goroutines (scaling with instance count × room count × player count), it becomes **one** large, efficient batch insert, issued by **one** process, on its own schedule, fully decoupled from the exact millisecond any specific player typed a specific word. `kafka-go`'s own `Writer` batches client-side before it ever talks to the broker too — the same "batch, don't do it one row at a time" principle `project-overview.md` §3 asks for at the database layer, just applied one hop earlier in the pipeline.
+
+## Game Message Bus
+
+### Summary
+
+| Feature | Redis Pub/Sub | NATS Core | Kafka |
+| --- | --- | --- | --- |
+| Primary purpose | Cache with Pub/Sub | Low-latency messaging | Event streaming |
+| Latency | Very low | Very low | Low, but higher than NATS/Redis |
+| Message persistence | No | No (JetStream: Yes) | Yes |
+| Replay | No | JetStream only | Yes |
+| Queue / Load balancing | No | Yes (Queue Groups) | Yes (Consumer Groups) |
+| Wildcard routing | Limited | Excellent | Limited (Topic/Partition model) |
+| Best for | Small systems | Realtime communication | Durable event pipelines |
+
+### Redis Pub/Sub
+
+**Pros**
+
+- Extremely simple to deploy.
+- Very low latency.
+- A good choice for prototypes or small multiplayer games.
+- Often already exists in the stack for cache, sessions, and presence.
+
+**Cons**
+
+- Pub/Sub is an additional feature, not Redis' primary purpose.
+- No built-in load balancing between consumers.
+- No persistence or replay.
+- Limited routing capabilities.
+- Can become a bottleneck as the number of channels and subscribers grows.
+
+**Recommendation**
+
+Suitable for:
+
+- Small to medium multiplayer games.
+- MVPs where operational simplicity is more important than scalability.
+
+---
+
+### NATS
+
+**Pros**
+
+- Designed specifically as a messaging system.
+- Extremely low latency and high throughput.
+- Subject-based routing with wildcard subscriptions.
+- Built-in Queue Groups for horizontal scaling.
+- Native request/reply support.
+- Excellent fit for microservices and realtime systems.
+
+**Cons**
+
+- Core NATS does not persist messages.
+- Introduces another infrastructure component if Redis is already deployed.
+
+**Recommendation**
+
+Best choice for realtime game traffic:
+
+- Gateway ↔ Game Server
+- Game Server ↔ Game Server
+- Matchmaking
+- Presence
+- Chat
+- Any latency-sensitive communication
+
+JetStream can be added later if selective persistence is required.
+
+---
+
+### Kafka
+
+**Pros**
+
+- Durable storage.
+- Replayable event log.
+- Excellent scalability.
+- Consumer Groups provide parallel processing.
+- Ideal for analytics and event-driven architectures.
+
+**Cons**
+
+- Higher latency than NATS.
+- Every message is treated as durable data.
+- Not optimized for short-lived, high-frequency game packets (e.g. movement updates).
+- More operational complexity.
+
+**Recommendation**
+
+Excellent for backend event processing:
+
+- Match results
+- Analytics
+- Leaderboards
+- Anti-cheat
+- Auditing
+- Event sourcing
+
+Not recommended as the primary message bus for realtime gameplay.
+
+---
+
+### Redis Pub/Sub vs NATS
+
+Both Redis Pub/Sub and NATS are suitable for realtime messaging, but they target different use cases.
+
+| Aspect | Redis Pub/Sub | NATS |
+| --- | --- | --- |
+| Design goal | Cache with messaging capability | Dedicated messaging system |
+| Routing | Channels | Subjects with wildcard routing |
+| Load balancing | No | Yes (Queue Groups) |
+| Request/Reply | Manual | Built-in |
+| Horizontal scaling | Good | Excellent |
+| Operational complexity | Very low | Low |
+
+The biggest difference is that **NATS is designed to route messages**, while **Redis is designed to store data**.
+
+For example, routing messages by room:
+
+```text
+Redis
+
+Publish -> room.123
+
+Subscribers:
+- room.123
+```
+
+NATS supports hierarchical subjects:
+
+```text
+room.123.move
+room.123.chat
+room.456.move
+```
+
+A subscriber can receive:
+
+```text
+room.123.*
+```
+
+or even
+
+```text
+room.>
+```
+
+which is useful when handling thousands of game rooms.
+
+Another important feature is **Queue Groups**.
+
+Suppose three Game Server workers process matchmaking requests.
+
+Redis Pub/Sub:
+
+```text
+Publish "matchmaking"
+
+        │
+        ▼
+ ┌──────┼──────┐
+ ▼      ▼      ▼
+GS1    GS2    GS3
+```
+
+Every subscriber receives the message.
+
+NATS Queue Group:
+
+```text
+Publish "matchmaking"
+
+        │
+        ▼
+   Queue Group
+        │
+        ▼
+   One available worker
+```
+
+Only one worker processes the request, making horizontal scaling straightforward.
+
+**Recommendation**
+
+- Redis Pub/Sub is sufficient for prototypes and small games.
+- NATS is generally the better choice for production realtime communication.
+
+---
+
+### Redis Pub/Sub vs Kafka
+
+These systems solve fundamentally different problems.
+
+| Aspect | Redis Pub/Sub | Kafka |
+| --- | --- | --- |
+| Purpose | Live message delivery | Durable event streaming |
+| Persistence | No | Yes |
+| Replay | No | Yes |
+| Consumer offline | Message lost | Consumer reads later |
+| Latency | Very low | Low, but higher |
+| Best suited for | Live gameplay | Business events |
+
+Consider player movement.
+
+```text
+Player
+Move(100,100)
+Move(101,100)
+Move(102,100)
+...
+Move(160,100)
+```
+
+For gameplay, only the latest state matters.
+
+Redis immediately forwards each update:
+
+```text
+Gateway
+    │
+    ▼
+Redis Pub/Sub
+    │
+    ▼
+Game Server
+```
+
+If one update is lost, the next update replaces it.
+
+Kafka behaves differently.
+
+```text
+Offset 1001  Move(100,100)
+Offset 1002  Move(101,100)
+Offset 1003  Move(102,100)
+...
+```
+
+Every event is appended to the log and can be replayed later.
+
+This is valuable for:
+
+- analytics
+- auditing
+- replay
+- event sourcing
+
+but unnecessary for high-frequency gameplay traffic.
+
+**Recommendation**
+
+- Redis Pub/Sub is better for transient realtime updates.
+- Kafka is better for durable business events.
+
+---
+
+### NATS vs Kafka
+
+Although both are messaging systems, they are optimized for different workloads.
+
+| Aspect | NATS | Kafka |
+| --- | --- | --- |
+| Primary goal | Low-latency messaging | Durable event streaming |
+| Persistence | Optional (JetStream) | Built-in |
+| Replay | Optional | Core feature |
+| Routing | Subjects | Topics + Partitions |
+| Request/Reply | Native | Not supported |
+| Typical latency | Very low | Higher |
+| Best suited for | Realtime systems | Data pipelines |
+
+The design philosophy is different.
+
+NATS forwards messages immediately.
+
+```text
+Publisher
+    │
+    ▼
+ NATS
+    │
+    ▼
+Subscriber
+```
+
+Kafka stores every message before consumers process it.
+
+```text
+Producer
+    │
+    ▼
+ Kafka Log
+    │
+    ▼
+Consumer
+```
+
+For gameplay, replaying old packets is usually meaningless.
+
+For example, if a Game Server pauses for 100 ms, hundreds of movement packets may accumulate.
+
+Kafka expects consumers to process every packet in order.
+
+NATS focuses on delivering messages with minimal latency, which better matches realtime game loops.
+
+Kafka excels when every event is important:
+
+- Match finished
+- Item purchased
+- Achievement unlocked
+- Tournament completed
+
+These events have long-term business value and often need to be replayed by multiple downstream systems.
+
+**Recommendation**
+
+- NATS for realtime communication.
+- Kafka for durable event processing.
+
+---
+
+### Recommendation for Multiplayer Games
+
+```text
+                   Player
+                      │
+                 WebSocket
+                      │
+                 WS Gateway
+                      │
+                      ▼
+              NATS / Redis Pub/Sub
+                      │
+                 Game Server
+                      │
+          ┌───────────┴────────────┐
+          │                        │
+          ▼                        ▼
+     Game State              Match Result
+ (realtime events)          (persistent events)
+          │                        │
+          │                    Kafka
+          │                        │
+          │          ┌─────────────┼─────────────┐
+          │          ▼             ▼             ▼
+          │      Analytics     Database     Anti-cheat
+          │
+      Players
+```
+
+| Use case | Recommended |
+| --- | --- |
+| Player movement, combat, state updates | **NATS** |
+| Small projects / MVP | **Redis Pub/Sub** |
+| Match history, analytics, persistent events | **Kafka** |
+
+A common production architecture combines all three:
+
+- **NATS** for realtime gameplay messaging.
+- **Redis** for cache, sessions, presence, and room registry.
+- **Kafka** for durable business events and analytics.
