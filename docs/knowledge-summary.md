@@ -390,3 +390,58 @@ flowchart TB
 - **Message Bus's role shrinks accordingly**: Redis pub/sub here only carries small, infrequent "room created"/"room removed" notifications to keep `race-router`'s cache warm — not the high-frequency per-tick `race_state` traffic the original relay design would have pushed through it.
 - **Graceful draining on scale-down**: an instance being removed is marked not-ready for *new* room placement immediately, but keeps serving rooms it already owns until they finish or a bounded drain timeout elapses (`readinessProbe` + `preStop` + `terminationGracePeriodSeconds` — the same graceful-shutdown principle `project-overview.md` §7 already calls for, just extended from request-length to room-length timescales).
 - **Redis itself should run as a Cluster with per-shard replication in a real deployment of this design** — the registry (and `race-router`'s cache-invalidation feed) becoming unavailable stops new joins/reconnects from resolving correctly, and a single node has no automatic failover. **For this project, a single Redis instance is implemented instead, deliberately, for simplicity** — the same category of accepted single-point-of-failure risk this project already carries for its one, non-HA Postgres instance. This is a disclosed scope decision, not an oversight, and the upgrade path (Sentinel or Cluster) is already known if it's ever needed.
+
+## Event Pipeline: Kafka → Postgres
+
+**Status: implemented** (`kafka-producer.md`, `kafka-consumer-postgres-sink.md` — Phase 4's `event-pipeline/` sub-area, both shipped 2026-07-26). This section answers a question worth asking explicitly rather than taking on faith: given that Postgres is still where telemetry ends up either way, what does routing it through Kafka first actually buy this project?
+
+### The problem this solves
+
+`RoomActor.applyEvent`'s `TelemetryReceived` case (`internal/room/room.go`) fires once per `telemetry` message a client sends — bounded by human typing speed, roughly every 0.4–2s per player (`project-overview.md` §4.2), but multiplied across every participant in every active room, across however many `race-service` instances Phase 4's horizontal scaling is running at once. That's a continuous, fan-in write workload with no natural batching unless something batches it, and it's arriving at exactly the place in this codebase that's least allowed to stall: `RoomActor.Run()`'s single-writer `select` loop, which also owns the room's 250ms broadcast tick (`room-actor-core.md`'s own single-writer principle — one blocked event delays every other event queued behind it in that room's `inbox`).
+
+Two options if telemetry went straight to Postgres instead:
+
+- **A synchronous `INSERT` per telemetry event, called directly from `applyEvent`.** The room actor's hot path would now pay a full network round trip plus a Postgres write on every keystroke any player sends, for a row that isn't even on the critical path of "keep connected clients in sync" — that's the broadcast tick, not row-level telemetry history.
+- **Each room actor batches in memory itself before writing.** Now every room actor — and there can be many, per instance, across however many instances — needs its own flush-timer machinery, all independently contending for the same Postgres connection pool at flush time, duplicated N times instead of built once.
+
+Kafka is the answer `project-overview.md` §6 already chose; the rest of this section is why that choice actually pays off, concretely, in this codebase.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph hot["Real-time hot path — must never block"]
+        RA["RoomActor.applyEvent<br/>TelemetryReceived"]
+    end
+
+    RA -->|"PublishWorkoutSample<br/>(Async: true, returns immediately)"| W["kafka.Writer<br/>internal/kafka.Producer"]
+    W -->|"client-side batched<br/>produce"| T["Kafka topic: workout.sample<br/>partitioned/keyed by race_id"]
+
+    subgraph cold["Batch write path — decoupled, its own schedule"]
+        T --> C["cmd/consumer<br/>accumulates in memory"]
+        C -->|"flush: 200 rows OR 3s,<br/>whichever first"| CF["pgx CopyFrom<br/>bulk insert"]
+        CF --> PG[("Postgres:<br/>workout_samples")]
+    end
+```
+
+### Why Kafka instead of a direct Postgres write helps this project scale
+
+**It decouples the real-time hot path from Postgres's write throughput.** `PublishWorkoutSample` (`internal/kafka/producer.go`) is fire-and-forget: the underlying `kafka.Writer` is constructed with `Async: true`, so `WriteMessages` hands the message to an in-memory client-side buffer and returns immediately — it does not wait for the broker to actually persist or acknowledge it, let alone for Postgres to do anything. Because of that, this project can run many `race-service` instances at once (`server-a`, `server-b`, ... — Phase 4's horizontal scaling), each running any number of room actors, and *none of them ever contends directly with Postgres for a telemetry write*. That write pressure lands on Kafka instead — a system built specifically to absorb many concurrent producers cheaply as an append-only log.
+
+The actual database write happens in exactly one place: `cmd/consumer`, batching up to 200 rows or 3 seconds' worth (whichever comes first) into a single `pgx.CopyFrom` bulk insert. Postgres ends up seeing a small, steady stream of large batch writes instead of a large, bursty stream of tiny individual ones scaling directly with `instances × rooms per instance × players per room`. And per §6's own reasoning ("a dedicated Go consumer group... so consumers can scale independently"): if telemetry volume ever outgrows one consumer, the fix is scaling the *consumer* side — more members in the same consumer group, more partitions — entirely independent of the real-time room-actor/WebSocket tier. Those two halves of the system have genuinely different scaling profiles (I/O-bound real-time fan-out vs. batch database write throughput), the same reasoning the "Horizontally Scaling" section above uses to justify splitting a WS Gateway from a Game Server — applied here to the write path instead of the connection path.
+
+**This reasoning applies to `workout.sample` specifically, not `race.finished`.** `race.finished` stays a low-frequency event (one per race, not one per keystroke) whose correctness matters immediately, so it's never put through this batching/decoupling logic at all — `RaceService.FinishRace` still writes `races`/`race_participants`/`leaderboard_alltime` synchronously and transactionally, and `PublishRaceFinished` only fires *after* that write already succeeded. The Kafka consumer's own handling of `race.finished` is a narrow, idempotent reconciliation safety net (`ReconcileParticipantResults`, `WHERE finish_rank IS NULL`) for the rare case that synchronous write didn't happen — not a second primary writer, and not something this scaling argument is about. See `kafka-consumer-postgres-sink.md`'s own Overview for why that split isn't a dual-write hazard.
+
+### Why a Kafka publish is mechanically cheaper than a Postgres `INSERT`
+
+This is a separate claim from the async/non-blocking point above, and worth pulling apart from it: even ignoring that `PublishWorkoutSample` doesn't wait around, the unit of work Kafka eventually does per message is cheaper in kind than what Postgres does per row.
+
+| | A Postgres `INSERT` (what `workout_samples` would need directly) | A Kafka partition append (what actually happens first) |
+| --- | --- | --- |
+| Parsing/planning | Full SQL parse + query plan | None — no query language involved |
+| Constraints | Two foreign keys checked (`race_id → races.id`, `user_id → users.id`) | None |
+| Durability | Write-ahead log record, then apply to the table and its indexes, then `fsync` (governed by `synchronous_commit`) | Sequential append to the end of a partition's log file |
+| Indexing | `idx_workout_samples_race_user_ts` maintained on every insert | No index to maintain on write |
+| Concurrency control | MVCC bookkeeping, row/page locking | None — an append-only log has no in-place updates to guard |
+
+None of this replaces the eventual Postgres write — it still happens, via `CopyFrom`, and every row still lands in `workout_samples`. What Kafka buys is *reshaping* that write: instead of `N` small transactional inserts issued directly and concurrently from `N` room-actor goroutines (scaling with instance count × room count × player count), it becomes **one** large, efficient batch insert, issued by **one** process, on its own schedule, fully decoupled from the exact millisecond any specific player typed a specific word. `kafka-go`'s own `Writer` batches client-side before it ever talks to the broker too — the same "batch, don't do it one row at a time" principle `project-overview.md` §3 asks for at the database layer, just applied one hop earlier in the pipeline.
