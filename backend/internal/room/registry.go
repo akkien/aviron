@@ -50,6 +50,7 @@ type Registry struct {
 	logger       *slog.Logger
 	tickObserver TickObserver
 	locator      RoomLocator
+	publisher    EventPublisher
 }
 
 // NewRegistry constructs an empty Registry. logger is the process-wide
@@ -60,9 +61,11 @@ type Registry struct {
 // process-wide metrics sink (prometheus-metrics.md), not something that
 // needs a race_id attribute the way a log line does. locator is NoopLocator
 // for single-instance dev/tests, or a real *roomlocator.Locator once
-// running multiple instances.
-func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLocator) *Registry {
-	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver, locator: locator}
+// running multiple instances. publisher is likewise a single process-wide
+// dependency (kafka-producer.md) — NoopPublisher for no-Kafka local dev, or
+// a real *kafka.Producer.
+func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLocator, publisher EventPublisher) *Registry {
+	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver, locator: locator, publisher: publisher}
 }
 
 // Spawn constructs a RoomActor for raceID seeded with the race's
@@ -81,7 +84,7 @@ func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLoc
 func (reg *Registry) Spawn(ctx context.Context, raceID string, distanceMeters int, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller) *RoomActor {
 	broadcast := make(chan []byte, broadcastBufferSize)
 	roomLogger := reg.logger.With(slog.String("race_id", raceID))
-	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, roomLogger, reg.tickObserver)
+	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, reg.publisher, roomLogger, reg.tickObserver)
 
 	reg.mu.Lock()
 	reg.rooms[raceID] = actor

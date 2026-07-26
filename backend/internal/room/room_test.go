@@ -118,6 +118,7 @@ func newTestActor() *RoomActor {
 		finisher:             noopFinisher{},
 		leaver:               noopLeaver{},
 		canceller:            noopCanceller{},
+		publisher:            NoopPublisher{},
 		active:               true,
 		ctx:                  ctx,
 		cancel:               cancel,

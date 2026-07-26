@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/db"
 	"github.com/akkien/aviron/internal/httpserver"
+	"github.com/akkien/aviron/internal/kafka"
 	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/redisclient"
@@ -39,8 +41,11 @@ func Run(cfg *config.Config) {
 	defer redisClient.Close()
 	locator := roomlocator.NewLocator(redisClient, cfg.InstanceID)
 
+	producer := kafka.NewProducer(strings.Split(cfg.KafkaBrokers, ","), logger)
+	defer producer.Close()
+
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(logger, m, locator)
+	registry := room.NewRegistry(logger, m, locator, producer)
 
 	server := httpserver.NewServer()
 	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger, m)

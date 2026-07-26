@@ -62,7 +62,7 @@ func (s *spyLocator) refreshCount(raceID string) int {
 
 func TestRegistry_Spawn_ClaimsOwnershipImmediately(t *testing.T) {
 	spy := &spyLocator{}
-	reg := NewRegistry(testLogger, testTickObserver, spy)
+	reg := NewRegistry(testLogger, testTickObserver, spy, NoopPublisher{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -79,7 +79,7 @@ func TestRegistry_Spawn_HeartbeatRefreshesOwnership(t *testing.T) {
 	withShortHeartbeatInterval(t, 20*time.Millisecond)
 
 	spy := &spyLocator{}
-	reg := NewRegistry(testLogger, testTickObserver, spy)
+	reg := NewRegistry(testLogger, testTickObserver, spy, NoopPublisher{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -97,7 +97,7 @@ func TestRegistry_Spawn_HeartbeatRefreshesOwnership(t *testing.T) {
 
 func TestRegistry_Remove_ReleasesOwnership(t *testing.T) {
 	spy := &spyLocator{}
-	reg := NewRegistry(testLogger, testTickObserver, spy)
+	reg := NewRegistry(testLogger, testTickObserver, spy, NoopPublisher{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -121,7 +121,7 @@ func TestRegistry_ActorSelfCancel_ReleasesOwnership(t *testing.T) {
 	withShortNoShowTimeout(t, 50*time.Millisecond)
 
 	spy := &spyLocator{}
-	reg := NewRegistry(testLogger, testTickObserver, spy)
+	reg := NewRegistry(testLogger, testTickObserver, spy, NoopPublisher{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

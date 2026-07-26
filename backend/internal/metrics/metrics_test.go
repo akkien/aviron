@@ -32,7 +32,7 @@ func scrape(t *testing.T, m *metrics.Metrics) string {
 
 func TestMetrics_ExposesAllFiveRequiredMetrics(t *testing.T) {
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(testLogger, m, room.NoopLocator{})
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{})
 	wsHandler := ws.NewWSHandler(registry, []byte("test-secret"), "http://localhost:5173", testLogger)
 
 	m.RegisterRoomGauges(registry)
@@ -73,7 +73,7 @@ func TestMetrics_ObserveTick_AppearsInScrape(t *testing.T) {
 
 func TestMetrics_RegisterRoomGauges_ReflectsRoomCount(t *testing.T) {
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(testLogger, m, room.NoopLocator{})
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{})
 	m.RegisterRoomGauges(registry)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -87,6 +87,9 @@ type RoomActor struct {
 	// down before ever going active (room-lifecycle/cancelled-race-status.md)
 	// — see finish.go.
 	canceller RaceCanceller
+	// publisher publishes workout.sample/race.finished events to Kafka
+	// (kafka-producer.md) — see publisher.go.
+	publisher EventPublisher
 	// startedAt is this actor's own construction time, used as the baseline
 	// for FinishTimeMs. Not literally races.started_at (that UPDATE and this
 	// Spawn happen milliseconds apart, in the same handler) — close enough
@@ -121,7 +124,7 @@ type RoomActor struct {
 // the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, logger *slog.Logger, tickObserver TickObserver) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, publisher EventPublisher, logger *slog.Logger, tickObserver TickObserver) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
@@ -136,6 +139,7 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 		finisher:             finisher,
 		leaver:               leaver,
 		canceller:            canceller,
+		publisher:            publisher,
 		startedAt:            time.Now(),
 		logger:               logger,
 		tickObserver:         tickObserver,
@@ -310,6 +314,12 @@ func (r *RoomActor) applyEvent(ev RoomEvent) {
 		p.WordsCorrect = e.WordsCorrect
 		p.LastSeq = e.Seq
 		p.PaceWatt = e.PaceWatt
+		if err := r.publisher.PublishWorkoutSample(r.ctx, r.id, e.UserID, time.Now(), p.WordsCorrect, p.PaceWatt); err != nil {
+			// Log-and-continue, no retry — same precedent as finishRace's
+			// own Postgres write below: nothing downstream of Kafka is
+			// this project's system of record.
+			r.logger.Error("publish workout sample failed", slog.Any("error", err))
+		}
 		if p.FinishRank == nil && p.WordsCorrect >= r.distanceMeters {
 			// race-completion/finish-race.md: a participant individually
 			// "finishes" the moment they reach the target, in finishing
@@ -589,6 +599,13 @@ func (r *RoomActor) finishRace(results []ParticipantResult) {
 		return
 	}
 	r.finished = true
+
+	if err := r.publisher.PublishRaceFinished(r.ctx, r.id, results); err != nil {
+		// Same log-and-continue, no-retry precedent as the Postgres write
+		// above — a dropped Kafka publish is strictly less severe, since
+		// Postgres (not Kafka) is this project's system of record.
+		r.logger.Error("publish race finished failed", slog.Any("error", err))
+	}
 
 	resultsJSON := make([]RaceResultJSON, len(results))
 	for i, res := range results {

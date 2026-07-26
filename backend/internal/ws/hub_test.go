@@ -165,8 +165,8 @@ func TestHubRegistry_TotalConnBufferUsage_SumsAcrossHubs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
-	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
+	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
 
 	h1 := hr.getOrCreate("race-1", actor1)
 	h2 := hr.getOrCreate("race-2", actor2)
@@ -190,7 +190,7 @@ func TestHubRegistry_GetOrCreate_ReturnsSameHubForSameRace(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
 
 	h1 := hr.getOrCreate("race-1", actor)
 	h2 := hr.getOrCreate("race-1", actor)
@@ -204,8 +204,8 @@ func TestHubRegistry_GetOrCreate_DifferentRacesGetDifferentHubs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
-	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	actor1 := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
+	actor2 := room.NewRoomActor(ctx, "race-2", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
 
 	h1 := hr.getOrCreate("race-1", actor1)
 	h2 := hr.getOrCreate("race-2", actor2)
@@ -218,7 +218,7 @@ func TestHubRegistry_CleansUpAfterRoomContextCancelled(t *testing.T) {
 	hr := newHubRegistry()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, testLogger, testTickObserver)
+	actor := room.NewRoomActor(ctx, "race-1", 3, make(chan []byte, 4), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
 	hr.getOrCreate("race-1", actor)
 
 	cancel()

@@ -26,6 +26,9 @@ type Config struct {
 	// RedisURL points at the shared Redis used for cross-instance room
 	// ownership (redis-room-registry.md).
 	RedisURL string
+	// KafkaBrokers is a comma-separated list of broker addresses the event
+	// producer publishes workout.sample/race.finished to (kafka-producer.md).
+	KafkaBrokers string
 }
 
 func Load() *Config {
@@ -41,6 +44,7 @@ func Load() *Config {
 		PprofEnabled:      getEnvBool("PPROF_ENABLED", true),
 		InstanceID:        getEnvInstanceID(),
 		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		KafkaBrokers:      getEnv("KAFKA_BROKERS", "localhost:9092"),
 	}
 }
 
