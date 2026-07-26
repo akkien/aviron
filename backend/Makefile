@@ -1,4 +1,4 @@
-.PHONY: run build start stop restart test docs loadtest
+.PHONY: run build start stop restart test docs loadtest multicheck
 
 BINARY := server
 PID_FILE := .server.pid
@@ -41,3 +41,8 @@ docs:
 # ../load/README.md.
 loadtest:
 	k6 run ../load/scenarios/race-lifecycle.js
+
+# Unlike loadtest, this manages its own Postgres/Redis/instances/router —
+# don't `make start` first. See ../load/multi-instance-check.md.
+multicheck:
+	bash ../load/multi-instance-check.sh

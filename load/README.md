@@ -10,6 +10,10 @@ This tool only generates load and gives you a way to watch what happens
 while it runs. It does **not** fix whatever it finds — that's separate,
 follow-up work once a real run produces a concrete finding to point at.
 
+(Testing against ≥2 backend instances plus `race-router`? See
+`load/multi-instance-check.md` instead — a different tool, for correctness
+verification rather than load.)
+
 ## Prerequisites
 
 - The [k6](https://k6.io/) binary installed (`brew install k6` on macOS).
