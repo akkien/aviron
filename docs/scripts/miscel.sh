@@ -1,0 +1,1 @@
+docker compose exec redis redis-cli GET room:9GqCgLFL13wV
