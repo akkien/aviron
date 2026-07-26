@@ -1,4 +1,4 @@
-# Current Feature: Multi-Instance Local Dev Setup & Verification
+# Current Feature
 
 ## Status
 
@@ -6,205 +6,23 @@ Not Started
 
 ## Goals
 
-- Prove `redis-room-registry.md` + `race-router.md` actually work together
-  against two genuinely separate `cmd/server` processes plus a real
-  `cmd/race-router` in front of them — deliberately **before**
-  `context/features/phase5/` (Kubernetes) enters the picture, so a routing
-  bug and a Kubernetes networking bug are never debugged at the same time.
-  Third and final Phase 4 `horizontal-scaling/` spec
-  (`context/features/phase4/phase-4-plan.md`).
-- A repeatable script (`load/multi-instance-check.sh`), not a manual
-  checklist, walks through the full 10-step verification plan the spec
-  lays out: register/create/join/start/telemetry/finish all routed through
-  `race-router` (`:9090`), confirming the request always reaches whichever
-  instance actually owns the room — including a deliberate mid-race kill
-  of the owning instance, confirming the *documented* gap
-  (`race-router.md`'s Notes: an owning instance dying mid-race is
-  unrecoverable) behaves exactly as predicted, not as a hang.
-- Every step passes at least twice back-to-back against a fresh
-  `docker compose down -v && docker compose up -d`, ruling out state
-  leaking between runs — this project's existing concurrency-feature
-  verification bar (`internal/room`/`internal/ws` re-run 3-5x) extended to
-  this spec's actual infra-level test.
-- If any step reveals a real design gap in `race-router.md` (not just an
-  implementation bug in this script), fix that spec's file before
-  continuing — this spec's own Notes state this explicitly.
+<!-- populated by /feature load -->
 
 ## Explain
 
-- Spec: `context/features/phase4/horizontal-scaling/multi-instance-dev-setup.md`.
-  The actual acceptance test for the previous two specs, not new
-  application logic — no new Go package, no unit tests in the usual
-  `internal/...` sense. The real verification for this feature is running
-  the script against live Docker/processes, the same kind of live-run
-  requirement `load-testing/k6-load-test.md` already established a
-  precedent for (that feature needed explicit user sign-off to install and
-  run `k6` for real) — running this script (starting/killing real
-  background processes) will need the same sign-off before it actually
-  executes, not just before writing it.
-- Confirmed via grep, not assumed: `redis:7-alpine` is already in
-  `docker-compose.yml` (added by `redis-room-registry.md`) — nothing to
-  add there, resolving the spec's own "confirm at start, don't duplicate"
-  note. No new Postgres instance either — both `cmd/server` processes
-  share the one already-running Postgres, exactly like real
-  horizontally-scaled instances would share one database. `golang-migrate`'s
-  Postgres driver (`pgx5migrate.WithInstance`, `internal/db/migrate.go`)
-  takes a Postgres advisory lock internally, so two instances starting
-  concurrently and both calling `db.Migrate` is already safe — nothing to
-  build for that, just worth confirming empirically during the real run.
-- **Two real bugs found in the spec's own example commands, relative to
-  code this project already shipped — not implementation details to
-  figure out at `start`, corrections needed before this script can work at
-  all**:
-  1. The spec's example (`INSTANCE_ID=a PORT=8080 go run ./cmd/server`)
-     sets `INSTANCE_ID` to a bare label, not a `host:port`. But
-     `race-router.md`'s own shipped design (confirmed by reading
-     `internal/racerouter/router.go`'s `Director`: `req.URL.Host = target`,
-     where `target` is `Owner()`'s raw returned string) requires
-     `INSTANCE_ID` to be the instance's actual reachable address — this was
-     `race-router.md`'s own resolved design decision, recorded in its
-     History entry. The correct commands set `INSTANCE_ID=localhost:8080`
-     / `INSTANCE_ID=localhost:8081` respectively, matching each instance's
-     own `PORT`.
-  2. The spec's example (`PORT=9090 go run ./cmd/race-router`) sets `PORT`,
-     but confirmed via grep that `internal/racerouter/config.go` reads
-     `RACE_ROUTER_LISTEN_ADDR` (default `:8090`), never `PORT` — the
-     example command would silently start the router on its default port
-     instead of `:9090`, with no error. Corrected to
-     `RACE_ROUTER_LISTEN_ADDR=:9090`.
-- Reusing `load/`'s existing shape literally, per the spec's own
-  instruction: `load/lib/auth.js`'s `registerAndLogin` and
-  `load/lib/ws-client.js`'s `runRaceLifecycle` (from
-  `k6-load-test.md`) are directly reusable for this script's WS legs —
-  pointed at `BASE_URL=http://localhost:9090` (the router), not a single
-  backend, exercises the exact cross-instance path this spec exists to
-  prove.
-- **Real gap found in existing test tooling**: `ws-client.js`'s
-  `runRaceLifecycle` has no reconnect logic at all (a single `ws.connect`,
-  no retry on error) — unlike the frontend's `useRaceSocket.ts` (3 bounded
-  attempts, 2s apart). Verification step 10 needs an actual reconnect
-  attempt after the owning instance is killed, so this script needs a
-  small new reconnect-with-bounded-retry helper mirroring that same
-  3-attempts/2s-apart shape — honestly scoped as testing the
-  router/registry's own behavior under a reconnect-shaped retry loop, not
-  literally exercising the React frontend code (no browser automation is
-  available in this environment, the same disclosed gap every frontend
-  feature in this project already carries).
-- The runbook doc lives at `load/multi-instance-check.md`, a sibling of
-  the existing `load/README.md` — matches that closer, more directly
-  analogous precedent (a tool's own usage doc living right next to the
-  tool) rather than `docs/`, which this project reserves for durable
-  cross-cutting design write-ups (`docs/concurrency.md`,
-  `docs/knowledge-summary.md`), a different purpose than "how do I run
-  this."
-- Step ordering matters and needs real process coordination, not just a
-  linear script: step 6 (`POST /races/{id}/start`) must happen *after*
-  step 5's WebSocket connections are already open (to prove they receive
-  `race_started` live), and step 10's instance kill must happen *while*
-  the race is in progress, not before or after — both require the bash
-  orchestrator and the backgrounded k6 WS run to overlap in time
-  (`k6 run ... &`, a short `sleep`, then `curl`/`kill` from bash, then
-  `wait` on the k6 job and inspect its exit code/output).
+<!-- populated by /feature load -->
 
 ## Plan
 
-1. `load/multi-instance-check.sh` (bash orchestrator), roughly:
-   - `docker compose down -v && docker compose up -d` (fresh Postgres +
-     Redis), then a short retry loop until both accept connections.
-   - Start instance A (`INSTANCE_ID=localhost:8080 PORT=8080 go run
-     ./cmd/server`) and instance B (`INSTANCE_ID=localhost:8081
-     PORT=8081`), each backgrounded with its own log file and saved PID;
-     retry `GET /healthz` on each until ready (existing endpoint, already
-     checks DB connectivity).
-   - Start `race-router`
-     (`RACE_SERVICE_INSTANCES=localhost:8080,localhost:8081
-     RACE_ROUTER_LISTEN_ADDR=:9090 go run ./cmd/race-router`),
-     backgrounded, its own log + PID; retry until it accepts connections
-     (no `/healthz` on the router — poll a real round-robined route like
-     `GET /races` and treat any HTTP response, even `401`, as "up").
-   - Steps 1-4 of the spec's verification plan via `curl`/`jq` directly
-     against `:9090`: register+login two users, `POST /races`, extract
-     `race_id`, `POST /races/{id}/join` for user 2, extract both
-     `session_token`s.
-   - **Ownership assertions (the spec's explicit "real, inspectable
-     assertion, not just 'it seemed to work'")**: `docker compose exec -T
-     redis redis-cli GET room:<race_id>` for the direct Redis check, and
-     `grep race_id <instance log files>` to confirm which instance's
-     structured logs actually show it — record which instance (A or B) is
-     "owning" for this run.
-   - Launch the new k6 WS script (below) in the background
-     (`RACE_ID=... SESSION_TOKEN_1=... SESSION_TOKEN_2=... k6 run
-     load/scenarios/multi-instance-check.js &`), sleep briefly to let both
-     WS connections open and send `join_race`, then `curl POST
-     /races/{id}/start` against `:9090` — confirms step 5/6 (both
-     connections receive `race_started` live, through the router).
-   - `wait` for the k6 job; confirm both VUs' logged events show
-     `race_finished` with matching results (step 7/8) — this only confirms
-     the router resolved both connections to the same instance correctly
-     twice in a row, per the spec's own framing; there's no relay logic
-     left inside `race-service` itself to test.
-   - Repeat the above (steps 2-8) a handful of times in a loop, until both
-     "owning instance is A" and "owning instance is B" outcomes have been
-     seen at least once (step 9) — rules out a `Director`/round-robin bug
-     that only happens to route correctly to one specific instance.
-   - One more full run for step 10: after confirming ownership, `kill` the
-     owning instance's saved PID partway through the race (a few telemetry
-     messages in), then run the new reconnect-check k6 script/helper
-     against the router and confirm it eventually surfaces a definitive
-     failure (not a hang) once the router's cache TTL (30s) and the
-     registry's claim TTL (60s) both lapse.
-   - Tear down (kill all three saved PIDs) at the end, success or failure.
-   - Run the entire script twice back-to-back
-     (`docker compose down -v && up -d` between runs) before considering
-     this "done," per the spec's own bar.
-2. New `load/scenarios/multi-instance-check.js` — a k6 script reusing
-   `load/lib/ws-client.js`'s `runRaceLifecycle` directly (no `setup()`
-   REST orchestration of its own, unlike `race-lifecycle.js` — the bash
-   script already owns the REST steps and hands this script a `race_id`
-   plus two already-issued `session_token`s via `__ENV`), driving 2 VUs
-   concurrently against `BASE_URL=http://localhost:9090`.
-3. New reconnect-check helper (either a second small function in
-   `load/lib/ws-client.js` or a separate `load/lib/reconnect-client.js` —
-   confirm which at `start`) — mirrors `useRaceSocket.ts`'s exact bounded
-   shape (3 attempts, 2s apart) against the router, used only by step 10's
-   run.
-4. New `load/multi-instance-check.md` — the runbook: prerequisites (Docker
-   running, ports 8080/8081/9090/5432/6379 free), what the script does,
-   how to read a failure (which step failed maps to which spec section),
-   and the two real command corrections from Explain written down
-   permanently (so nobody copies the spec's own broken example commands
-   again).
-5. Optional `Makefile` parity: a `multicheck` target
-   (`bash ../load/multi-instance-check.sh` from `backend/`, mirroring
-   `loadtest`'s existing shape) — confirm at `start` whether this is worth
-   adding given the script needs to manage 3 background processes itself
-   rather than assuming one `make start`ed backend like `loadtest` does.
-6. Actually run the script for real, live, against Docker — needs explicit
-   sign-off first (starting/killing real background processes), same
-   precedent as `k6-load-test.md`'s live run. Iterate on whatever step
-   fails; if a failure traces back to `race-router.md`'s own design (not
-   this script's bugs), fix that spec's file per this spec's own Notes
-   before continuing, rather than working around it here.
+<!-- populated by /feature load -->
 
 ## Notes
 
-- This is the spec where the `horizontal-scaling/` design gets to fail
-  loudly and cheaply on a laptop, instead of first inside Kubernetes where
-  a failure could be networking, DNS, or the routing design, tangled
-  together. Do not start `phase5/`'s `k8s-race-service-deploy.md`
-  (`replicas: 2`) until every step here passes cleanly, twice.
-- No Kubernetes, no real load balancer — `race-router` itself **is** the
-  load balancer this spec needs, deliberately still not a production one
-  (no TLS, no health checks) — the smallest thing that actually proves the
-  design, consistent with this project's stated scope stance.
-- Step 10's "documented gap behaving as expected" is the one step in this
-  plan that's about confirming an *accepted limitation* behaves the way
-  it's documented to, not about proving something works — a passing
-  result here means "the failure mode is exactly what
-  `race-router.md`/`redis-room-registry.md`'s Notes already say it is,"
-  not "this is now fixed."
+<!-- populated by /feature load -->
 
 ## History
+
+- **Multi-Instance Local Dev Setup & Verification** (2026-07-26) — Third and final Phase 4 `horizontal-scaling/` spec (`context/features/phase4/horizontal-scaling/multi-instance-dev-setup.md`), the actual acceptance test for `redis-room-registry.md` and `race-router.md` — deliberately proven on a laptop with two plain local processes before `phase5/`'s Kubernetes work ever enters the picture, per that phase's own hard-dependency note. No new Go application code: a new `load/multi-instance-check.sh` orchestrates two real `cmd/server` processes plus a real `cmd/race-router`, driving the full 10-step verification plan (register/create/join/start/telemetry/finish, all through the router, never a backend directly) via `curl`/`jq`, with a new `load/scenarios/multi-instance-check.js` (reusing the existing `ws-client.js`/`auth.js` k6 helpers) handling the WebSocket legs, plus a new `load/lib/reconnect-client.js` mirroring the frontend's exact bounded reconnect shape (3 attempts, 2s apart) for the step-10 kill test. `load/multi-instance-check.md` is the runbook, sibling to the existing `load/README.md`. Two real bugs corrected in the spec's own example commands before any of this could work at all: `INSTANCE_ID` must be a reachable `host:port` (a bare label like `a`/`b` breaks `race-router`'s already-shipped design of using `Owner()`'s raw return value directly as the proxy target), and `race-router` reads `RACE_ROUTER_LISTEN_ADDR`, not `PORT` — the spec's own example would have silently started it on the wrong port. **This feature's real verification was a live run, not `go test`, and that live run caught three more real bugs no amount of code review would have found**: (1) a silent orphaned-process bug — backgrounding `(cd backend && ... "$BIN") &` without `exec` doesn't guarantee `$!` is the real server binary's PID, and `kill "$PID_B"` reported success while the actual process survived as an orphan (confirmed via `ps` showing `PPID 1`), which made the first kill-test attempt look like a false pass (the k6 run "finished cleanly" because the instance was never actually dead) — fixed by adding `exec` inside each subshell, forcing it to replace itself with the binary in place; (2) the ownership log-grep assertion checked for a `"race_id":"<id>"` JSON key that — confirmed by reading a real captured log line — only ever appears on a room actor's *error*-path logging (a failed Claim/Refresh/Release), never during healthy operation, so it failed on literally every single run for the wrong reason; fixed by grepping for the race ID as it actually appears in a healthy run, inside the `RequestLog` middleware's `http_request` access-log `path` field; (3) that wrong assertion's failure never stopped the script, because macOS's default `/bin/bash` is 3.2.57 (frozen pre-GPLv3, predates `inherit_errexit` which bash 4.4 added) — a failing bare statement inside a function whose own invocation is captured via `$(...)` doesn't abort under this bash version the way `set -e` would suggest elsewhere — fixed with an explicit `if` check instead of relying on `errexit` propagation. Also caught and fixed a timing bug in the kill test itself: the fast 10-word races used for steps 1-9 can finish in as little as ~4 seconds, so a kill issued a few seconds in could land *after* natural completion rather than mid-race — fixed with a dedicated 60-word `KILL_TEST_DISTANCE_METERS` for that step only, giving an unambiguous margin. With all of that fixed, two full back-to-back live runs (fresh `docker compose down -v && up -d` between them, per this spec's own "done" bar) both passed cleanly end to end — round-robin correctly alternated both instances as owner across repeated runs, and the kill test correctly showed the live connections breaking when the owner died, followed by a bounded reconnect attempt failing cleanly (not hanging) once both TTLs lapsed, confirming `race-router.md`'s documented mid-race-crash limitation behaves exactly as written, not as a bug. Also added a `multicheck` Makefile target and a cross-reference from `load/README.md`. This completes Phase 4's entire `horizontal-scaling/` sub-area (`redis-room-registry.md`, `race-router.md`, `multi-instance-dev-setup.md`) — per `phase-4-plan.md`, only the `event-pipeline/` sub-area (Kafka: `kafka-producer.md`, `kafka-consumer-postgres-sink.md`) remains before Phase 4 is fully done, independent of this horizontal-scaling chain.
 
 - **Race Router** (2026-07-26) — Second Phase 4 spec (`context/features/phase4/horizontal-scaling/race-router.md`), the actual cross-instance routing `redis-room-registry.md` set up but didn't itself use. New `cmd/race-router` process (thin entrypoint, mirroring `cmd/server`) backed by a new `internal/racerouter` package: `Router` proxies every request via `net/http/httputil.ReverseProxy`, round-robin for room-less requests (register, login, browse, leaderboard), or a TTL-cached `Owner()`/`room:events`-backed lookup for anything carrying a `race_id` (a REST path segment or `GET /ws`'s query param) — `internal/race/handler.go` and `internal/ws/endpoint.go` needed zero changes, since the router resolves the correct instance before either file ever sees a request for a room it doesn't own. Extended `internal/roomlocator` (from the previous feature) to make this buildable at all: exported `RoomEvent` (was unexported) plus `RoomEventCreated`/`RoomEventRemoved` constants, and added `Locator.SubscribeRoomEvents(ctx) (<-chan RoomEvent, error)` — the spec's own Data sketch assumed `*roomlocator.Locator` alone was sufficient for this, but the shipped type had no way to reach `room:events` without it. **A real bug was caught and fixed during this feature's own `load`-time design review, before any code existed**: the originally-planned `resolveTarget(ctx, raceID) (addr string, ok bool)` collapsed "Redis says this race doesn't exist" and "Redis is unreachable" into the same `false` — fixed to a three-way `(addr string, found bool, err error)`, so `ServeHTTP` can return `404` for a genuine miss and `503` (retry, not permanent) for a lookup failure, rather than lying to the client about which one happened. Two more gaps found during grounding, both resolved rather than silently followed: the spec's Concurrency section claimed SIGTERM-based graceful shutdown was "the same pattern this codebase already uses everywhere else" — confirmed via grep this is false, no such pattern exists anywhere in this codebase — resolved by matching `cmd/server`'s own existing model instead (blocks forever on `context.Background()`, no new signal handling invented for just this binary); and `Owner()` returns this project's `InstanceID`, an opaque random string, not a routable address — resolved (closing the open question `redis-room-registry.md`'s own History entry flagged) by requiring any real multi-instance deployment to set each instance's `INSTANCE_ID` explicitly to its own reachable `host:port`, trusted directly as the proxy target with no extra validation against the configured backend list. Logic deliberately lives in `internal/racerouter`, not directly in `cmd/race-router/router.go` as the spec's own sketch showed — mirrors `cmd/server`'s existing thin-`main`-plus-real-logic-in-`internal` split, and is where all the tests live; no Handler/Service/Repository layering, since this is routing infrastructure rather than a REST domain feature (same reasoning that already keeps `internal/room` out of that layering).
 
