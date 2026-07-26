@@ -9,11 +9,82 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aviron"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server-a:
+    build:
+      context: ./backend
+    image: aviron-backend:local
+    environment:
+      DATABASE_URL: postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: local-dev-jwt-secret-change-me
+      INSTANCE_ID: server-a:8080
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server-b:
+    build:
+      context: ./backend
+    image: aviron-backend:local
+    environment:
+      DATABASE_URL: postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: local-dev-jwt-secret-change-me
+      INSTANCE_ID: server-b:8080
+      PORT: "8080"
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  race-router:
+    build:
+      context: ./backend
+    image: aviron-backend:local
+    command: ["/app/race-router"]
+    environment:
+      RACE_SERVICE_INSTANCES: server-a:8080,server-b:8080
+      RACE_ROUTER_LISTEN_ADDR: :8080
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "9090:8080"
+    depends_on:
+      - server-a
+      - server-b
 
   pgadmin:
     image: dpage/pgadmin4:latest
