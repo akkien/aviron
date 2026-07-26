@@ -45,6 +45,21 @@ separate deployable process from `cmd/server`, not a goroutine embedded in
 the same binary. New `cmd/consumer/main.go`, sharing `internal/config` and
 `internal/db` with `cmd/server` but running its own `main`/lifecycle.
 
+**Deployment, per the Dockerize feature's (2026-07-26) now-established
+precedent**: `cmd/consumer` joins `backend/Dockerfile`'s existing
+multi-stage build alongside `cmd/server`/`cmd/race-router` (one shared
+`aviron-backend:local` image, not a new Dockerfile), and gets its own
+`docker-compose.yml` service with `command: ["/app/consumer"]` — exactly
+the pattern `race-router`'s Compose service already uses to pick its own
+binary out of the same image. Confirm at `start` what a meaningful
+`healthcheck:` looks like for a Kafka consumer group (unlike `server-a`/
+`server-b`'s `GET /healthz`, this process has no HTTP surface to poll —
+a liveness signal would have to come from somewhere else, e.g. a small
+internal `/healthz` the consumer serves anyway, or accept it has none and
+relies on `depends_on: condition: service_started` against `kafka`
+instead, matching `race-router`'s own precedent of having no meaningful
+healthcheck of its own).
+
 ### `internal/consumer` package
 
 Not REST-layered (same exemption `internal/room` already has, for the same

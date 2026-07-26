@@ -1,24 +1,112 @@
-# Current Feature
+# Current Feature: Kafka Event Producer
 
 ## Status
 
-Not Started
+In Progress
 
 ## Goals
 
-<!-- populated by /feature load -->
+- The Race Service publishes to two Kafka topics — `workout.sample`
+  (per-telemetry-event) and `race.finished` (final results) — keyed by
+  `race_id` so messages for the same race land in one partition and stay
+  ordered.
+- New `EventPublisher` interface in `internal/room` (mirroring
+  `RaceFinisher`/`RaceLeaver`/`RaceCanceller`), implemented by a new
+  `internal/kafka.Producer` wrapping `segmentio/kafka-go`'s `Writer`(s),
+  wired into `Registry` as a process-wide dependency alongside
+  `TickObserver`/`RoomLocator`.
+- `applyEvent`'s `TelemetryReceived` case publishes one `workout.sample`
+  message per telemetry event (not batched client-side — batching happens
+  downstream, in the not-yet-built consumer's Postgres write); `finishRace`
+  publishes `race.finished` only after the existing Postgres write
+  succeeds, never before.
+- A local Kafka broker added to `docker-compose.yml` (none exists yet),
+  with a real `healthcheck:` so `server-a`/`server-b` can depend on it via
+  `condition: service_healthy`, matching the convention the Dockerize
+  feature already established for `postgres`/`redis`.
 
 ## Explain
 
-<!-- populated by /feature load -->
+- Spec file: `context/features/phase4/event-pipeline/kafka-producer.md`
+  (first of two `event-pipeline/` specs, independent of the already-shipped
+  `horizontal-scaling/` chain — sequenced after it purely by this project's
+  own "finish one sub-area before starting the next" convention, not a real
+  dependency).
+- Producing side only — `kafka-consumer-postgres-sink.md` (not yet built)
+  is what reads these topics back out; this spec ships with no consumer to
+  verify against, so ordering/partitioning is confirmed via
+  `kafka-console-consumer`/`kcat` directly against the broker, not an
+  end-to-end read.
+- Re-grounded before `start`, per explicit user request, against this
+  session's own architecture changes (the Dockerize feature) — both this
+  spec and `kafka-consumer-postgres-sink.md` were updated on disk (Notes
+  sections) to reference the now-established Docker Compose conventions:
+  every service now gets a real `healthcheck:` and `depends_on: condition:
+  service_healthy` (no more hand-rolled readiness polling), and any new
+  binary (`cmd/consumer`, in the next spec) joins the existing shared
+  multi-stage `backend/Dockerfile` — one `aviron-backend:local` image,
+  picked via `command:` override per Compose service — rather than getting
+  its own Dockerfile, exactly like `race-router` already does. Confirmed
+  via `phase-4-plan.md` and both spec files' current content that nothing
+  else in the plan or either spec was invalidated by this session's
+  Dockerize/register-page work — the `EventPublisher`/`Registry` design
+  and `NewRegistry(logger, tickObserver, locator)`'s current 3-param
+  signature (confirmed via `grep` against `internal/room/registry.go`) both
+  still match what this spec assumes.
+- `internal/config` has no `KafkaBrokers` field yet (confirmed) — this spec
+  adds it.
 
 ## Plan
 
-<!-- populated by /feature load -->
+1. `internal/config`: add `KafkaBrokers string` (env `KAFKA_BROKERS`,
+   default `localhost:9092`).
+2. `internal/room/events.go`: `EventPublisher` interface
+   (`PublishWorkoutSample`, `PublishRaceFinished`) and `NoopPublisher`
+   (single-instance/no-Kafka dev default, mirrors `NoopLocator`).
+3. `Registry`/`NewRegistry` gain a `publisher EventPublisher` param
+   (4th, after `locator`); every existing `NewRegistry(...)` call site
+   (production and test fixtures) updated to pass `NoopPublisher{}` or the
+   real producer — mechanical churn, same pattern already paid twice this
+   phase.
+4. New `internal/kafka` package: `Producer` wrapping `*kafka.Writer`(s)
+   (confirm at `start`: one `Writer` per topic vs. one multi-topic
+   `Writer` — whichever `kafka-go` supports more cleanly), `Async: true`,
+   a `slog`-backed `kafka.Logger` adapter for `Writer.Logger`/
+   `ErrorLogger`. `NewProducer(brokers []string) *Producer`, `Close()
+   error`.
+5. Call sites in `internal/room/room.go`: `applyEvent`'s
+   `TelemetryReceived` case calls `PublishWorkoutSample` after updating
+   `ParticipantState` (non-blocking, `Async: true`); `finishRace` calls
+   `PublishRaceFinished` only after `finisher.FinishRace(...)` succeeds.
+   Both: log-and-continue on error, no retry (same precedent as the
+   existing Postgres writes).
+6. `docker-compose.yml`: add a single-broker KRaft-mode Kafka service
+   (confirm exact image at `start` — `bitnami/kafka` or `apache/kafka`,
+   no Zookeeper) with a real `healthcheck:`; wire `server-a`/`server-b`'s
+   `depends_on` to `condition: service_healthy` against it, and their
+   `environment:` to a real `KAFKA_BROKERS` value.
+7. Verify: `go build ./...`/`go test ./...` clean (new `internal/kafka`
+   package unit-testable against the interface, not real Kafka, for
+   anything that doesn't need a live broker); `docker compose up` the new
+   Kafka service and confirm messages actually land on `workout.sample`/
+   `race.finished` via `kafka-console-consumer`/`kcat` — the interim
+   check this spec's own Notes call for, since no consumer exists yet to
+   verify against end-to-end.
 
 ## Notes
 
-<!-- populated by /feature load -->
+- New dependency: `github.com/segmentio/kafka-go`.
+- No DLQ handling in this spec — that's a consumer-side concern
+  (`kafka-consumer-postgres-sink.md`), not applicable to a producer with a
+  well-typed `EventPublisher` interface.
+- Both topics keyed by `race_id`, not `user_id` — confirmed reasoning in
+  the spec: `workout_samples`' existing index is `(race_id, user_id, ts)`,
+  race-scoped queries are the established access pattern, and `race_id`
+  keying gives the future consumer one partition per race for free.
+- Kafka client is a shared, externally-synchronized resource (like
+  `*pgxpool.Pool`) — every room actor's own single goroutine calling into
+  one shared `*kafka.Writer` doesn't violate the single-writer-per-room-
+  state principle.
 
 ## History
 

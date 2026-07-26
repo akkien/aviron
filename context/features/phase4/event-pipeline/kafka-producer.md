@@ -166,6 +166,17 @@ func (p *Producer) Close() error
   `bitnami/kafka` or `apache/kafka`, no Zookeeper — confirm the exact
   image at `start`; project-overview.md §11 already steers away from
   hand-managing Zookeeper/brokers).
+- **Docker Compose conventions now exist to build on, established by the
+  Dockerize feature (2026-07-26) after this spec was first written**:
+  every service in `docker-compose.yml` (`postgres`, `redis`, `server-a`,
+  `server-b`) now has a real `healthcheck:`, and anything that depends on
+  one waits via `depends_on: condition: service_healthy` rather than
+  hand-rolled readiness polling. The new Kafka service should follow the
+  same convention — a real `healthcheck:` (e.g. `kafka-broker-api-versions
+  --bootstrap-server localhost:9092`, confirm the exact command for
+  whichever image is chosen at `start`) so `server-a`/`server-b` can
+  `depends_on: kafka: condition: service_healthy` instead of racing a
+  broker that's still starting up.
 - This spec's own verification can't fully confirm ordering/partitioning
   end to end without a consumer reading the topic back — a reasonable
   interim check is inspecting messages directly via `kafka-console-consumer`
