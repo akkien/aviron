@@ -121,6 +121,31 @@ services:
       - server-a
       - server-b
 
+  consumer:
+    build:
+      context: ./backend
+    image: aviron-backend:local
+    command: ["/app/consumer"]
+    environment:
+      DATABASE_URL: postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable
+      KAFKA_BROKERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      # Not a hard dependency for correctness (a Kafka consumer group can
+      # start before any producer exists), but server-a/server-b are what
+      # create workout.sample/race.finished's topics in practice (Producer's
+      # AllowAutoTopicCreation) — starting after them avoids a cold
+      # consumer group racing topic auto-creation on first boot.
+      server-a:
+        condition: service_started
+      server-b:
+        condition: service_started
+    # No healthcheck of its own — a Kafka consumer group has no HTTP surface
+    # to poll, matching race-router's own already-accepted precedent.
+
   pgadmin:
     image: dpage/pgadmin4:latest
     environment:

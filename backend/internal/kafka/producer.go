@@ -105,6 +105,20 @@ func (p *Producer) PublishRaceFinished(ctx context.Context, raceID string, resul
 	})
 }
 
+// PublishRaw republishes an already-encoded message verbatim to topic,
+// keyed by key — kafka-consumer-postgres-sink.md's dead-letter path, where
+// the "payload" is whatever the original message already was (malformed
+// JSON that failed to decode, or a value that decoded fine but failed to
+// write for a permanent reason), not something this producer constructs
+// itself the way PublishWorkoutSample/PublishRaceFinished do.
+func (p *Producer) PublishRaw(ctx context.Context, topic string, key, value []byte) error {
+	return p.writer.WriteMessages(ctx, kafkago.Message{
+		Topic: topic,
+		Key:   key,
+		Value: value,
+	})
+}
+
 // Close flushes and closes the underlying Writer.
 func (p *Producer) Close() error {
 	return p.writer.Close()

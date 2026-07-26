@@ -288,6 +288,39 @@ func (r *RaceRepository) FinishRace(ctx context.Context, raceID string, distance
 	return nil
 }
 
+// ReconcileParticipantResults is a Kafka-consumer-driven safety net
+// (kafka-consumer-postgres-sink.md) for the rare case FinishRace's own
+// synchronous write didn't happen (e.g. the process crashed between
+// committing and publishing race.finished). The WHERE finish_rank IS NULL
+// guard means this only ever fills in a row still unset — FinishRace
+// remains the one primary writer of race_participants; this never
+// overwrites data that write already correctly set, and deliberately
+// never touches races.status or leaderboard_alltime — a genuinely missed
+// synchronous write leaves those wrong too, which this reconciliation does
+// not attempt to fix (out of scope, see the spec's own Notes).
+func (r *RaceRepository) ReconcileParticipantResults(ctx context.Context, raceID string, results []room.RaceResultJSON) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: reconcile participant results: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once Commit succeeds
+
+	for _, res := range results {
+		if _, err := tx.Exec(ctx, `
+			UPDATE race_participants
+			SET finish_rank = $1, finish_time_ms = $2, avg_pace_watt = $3
+			WHERE race_id = $4 AND user_id = $5 AND finish_rank IS NULL
+		`, res.FinishRank, res.FinishTimeMs, res.AvgPaceWatt, raceID, res.UserID); err != nil {
+			return fmt.Errorf("postgres: reconcile participant results: update participant %s: %w", res.UserID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: reconcile participant results: commit: %w", err)
+	}
+	return nil
+}
+
 // CancelRace persists a pending race's cancellation
 // (room-lifecycle/cancelled-race-status.md). The status = 'pending' guard
 // means this is a no-op (RowsAffected == 0, not an error) if the race
