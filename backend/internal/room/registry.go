@@ -225,7 +225,16 @@ func (reg *Registry) drainBroadcast(ctx context.Context, raceID string, actor *R
 	for {
 		select {
 		case msg := <-broadcast:
-			if err := reg.bus.PublishOut(ctx, raceID, msg); err != nil {
+			// context.Background(), not ctx: finishRace enqueues the final
+			// race_finished broadcast and calls r.cancel() back-to-back
+			// (buffered channel, so the send never blocks on this goroutine
+			// scheduling in between), so this select's two cases can both be
+			// ready at the same instant — select does not pick in send
+			// order. Using ctx here would let PublishOut's own ctx.Err()
+			// check race that cancellation and silently drop precisely the
+			// message this drain exists to deliver, exactly like the
+			// ctx.Done() branch below already had to guard against.
+			if err := reg.bus.PublishOut(context.Background(), raceID, msg); err != nil {
 				roomLogger.Error("roombus: publish out failed", slog.Any("error", err))
 			}
 		case <-ctx.Done():

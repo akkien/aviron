@@ -8,10 +8,15 @@ import (
 )
 
 // busLogEntry records one spyBus.PublishOut/PublishRoomClosed call, in the
-// order it happened.
+// order it happened. ctxDone records whether the context passed to that call
+// was already cancelled at the moment of the call — real *roomrelay.Bus
+// checks ctx.Err() before publishing and silently drops the message if it's
+// already cancelled, a behavior this fake must mirror for a test to be able
+// to catch a caller that raced its own ctx cancellation against the send.
 type busLogEntry struct {
 	kind    string // "publish_out" or "publish_room_closed"
 	payload string
+	ctxDone bool
 }
 
 // spyBus is a RoomBus test double: SubscribeIn always hands back the same
@@ -36,7 +41,7 @@ func (b *spyBus) SubscribeIn(ctx context.Context, raceID string) (<-chan RoomEve
 func (b *spyBus) PublishOut(ctx context.Context, raceID string, payload []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.log = append(b.log, busLogEntry{kind: "publish_out", payload: string(payload)})
+	b.log = append(b.log, busLogEntry{kind: "publish_out", payload: string(payload), ctxDone: ctx.Err() != nil})
 	return nil
 }
 
@@ -87,14 +92,29 @@ func TestRegistry_Spawn_FeedsInboxFromBus(t *testing.T) {
 }
 
 // TestRegistry_Spawn_DrainsBroadcastBeforePublishingRoomClosed is the
-// regression test for a real gap found while implementing this feature:
-// actor.Broadcast()'s channel is never closed by RoomActor (its shutdown
-// signal is always ctx), so a naive `for range actor.Broadcast()` would
-// hang forever and never publish room_closed. distanceMeters=1 makes the
-// sole participant's first telemetry both finish them and finish the whole
-// race (lifecycle.go) — finishRace sends its final broadcast(s) and cancels
-// ctx right after, without blocking, the exact broadcast-vs-done race
-// internal/wsgateway/hub.go's own hub.run has to guard against too.
+// regression test for two real gaps found by actually running this code,
+// not just reading it:
+//
+//  1. actor.Broadcast()'s channel is never closed by RoomActor (its
+//     shutdown signal is always ctx), so a naive `for range actor.Broadcast()`
+//     would hang forever and never publish room_closed. distanceMeters=1
+//     makes the sole participant's first telemetry both finish them and
+//     finish the whole race (lifecycle.go) — finishRace sends its final
+//     broadcast(s) and cancels ctx right after, without blocking, the exact
+//     broadcast-vs-done race internal/wsgateway/hub.go's own hub.run has to
+//     guard against too.
+//  2. Caught by this project's own multi-instance-check.sh live run (not by
+//     this test, originally — spyBus ignored ctx entirely until now):
+//     drainBroadcast's main select case (`case msg := <-broadcast:`) used
+//     ctx directly, not context.Background(), so on the exact same
+//     broadcast-vs-done race as (1), select could pick that case *after*
+//     ctx was already cancelled, and the real Bus.PublishOut's ctx.Err()
+//     check would then silently drop the final race_finished broadcast —
+//     clients would see race_started but never race_finished. The assertion
+//     below (via busLogEntry.ctxDone) is what actually catches this: it
+//     failed intermittently against the old code (the race isn't always
+//     lost) until drainBroadcast's main case was fixed to always use
+//     context.Background(), same as its ctx.Done() branch already did.
 func TestRegistry_Spawn_DrainsBroadcastBeforePublishingRoomClosed(t *testing.T) {
 	bus := newSpyBus()
 	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, bus, NoopEvictionRecorder{})
@@ -127,6 +147,9 @@ func TestRegistry_Spawn_DrainsBroadcastBeforePublishingRoomClosed(t *testing.T) 
 			for _, entry := range log[:len(log)-1] {
 				if entry.kind != "publish_out" {
 					t.Fatalf("unexpected non-publish_out entry before room_closed: %+v", entry)
+				}
+				if entry.ctxDone {
+					t.Fatalf("publish_out called with an already-cancelled context — the real Bus would have silently dropped this message: %+v", log)
 				}
 			}
 			return

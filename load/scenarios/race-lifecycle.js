@@ -99,7 +99,7 @@ export default function (data) {
     throw new Error(`no race assignment for VU ${__VU} (only ${data.assignments.length} provisioned in setup())`);
   }
 
-  runRaceLifecycle(assignment.raceID, assignment.sessionToken, DISTANCE_METERS, function (msg) {
+  runRaceLifecycle(BASE_URL, assignment.raceID, assignment.sessionToken, DISTANCE_METERS, function (msg) {
     check(msg, {
       'known message type': (m) =>
         ['race_state', 'race_started', 'race_finished', 'race_expired'].includes(m.type),

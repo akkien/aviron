@@ -1,8 +1,5 @@
 import ws from 'k6/ws';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const WS_URL = BASE_URL.replace(/^http/, 'ws');
-
 // TELEMETRY_MIN_DELAY_MS/TELEMETRY_MAX_DELAY_MS bound realistic typing
 // cadence per project-overview.md §4.2 — telemetry is sent one word at a
 // time, spaced 0.4-2s apart, never machine-gunned. Unrealistically fast
@@ -24,13 +21,17 @@ function paceWatt(wordsCompleted, startedAtMs) {
   return elapsedMinutes > 0 ? Math.round(wordsCompleted / elapsedMinutes) : 0;
 }
 
-// runRaceLifecycle opens the real GET /ws handshake, sends join_race, then
-// streams telemetry messages (one per simulated correctly-typed word) until
-// distanceMeters is reached or the room broadcasts race_finished/
-// race_expired, whichever comes first. onEvent (optional) is called with
-// every decoded server message, for the caller to run checks against.
-export function runRaceLifecycle(raceID, sessionToken, distanceMeters, onEvent) {
-  const url = `${WS_URL}/ws?race_id=${encodeURIComponent(raceID)}&session_token=${encodeURIComponent(sessionToken)}`;
+// runRaceLifecycle opens the real GET /ws handshake against baseURL, sends
+// join_race, then streams telemetry messages (one per simulated
+// correctly-typed word) until distanceMeters is reached or the room
+// broadcasts race_finished/race_expired, whichever comes first. onEvent
+// (optional) is called with every decoded server message, for the caller to
+// run checks against. baseURL lets each caller point a given race
+// participant at a specific backend (e.g. a specific ws-gateway instance)
+// rather than a single shared default.
+export function runRaceLifecycle(baseURL, raceID, sessionToken, distanceMeters, onEvent) {
+  const wsURL = baseURL.replace(/^http/, 'ws');
+  const url = `${wsURL}/ws?race_id=${encodeURIComponent(raceID)}&session_token=${encodeURIComponent(sessionToken)}`;
 
   return ws.connect(url, {}, function (socket) {
     let seq = 0;

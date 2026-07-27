@@ -55,7 +55,15 @@ services:
       retries: 15
 
   nats:
-    image: nats:latest
+    # nats:latest is a distroless-style image with nothing in it but the
+    # nats-server binary itself — no shell, no wget, nothing `docker compose
+    # exec` or a CMD-exec healthcheck can run. Confirmed the hard way
+    # (multi-instance-dev-setup.md's own first live run): the healthcheck
+    # below silently never passed, and `docker compose exec -T nats sh`
+    # itself fails with "executable file not found in $PATH". nats:2-alpine
+    # is the same nats-server, just on a base image with a real userland,
+    # so the healthcheck below can actually execute.
+    image: nats:2-alpine
     # -m 8222 turns on the monitoring HTTP endpoint solely so this
     # healthcheck has something to poll — no other service reads it.
     # JetStream is intentionally not enabled: room-message-bus.md accepts
@@ -76,6 +84,7 @@ services:
     environment:
       DATABASE_URL: postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable
       REDIS_URL: redis://redis:6379/0
+      NATS_URL: nats://nats:4222
       JWT_SECRET: local-dev-jwt-secret-change-me
       INSTANCE_ID: server-a:8080
       PORT: "8080"
@@ -88,6 +97,8 @@ services:
       redis:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      nats:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
@@ -102,6 +113,7 @@ services:
     environment:
       DATABASE_URL: postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable
       REDIS_URL: redis://redis:6379/0
+      NATS_URL: nats://nats:4222
       JWT_SECRET: local-dev-jwt-secret-change-me
       INSTANCE_ID: server-b:8080
       PORT: "8080"
@@ -114,6 +126,8 @@ services:
       redis:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      nats:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
