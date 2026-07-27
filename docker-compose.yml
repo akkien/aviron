@@ -121,20 +121,37 @@ services:
       timeout: 5s
       retries: 10
 
-  race-router:
+  ws-gateway:
     build:
       context: ./backend
     image: aviron-backend:local
-    command: ["/app/race-router"]
+    command: ["/app/ws-gateway"]
     environment:
       RACE_SERVICE_INSTANCES: server-a:8080,server-b:8080
-      RACE_ROUTER_LISTEN_ADDR: :8080
+      WS_GATEWAY_LISTEN_ADDR: :8080
       REDIS_URL: redis://redis:6379/0
+      NATS_URL: nats://nats:4222
+      JWT_SECRET: local-dev-jwt-secret-change-me
+      CORS_ALLOWED_ORIGIN: http://localhost:5173
     ports:
       - "9090:8080"
     depends_on:
-      - server-a
-      - server-b
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      server-a:
+        condition: service_started
+      server-b:
+        condition: service_started
+    # Real healthcheck, unlike the replaced race-router (which never
+    # exposed one at all) — ws-gateway.md closes that gap since a real load
+    # balancer in front of this pool needs an actual health signal.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   consumer:
     build:
@@ -158,8 +175,8 @@ services:
         condition: service_started
       server-b:
         condition: service_started
-    # No healthcheck of its own — a Kafka consumer group has no HTTP surface
-    # to poll, matching race-router's own already-accepted precedent.
+    # No healthcheck of its own — a Kafka consumer group has no HTTP
+    # surface to poll.
 
   pgadmin:
     image: dpage/pgadmin4:latest

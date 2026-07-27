@@ -99,6 +99,55 @@ func TestLocator_Release_DeletesClaim(t *testing.T) {
 	}
 }
 
+func TestLocator_IsEvicted_ReturnsFalseWhenNeverMarked(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newTestLocator(t, "instance-a")
+
+	evicted, err := l.IsEvicted(ctx, "race-1", "user-1")
+	if err != nil {
+		t.Fatalf("IsEvicted: %v", err)
+	}
+	if evicted {
+		t.Fatal("expected evicted=false for a user never marked evicted")
+	}
+}
+
+func TestLocator_MarkEvicted_ThenIsEvicted_ReturnsTrue(t *testing.T) {
+	ctx := context.Background()
+	l, mr := newTestLocator(t, "instance-a")
+
+	if err := l.MarkEvicted(ctx, "race-1", "user-1"); err != nil {
+		t.Fatalf("MarkEvicted: %v", err)
+	}
+
+	evicted, err := l.IsEvicted(ctx, "race-1", "user-1")
+	if err != nil {
+		t.Fatalf("IsEvicted: %v", err)
+	}
+	if !evicted {
+		t.Fatal("expected evicted=true after MarkEvicted")
+	}
+	if !mr.Exists("race:race-1:evicted") {
+		t.Fatal("expected race:race-1:evicted to exist in redis")
+	}
+}
+
+func TestLocator_MarkEvicted_DoesNotAffectOtherUsersOrRaces(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newTestLocator(t, "instance-a")
+
+	if err := l.MarkEvicted(ctx, "race-1", "user-1"); err != nil {
+		t.Fatalf("MarkEvicted: %v", err)
+	}
+
+	if evicted, err := l.IsEvicted(ctx, "race-1", "user-2"); err != nil || evicted {
+		t.Fatalf("IsEvicted(race-1, user-2) = %v, %v, want false, nil", evicted, err)
+	}
+	if evicted, err := l.IsEvicted(ctx, "race-2", "user-1"); err != nil || evicted {
+		t.Fatalf("IsEvicted(race-2, user-1) = %v, %v, want false, nil", evicted, err)
+	}
+}
+
 func TestLocator_Owner_ReturnsNotFoundWhenUnclaimed(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLocator(t, "instance-a")
@@ -133,7 +182,7 @@ func TestLocator_Owner_ReturnsClaimingInstance(t *testing.T) {
 }
 
 // TestLocator_ClaimAndRelease_PublishRoomEvents is the one piece
-// race-router.md directly depends on: proof that Claim/Release actually put
+// ws-gateway.md directly depends on: proof that Claim/Release actually put
 // the expected payloads onto room:events, not just that they mutate the key.
 func TestLocator_ClaimAndRelease_PublishRoomEvents(t *testing.T) {
 	ctx := context.Background()
@@ -168,7 +217,7 @@ func TestLocator_ClaimAndRelease_PublishRoomEvents(t *testing.T) {
 }
 
 // TestLocator_SubscribeRoomEvents_ReceivesCreatedAndRemoved proves
-// race-router.md's actual consumption path works end to end: subscribing
+// ws-gateway.md's actual consumption path works end to end: subscribing
 // via the Locator itself (not a raw *redis.Client), decoding both event
 // types Claim/Release publish.
 func TestLocator_SubscribeRoomEvents_ReceivesCreatedAndRemoved(t *testing.T) {

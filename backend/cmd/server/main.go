@@ -1,7 +1,6 @@
 package main
 
 import (
-	app "github.com/akkien/aviron/internal"
 	"github.com/akkien/aviron/internal/config"
 
 	_ "github.com/akkien/aviron/docs"
@@ -13,5 +12,5 @@ import (
 // @BasePath /
 func main() {
 	cfg := config.Load()
-	app.Run(cfg)
+	Run(cfg)
 }

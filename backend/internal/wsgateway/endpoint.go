@@ -5,12 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 
-	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/roomrelay"
 	"github.com/akkien/aviron/internal/ws"
 )
 
@@ -28,54 +27,39 @@ type wsConn interface {
 	Close(code websocket.StatusCode, reason string) error
 }
 
-// WSHandler serves GET /ws?race_id=...&session_token=.... No Handler/Service
-// /Repository layering (same reasoning as room-actor-core.md and
-// websocket/protocol.md): there's no DB round-trip here, only an in-memory
-// registry lookup and a signed-JWT verification.
+// WSHandler serves GET /ws?race_id=...&session_token=.... No Handler/
+// Service/Repository layering (same reasoning as room-actor-core.md and
+// websocket/protocol.md): there's no DB round-trip here, only Redis
+// lookups and a signed-JWT verification. Terminates the connection itself
+// and relays decoded messages over internal/roomrelay
+// (room-message-bus.md) instead of proxying the raw connection through to
+// whichever race-service instance owns the room — ws-gateway.md's actual
+// pivot relative to the deleted race-router.
 type WSHandler struct {
-	registry      *room.Registry
+	locator       RoomLocator
+	relay         relayBus
+	hubs          *raceHubRegistry
 	jwtSecret     []byte
-	hubs          *hubRegistry
 	allowedOrigin string
 	logger        *slog.Logger
-	// connectionCount tracks how many connections serveConn currently has
-	// in flight, process-wide (prometheus-metrics.md — connection count).
-	// Incremented/decremented directly in serveConn, not inside hub.run's
-	// register/unregister map mutations: once a room finishes, hub.closed
-	// closes and every connection's deferred hub.unregisterConn call
-	// becomes a no-op (its select short-circuits on <-h.closed), so a
-	// counter tied to that map mutation would never decrement for that
-	// connection and leak. Counting unconditionally in serveConn instead
-	// can't leak, and doesn't need any of hub's internals.
-	connectionCount atomic.Int64
 }
 
-// NewWSHandler constructs a WSHandler. allowedOrigin is reused from the same
-// config value the REST CORS middleware already uses (config.CORSAllowedOrigin)
-// — without it, coder/websocket's default same-origin check would reject the
-// frontend's cross-origin WebSocket handshake in local dev.
-func NewWSHandler(registry *room.Registry, jwtSecret []byte, allowedOrigin string, logger *slog.Logger) *WSHandler {
+// NewWSHandler constructs a WSHandler. allowedOrigin is reused from the
+// same config value the REST CORS middleware already uses — without it,
+// coder/websocket's default same-origin check would reject the frontend's
+// cross-origin WebSocket handshake in local dev. hubs is shared with
+// whatever else in this process needs raceHubRegistry (nothing else does
+// today, but constructing it here keeps WSHandler's own lifecycle
+// self-contained).
+func NewWSHandler(locator RoomLocator, relay relayBus, hubs *raceHubRegistry, jwtSecret []byte, allowedOrigin string, logger *slog.Logger) *WSHandler {
 	return &WSHandler{
-		registry:      registry,
+		locator:       locator,
+		relay:         relay,
+		hubs:          hubs,
 		jwtSecret:     jwtSecret,
-		hubs:          newHubRegistry(),
 		allowedOrigin: allowedOrigin,
 		logger:        logger,
 	}
-}
-
-// ConnectionCount reports how many WebSocket connections are currently
-// being served, process-wide (prometheus-metrics.md).
-func (h *WSHandler) ConnectionCount() int64 {
-	return h.connectionCount.Load()
-}
-
-// ConnBufferUsage sums how many messages are currently queued across every
-// connection's own outbound channel, across every room (prometheus-metrics.md
-// — channel buffer usage). Delegates to hubs since each hub's connection set
-// is only reachable from inside its own run() goroutine — see hub.go.
-func (h *WSHandler) ConnBufferUsage() int {
-	return h.hubs.totalConnBufferUsage()
 }
 
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,21 +72,32 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only checks that an actor exists, not its status — a pending room
-	// actor (spawned at race creation, early-spawn.md) is an intentionally
-	// valid attach target, not an oversight: it's what lets every
-	// participant hold a live connection before the race starts
-	// (pending-connections.md).
-	actor, ok := h.registry.Get(raceID)
-	if !ok {
+	// A genuine miss, mirroring Gateway.ServeHTTP's own REST-routing check
+	// (via the same RoomLocator) — not part of ws-gateway.md's own numbered
+	// step list, but without it a client would upgrade successfully against
+	// a race that doesn't exist and simply never receive anything, since
+	// there's no race-service subscriber on room.{race_id}.in/.out to
+	// notice or report the mismatch.
+	if _, found, err := h.locator.Owner(r.Context(), raceID); err != nil {
+		h.logger.Error("wsgateway: owner lookup failed", slog.String("race_id", raceID), slog.Any("error", err))
+		http.Error(w, "routing lookup failed", http.StatusServiceUnavailable)
+		return
+	} else if !found {
 		http.Error(w, "race not found", http.StatusNotFound)
 		return
 	}
 
-	// A user_id whose grace period already expired (reconnection/grace-period.md)
-	// is rejected the same way an invalid token is — not silently let back
-	// in as a fresh participant.
-	if actor.IsEvicted(userID) {
+	// A user_id whose grace period already expired
+	// (reconnection/grace-period.md) is rejected the same way an invalid
+	// token is — not silently let back in as a fresh participant. Redis,
+	// synchronous, bypassing internal/roomrelay entirely
+	// (room-message-bus.md's "Evicted-reconnect checks bypass the bus
+	// entirely").
+	if evicted, err := h.locator.IsEvicted(r.Context(), raceID, userID); err != nil {
+		h.logger.Error("wsgateway: evicted check failed", slog.String("race_id", raceID), slog.Any("error", err))
+		http.Error(w, "routing lookup failed", http.StatusServiceUnavailable)
+		return
+	} else if evicted {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -118,34 +113,31 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// displayName falls back to userID: the session token only carries
 	// race_id/user_id (internal/race/service.go's JoinRace), and looking up
 	// users.display_name here would be this endpoint's only Postgres
-	// round-trip, contradicting ws-endpoint.md's "no new Postgres access."
+	// round-trip, contradicting this project's "no new Postgres access"
+	// stance for the WS path.
 	connLogger := h.logger.With(slog.String("race_id", raceID), slog.String("user_id", userID))
-	h.serveConn(actor, conn, raceID, userID, userID, connLogger)
+	h.serveConn(conn, raceID, userID, userID, connLogger)
 }
 
 // serveConn drives one connection until it's done, then returns — callers
 // (ServeHTTP, and this file's tests) can rely on that return meaning both
-// the reader and writer goroutines have actually exited, not just been told
-// to.
-func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID, displayName string, logger *slog.Logger) {
-	h.connectionCount.Add(1)
-	defer h.connectionCount.Add(-1)
+// the reader and writer goroutines have actually exited, not just been
+// told to.
+func (h *WSHandler) serveConn(conn wsConn, raceID, userID, displayName string, logger *slog.Logger) {
+	hub, err := h.hubs.attach(raceID)
+	if err != nil {
+		logger.Error("wsgateway: attach to race hub failed", slog.Any("error", err))
+		conn.Close(websocket.StatusInternalError, "")
+		return
+	}
+	defer h.hubs.detach(raceID)
 
-	hub := h.hubs.getOrCreate(raceID, actor)
-
-	// Deliberately NOT context.WithCancel(actor.Context()): that would fire
-	// the instant the room's context is cancelled — at essentially the same
-	// moment hub.closed does, with no ordering between the two, since both
-	// are direct observers of the same cancellation. hub.closed is only
-	// guaranteed to close *after* hub.run has fully drained and forwarded
-	// every pending broadcast (including the room's final
-	// race_state/race_finished) into every registered connCh; a connCtx
-	// racing that signal independently could still win and tear this
-	// connection down before writeLoop ever reads what hub just forwarded —
-	// the same lost-final-message bug this was meant to fix, just one layer
-	// up. Cancellation here is purely for this connection's own reasons
-	// (read/write error); room-wide winding-down reaches it exclusively
-	// through hub.closed, passed into writeLoop below.
+	// Deliberately NOT tied to hub's own lifetime directly: this context is
+	// purely for this connection's own reasons (read/write error).
+	// Room-wide winding-down reaches it exclusively through hub.closed,
+	// passed into writeLoop below — same separation the former in-process
+	// serveConn already established between a connection's own context and
+	// the room-wide hub.closed signal.
 	connCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -158,7 +150,7 @@ func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		readLoop(connCtx, conn, actor, userID, displayName, logger)
+		readLoop(connCtx, conn, h.relay, raceID, userID, displayName, logger)
 	}()
 	go func() {
 		defer wg.Done()
@@ -170,47 +162,61 @@ func (h *WSHandler) serveConn(actor *room.RoomActor, conn wsConn, raceID, userID
 	conn.Close(websocket.StatusNormalClosure, "")
 }
 
-// readLoop never touches room state directly — every decoded message
-// becomes a room.RoomEvent handed to actor.Send, which is the only
-// cross-goroutine entry point into the room's single-writer state.
-func readLoop(ctx context.Context, conn wsConn, actor *room.RoomActor, userID, displayName string, logger *slog.Logger) {
+// readLoop never touches room state directly — every decoded frame becomes
+// an InboundEnvelope published on room.{race_id}.in, the only cross-process
+// entry point into the room's state now (room-message-bus.md). Only
+// ws.DecodeClientMessage is reused here, not ToRoomEvent — that conversion
+// stays room-service-adapter.md's job, on the other side of the bus; this
+// side only validates the frame is well-formed before ever publishing it.
+func readLoop(ctx context.Context, conn wsConn, relay relayBus, raceID, userID, displayName string, logger *slog.Logger) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			// Read error covers both an abrupt close and ctx cancellation
-			// (the writer side failing, or the room closing) — either way,
+			// (the writer side failing, or the race ending) — either way,
 			// the participant is gone from this connection's perspective.
-			actor.Send(room.ParticipantDisconnected{UserID: userID})
+			// context.Background(), not ctx: ctx may already be cancelled
+			// at exactly this point (that's often what caused Read to
+			// return an error in the first place), and relay.PublishIn
+			// checks ctx.Err() first — using the connection's own
+			// (possibly-cancelled) ctx here would silently drop the one
+			// notification this path exists to deliver, the same class of
+			// bug room-service-adapter.md's drainBroadcast/cleanupWhenDone
+			// already had to guard against on the publishing side.
+			if pubErr := relay.PublishIn(context.Background(), raceID, roomrelay.InboundEnvelope{
+				Kind: roomrelay.InboundKindDisconnected, RaceID: raceID, UserID: userID, DisplayName: displayName,
+			}); pubErr != nil {
+				logger.Error("wsgateway: publish disconnected failed", slog.Any("error", pubErr))
+			}
 			return
 		}
 
 		msg, err := ws.DecodeClientMessage(data)
 		if err != nil {
-			logger.Warn("dropping malformed message", slog.Any("error", err))
+			logger.Warn("wsgateway: dropping malformed message", slog.Any("error", err))
 			continue
 		}
 
-		ev, err := msg.ToRoomEvent(userID, displayName)
-		if err != nil {
-			logger.Warn("dropping message", slog.Any("error", err))
+		if err := relay.PublishIn(ctx, raceID, roomrelay.InboundEnvelope{
+			Kind: roomrelay.InboundKindMessage, RaceID: raceID, UserID: userID, DisplayName: displayName, Message: data,
+		}); err != nil {
+			logger.Error("wsgateway: publish message failed", slog.Any("error", err))
 			continue
 		}
 
-		actor.Send(ev)
-
-		if _, ok := ev.(room.ParticipantLeft); ok {
-			// An intentional quit (leave-race.md): the room already has the
-			// event, so there's nothing left to read from this participant —
-			// close the connection from the server side too, rather than
+		if msg.Type == "leave_race" {
+			// An intentional quit (leave-race.md): the bus already has the
+			// event, so there's nothing left to read from this participant
+			// — close the connection from the server side too, rather than
 			// waiting for the client to hang up (or not) on its own.
 			return
 		}
 	}
 }
 
-// writeLoop owns connCh, this connection's slice of the room's fan-out (see
-// hub) — draining it and writing frames out until ctx is done or hubClosed
-// fires.
+// writeLoop owns connCh, this connection's slice of the race's fan-out (see
+// raceHub) — draining it and writing frames out until ctx is done or
+// hubClosed fires.
 func writeLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, connCh <-chan []byte) {
 	for {
 		select {
@@ -219,15 +225,14 @@ func writeLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, conn
 				return
 			}
 		case <-hubClosed:
-			// hub.run only closes hub.closed after fully draining and
-			// forwarding every pending broadcast — including the room's
-			// final race_state/race_finished — into every registered
-			// connCh, so anything still meant for this connection is
-			// already sitting in connCh's buffer by now. ctx isn't tied to
-			// the room's own context (see serveConn), so it's still valid
-			// here: drain deterministically instead of leaving this select
-			// to race hubClosed against connCh the same way hub.run's own
-			// broadcast/done select used to.
+			// raceHub.run only closes hub.closed after fully processing
+			// every already-arrived broadcast (including the race's final
+			// race_state/race_finished) — including forwarding them into
+			// every registered connCh — so anything still meant for this
+			// connection is already sitting in connCh's buffer by now. ctx
+			// isn't tied to the race's own lifetime (see serveConn): drain
+			// deterministically instead of leaving this select to race
+			// hubClosed against connCh.
 			for {
 				select {
 				case msg := <-connCh:

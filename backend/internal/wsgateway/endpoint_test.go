@@ -2,48 +2,44 @@ package wsgateway
 
 import (
 	"context"
-	"encoding/json"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/roomrelay"
 )
 
-func newTestWSHandler() *WSHandler {
-	return NewWSHandler(room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{}), []byte("test-secret"), "http://localhost:5173", testLogger)
+func newTestWSHandler(locator RoomLocator, relay *roomrelay.FakeBus) *WSHandler {
+	return NewWSHandler(locator, relay, NewRaceHubRegistry(context.Background(), relay, testLogger), []byte("test-secret"), "http://localhost:5173", testLogger)
 }
 
 func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
+	relay := roomrelay.NewFakeBus()
+	in, _, err := relay.SubscribeIn(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
+	}
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
 
-	h := newTestWSHandler()
+	h := newTestWSHandler(newFakeLocator(), relay)
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
-	// Prove the join_race message actually reached the room: the immediate
-	// snapshot broadcastSnapshot() sends on ParticipantJoined should be
-	// fanned out to this connection. Only queue the disconnect read after
-	// this lands, so the abrupt disconnect below can't race the broadcast.
+	// Prove the join_race frame actually reached room.race-1.in. Only queue
+	// the disconnect read after this lands, so it can't race the publish.
 	select {
-	case body := <-conn.writes:
-		if string(body) == "" {
-			t.Error("received an empty race_state broadcast")
+	case env := <-in:
+		if env.Kind != roomrelay.InboundKindMessage || env.UserID != "user-1" {
+			t.Fatalf("unexpected inbound envelope: %+v", env)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("connection never received a race_state broadcast after join_race")
+		t.Fatal("join_race frame was never published onto room.race-1.in")
 	}
 
 	conn.queueRead(nil, io.EOF) // abrupt disconnect
@@ -62,35 +58,48 @@ func TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak(t *testing.T) {
 	default:
 		t.Error("conn.Close was never called")
 	}
+
+	// The disconnect must also be published, using a context independent of
+	// the now-cancelled connection context (see readLoop's own comment).
+	select {
+	case env := <-in:
+		if env.Kind != roomrelay.InboundKindDisconnected || env.UserID != "user-1" {
+			t.Fatalf("unexpected inbound envelope: %+v", env)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disconnect was never published onto room.race-1.in")
+	}
 }
 
 func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
+	relay := roomrelay.NewFakeBus()
+	in, _, err := relay.SubscribeIn(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
+	}
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`not json`), nil)
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
 
-	h := newTestWSHandler()
+	h := newTestWSHandler(newFakeLocator(), relay)
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
-	// The malformed first message must be dropped, not treated as
-	// connection-ending — the subsequent valid join_race should still
-	// produce a broadcast. Only queue the disconnect after this lands, so
-	// it can't race the broadcast.
+	// The malformed first message must be dropped, not published and not
+	// connection-ending — the subsequent valid join_race should still be
+	// published. Only queue the disconnect after this lands.
 	select {
-	case <-conn.writes:
+	case env := <-in:
+		if env.Kind != roomrelay.InboundKindMessage {
+			t.Fatalf("unexpected inbound envelope: %+v", env)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("no broadcast received — malformed message may have ended the connection early")
+		t.Fatal("no publish received — malformed message may have ended the connection early")
 	}
 
 	conn.queueRead(nil, io.EOF)
@@ -103,11 +112,7 @@ func TestServeConn_MalformedMessageDoesNotEndConnection(t *testing.T) {
 }
 
 func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
+	relay := roomrelay.NewFakeBus()
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
@@ -116,11 +121,11 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 	// return on its own after leave_race, not wait for the client to also
 	// close the socket.
 
-	h := newTestWSHandler()
+	h := newTestWSHandler(newFakeLocator(), relay)
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
@@ -137,150 +142,8 @@ func TestServeConn_LeaveRaceClosesConnectionWithoutClientDisconnect(t *testing.T
 	}
 }
 
-// TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing is a regression
-// test for a real reported bug: a solo racer's final word never moved their
-// vehicle to 100%, and the connection was torn down looking exactly like an
-// unexpected drop (no race_finished ever seen client-side) instead of a
-// clean finish. Root cause was two stacked races: the room's broadcast
-// channel is buffered, so finishRace's final race_state/race_finished sends
-// and the subsequent r.cancel() both complete without blocking, back to
-// back — hub.run's done case and (before this fix) writeLoop's ctx.Done()
-// case could each independently win their own select against the
-// still-unread final messages and return without ever delivering them.
-// distanceMeters is 1 so a single telemetry message both finishes the race
-// and triggers this exact scenario deterministically, not just occasionally.
-func TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 1, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
-	actor.MarkActive("") // a pending race can't legitimately finish (pending-connections.md)
-
-	conn := newFakeConn()
-	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
-	conn.queueRead([]byte(`{"type":"telemetry","seq":1,"distance_m":1,"pace_watt":60,"ts":0}`), nil)
-
-	h := newTestWSHandler()
-
-	done := make(chan struct{})
-	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("serveConn did not return after the race finished — goroutine leak")
-	}
-
-	select {
-	case <-conn.closed:
-	default:
-		t.Error("conn.Close was never called")
-	}
-
-	sawFinalDistance := false
-	sawFinished := false
-loop:
-	for {
-		select {
-		case body := <-conn.writes:
-			var envelope struct {
-				Type         string `json:"type"`
-				Participants []struct {
-					UserID    string  `json:"user_id"`
-					DistanceM float64 `json:"distance_m"`
-				} `json:"participants"`
-			}
-			if err := json.Unmarshal(body, &envelope); err != nil {
-				t.Fatalf("failed to decode broadcast %s: %v", body, err)
-			}
-			switch envelope.Type {
-			case "race_state":
-				for _, p := range envelope.Participants {
-					if p.UserID == "user-1" && p.DistanceM >= 1 {
-						sawFinalDistance = true
-					}
-				}
-			case "race_finished":
-				if !strings.Contains(string(body), "user-1") {
-					t.Errorf("race_finished missing user-1: %s", body)
-				}
-				sawFinished = true
-			}
-		default:
-			break loop
-		}
-	}
-
-	if !sawFinalDistance {
-		t.Error("connection never received a race_state showing the finisher at full distance — vehicle would appear stuck")
-	}
-	if !sawFinished {
-		t.Error("connection never received race_finished — client would treat this as an unexpected drop instead of a finish")
-	}
-}
-
-// TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing is
-// room-lifecycle/pending-expiry.md / websocket/race-expired-broadcast.md's
-// own explicitly-called-for regression test, mirroring
-// TestServeConn_FinishingRaceDeliversFinalStateBeforeClosing's exact shape:
-// a still-pending room (MarkActive never called) must deliver race_expired
-// to an attached connection before that connection closes, once
-// PendingTimeoutDuration elapses — relying on the same hub-drains-before-
-// done/writeLoop-drains-off-hub.closed guarantee already proven there.
-func TestServeConn_PendingExpiryDeliversRaceExpiredBeforeClosing(t *testing.T) {
-	original := room.PendingTimeoutDuration
-	room.PendingTimeoutDuration = 50 * time.Millisecond
-	t.Cleanup(func() { room.PendingTimeoutDuration = original })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
-	// Never MarkActive()'d: the race stays pending until the (shortened)
-	// PendingTimeoutDuration elapses.
-
-	conn := newFakeConn()
-	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
-	// No further queued reads: once the room expires and tears down, this
-	// connection is expected to close on its own, not wait on the client.
-
-	h := newTestWSHandler()
-
-	done := make(chan struct{})
-	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("serveConn did not return after the room expired — goroutine leak")
-	}
-
-	select {
-	case <-conn.closed:
-	default:
-		t.Error("conn.Close was never called")
-	}
-
-	msg := awaitMessageType(t, conn, "race_expired", time.Second)
-	if msg["type"] != "race_expired" {
-		t.Errorf("Type = %v, want %q", msg["type"], "race_expired")
-	}
-}
-
 func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
+	relay := roomrelay.NewFakeBus()
 
 	conn := newFakeConn()
 	conn.writeErr = errFakeWrite
@@ -288,13 +151,39 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	// No further queued reads: Read would block on ctx forever unless the
 	// writer's failure cancels the shared connCtx.
 
-	h := newTestWSHandler()
+	h := newTestWSHandler(newFakeLocator(), relay)
+
+	// Subscribe before starting serveConn's goroutine — FakeBus has no
+	// replay, so subscribing after risks missing the join publish below if
+	// the reader goroutine gets there first.
+	in, _, err := relay.SubscribeIn(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
+
+	// Wait for attach (registerConn) to actually happen before publishing,
+	// proven by the join_race frame reaching room.race-1.in — otherwise the
+	// broadcast below could race ahead of registration and never reach
+	// writeLoop at all.
+	select {
+	case <-in:
+	case <-time.After(time.Second):
+		t.Fatal("join_race was never published")
+	}
+
+	// Publish one broadcast so writeLoop actually attempts a write (and
+	// fails) rather than sitting idle waiting for one.
+	if err := relay.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
+		Kind: roomrelay.OutboundKindBroadcast, RaceID: "race-1", Payload: []byte(`{"type":"race_state"}`),
+	}); err != nil {
+		t.Fatalf("PublishOut: %v", err)
+	}
 
 	select {
 	case <-done:
@@ -303,175 +192,106 @@ func TestServeConn_WriteErrorCancelsReader(t *testing.T) {
 	}
 }
 
-// awaitMessageType drains c.writes until it sees a message with the given
-// "type" field (skipping any race_state ticks that land first — the room
-// actor broadcasts on a 250ms ticker independently of this test) or fails
-// the test after timeout.
-func awaitMessageType(t *testing.T, c *fakeConn, wantType string, timeout time.Duration) map[string]any {
-	t.Helper()
-	deadline := time.After(timeout)
-	for {
-		select {
-		case body := <-c.writes:
-			var envelope map[string]any
-			if err := json.Unmarshal(body, &envelope); err != nil {
-				t.Fatalf("unmarshal message: %v", err)
-			}
-			if envelope["type"] == wantType {
-				return envelope
-			}
-		case <-deadline:
-			t.Fatalf("never received a %q message", wantType)
-			return nil
-		}
-	}
-}
-
-// TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections is
-// websocket/race-started-broadcast.md's own explicitly-called-for regression
-// test: every connection already attached to a still-pending room must
-// receive race_started once the race starts — not staggered, not missing
-// for any connection that was already attached.
-func TestServeConn_MarkActiveBroadcastsRaceStartedToAllPendingConnections(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
-
-	h := newTestWSHandler()
-
-	connA := newFakeConn()
-	connA.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
-	doneA := make(chan struct{})
-	go func() {
-		h.serveConn(actor, connA, "race-1", "user-a", "user-a", testLogger)
-		close(doneA)
-	}()
-
-	connB := newFakeConn()
-	connB.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
-	doneB := make(chan struct{})
-	go func() {
-		h.serveConn(actor, connB, "race-1", "user-b", "user-b", testLogger)
-		close(doneB)
-	}()
-
-	// Both connections must actually be attached (registered with the hub)
-	// before MarkActive fires, or this test wouldn't prove anything about
-	// already-connected clients — their immediate join_race snapshot is
-	// proof of that, same as TestServeConn_JoinRaceThenAbruptDisconnect_NoGoroutineLeak.
-	for name, c := range map[string]*fakeConn{"A": connA, "B": connB} {
-		select {
-		case <-c.writes:
-		case <-time.After(time.Second):
-			t.Fatalf("conn %s never received its initial race_state snapshot", name)
-		}
-	}
-
-	actor.MarkActive("the quick brown fox")
-
-	for name, c := range map[string]*fakeConn{"A": connA, "B": connB} {
-		msg := awaitMessageType(t, c, "race_started", time.Second)
-		if promptText, _ := msg["prompt_text"].(string); promptText != "the quick brown fox" {
-			t.Errorf("conn %s: prompt_text = %q, want %q", name, promptText, "the quick brown fox")
-		}
-	}
-
-	connA.queueRead(nil, io.EOF)
-	connB.queueRead(nil, io.EOF)
-	select {
-	case <-doneA:
-	case <-time.After(time.Second):
-		t.Fatal("serveConn for conn A did not return")
-	}
-	select {
-	case <-doneB:
-	case <-time.After(time.Second):
-		t.Fatal("serveConn for conn B did not return")
-	}
-}
-
-func TestWSHandler_ConnectionCount_TracksInFlightConnections(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
-
-	h := newTestWSHandler()
-	if got := h.ConnectionCount(); got != 0 {
-		t.Fatalf("ConnectionCount() = %d, want 0 before any connection", got)
-	}
+func TestServeConn_BroadcastReachesSocket(t *testing.T) {
+	relay := roomrelay.NewFakeBus()
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+
+	h := newTestWSHandler(newFakeLocator(), relay)
+
+	// Subscribe before starting serveConn's goroutine — FakeBus has no
+	// replay, so subscribing after risks missing the join publish below if
+	// the reader goroutine gets there first.
+	in, _, err := relay.SubscribeIn(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {
-		h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
 		close(done)
 	}()
 
-	// Wait for the join_race snapshot, proving serveConn is actually
-	// mid-flight (registered with the hub, reader goroutine blocked on the
-	// next Read) before asserting the count.
+	// Wait for the reader to actually publish the join, proving attach (and
+	// therefore registerConn) already happened before publishing the
+	// broadcast below — otherwise this test wouldn't prove the fan-out path
+	// deterministically.
 	select {
-	case <-conn.writes:
+	case <-in:
 	case <-time.After(time.Second):
-		t.Fatal("connection never received its initial race_state snapshot")
+		t.Fatal("join_race was never published")
 	}
 
-	if got := h.ConnectionCount(); got != 1 {
-		t.Errorf("ConnectionCount() = %d, want 1 while a connection is in flight", got)
+	if err := relay.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
+		Kind: roomrelay.OutboundKindBroadcast, RaceID: "race-1", Payload: []byte(`{"type":"race_state"}`),
+	}); err != nil {
+		t.Fatalf("PublishOut: %v", err)
 	}
 
-	conn.queueRead(nil, io.EOF) // abrupt disconnect
+	select {
+	case body := <-conn.writes:
+		if string(body) != `{"type":"race_state"}` {
+			t.Errorf("conn received %q, want the broadcast payload", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("connection never received the broadcast")
+	}
+
+	conn.queueRead(nil, io.EOF)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("serveConn did not return after an abrupt disconnect")
-	}
-
-	if got := h.ConnectionCount(); got != 0 {
-		t.Errorf("ConnectionCount() = %d, want 0 after serveConn returned", got)
+		t.Fatal("serveConn did not return")
 	}
 }
 
-// TestWSHandler_ConnBufferUsage_DelegatesToHubs proves the wiring, not the
-// summation logic — hub_test.go's TestHub_QueryBufferUsage_* and
-// TestHubRegistry_TotalConnBufferUsage_SumsAcrossHubs already cover the
-// actual arithmetic deterministically (by writing directly into raw conn
-// channels, not racing a live writeLoop that actively drains them, which a
-// serveConn-level test can't avoid). This only confirms ConnBufferUsage()
-// reflects a connection genuinely attached through the real handler path.
-func TestWSHandler_ConnBufferUsage_DelegatesToHubs(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	actor := room.NewRoomActor(ctx, "race-1", 5, make(chan []byte, 8), fakeFinisher{}, fakeLeaver{}, fakeCanceller{}, room.NoopPublisher{}, testLogger, testTickObserver)
-	go actor.Run()
-
-	h := newTestWSHandler()
-	if got := h.ConnBufferUsage(); got != 0 {
-		t.Fatalf("ConnBufferUsage() = %d, want 0 before any connection", got)
-	}
+func TestServeConn_RoomClosedClosesConnectionWithoutClientDisconnect(t *testing.T) {
+	relay := roomrelay.NewFakeBus()
 
 	conn := newFakeConn()
 	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
-	go h.serveConn(actor, conn, "race-1", "user-1", "user-1", testLogger)
+	// No further queued reads, and no io.EOF: room_closed alone must be
+	// enough to tear this connection down.
 
-	select {
-	case <-conn.writes:
-	case <-time.After(time.Second):
-		t.Fatal("connection never received its initial race_state snapshot")
+	h := newTestWSHandler(newFakeLocator(), relay)
+
+	// Subscribe before starting serveConn's goroutine — FakeBus has no
+	// replay, so subscribing after risks missing the join publish below if
+	// the reader goroutine gets there first.
+	in, _, err := relay.SubscribeIn(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
 	}
 
-	// Not asserting a specific nonzero value — writeLoop actively drains
-	// connCh, so its buffer usage is inherently racy from the test's
-	// perspective. Only that the call succeeds against a real hub/conn
-	// wired through serveConn, without panicking or blocking.
-	if got := h.ConnBufferUsage(); got < 0 {
-		t.Errorf("ConnBufferUsage() = %d, want >= 0", got)
+	done := make(chan struct{})
+	go func() {
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
+		close(done)
+	}()
+
+	select {
+	case <-in:
+	case <-time.After(time.Second):
+		t.Fatal("join_race was never published")
+	}
+
+	if err := relay.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
+		Kind: roomrelay.OutboundKindRoomClosed, RaceID: "race-1",
+	}); err != nil {
+		t.Fatalf("PublishOut: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn did not return after room_closed — writer goroutine left blocked forever")
+	}
+
+	select {
+	case <-conn.closed:
+	default:
+		t.Error("conn.Close was never called")
 	}
 }

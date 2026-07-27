@@ -1,4 +1,4 @@
-package internal
+package roombus
 
 import (
 	"context"
@@ -14,7 +14,7 @@ var testLogger = slog.New(slog.DiscardHandler)
 
 func TestNATSRoomBus_SubscribeIn_DecodesJoinRaceMessage(t *testing.T) {
 	fake := roomrelay.NewFakeBus()
-	adapter := newNATSRoomBus(fake, testLogger)
+	adapter := NewNATSRoomBus(fake, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -50,7 +50,7 @@ func TestNATSRoomBus_SubscribeIn_DecodesJoinRaceMessage(t *testing.T) {
 
 func TestNATSRoomBus_SubscribeIn_DisconnectedHasNoMessageBody(t *testing.T) {
 	fake := roomrelay.NewFakeBus()
-	adapter := newNATSRoomBus(fake, testLogger)
+	adapter := NewNATSRoomBus(fake, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -84,7 +84,7 @@ func TestNATSRoomBus_SubscribeIn_DisconnectedHasNoMessageBody(t *testing.T) {
 // today — a hostile or buggy client shouldn't be able to kill a room.
 func TestNATSRoomBus_SubscribeIn_MalformedMessageIsDroppedNotFatal(t *testing.T) {
 	fake := roomrelay.NewFakeBus()
-	adapter := newNATSRoomBus(fake, testLogger)
+	adapter := NewNATSRoomBus(fake, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,7 +124,7 @@ func TestNATSRoomBus_SubscribeIn_MalformedMessageIsDroppedNotFatal(t *testing.T)
 
 func TestNATSRoomBus_PublishOut_WrapsBroadcastKind(t *testing.T) {
 	fake := roomrelay.NewFakeBus()
-	adapter := newNATSRoomBus(fake, testLogger)
+	adapter := NewNATSRoomBus(fake, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -153,7 +153,7 @@ func TestNATSRoomBus_PublishOut_WrapsBroadcastKind(t *testing.T) {
 
 func TestNATSRoomBus_PublishRoomClosed_WrapsRoomClosedKind(t *testing.T) {
 	fake := roomrelay.NewFakeBus()
-	adapter := newNATSRoomBus(fake, testLogger)
+	adapter := NewNATSRoomBus(fake, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

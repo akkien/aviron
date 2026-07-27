@@ -11,7 +11,7 @@ import (
 func TestRegistry_CleansUpWhenActorSelfCancels(t *testing.T) {
 	withShortNoShowTimeout(t, 50*time.Millisecond)
 
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -32,7 +32,7 @@ func TestRegistry_CleansUpWhenActorSelfCancels(t *testing.T) {
 }
 
 func TestRegistry_SpawnThenGet(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -48,7 +48,7 @@ func TestRegistry_SpawnThenGet(t *testing.T) {
 }
 
 func TestRegistry_Get_UnknownRace(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 
 	_, ok := reg.Get("nonexistent-race")
 	if ok {
@@ -57,7 +57,7 @@ func TestRegistry_Get_UnknownRace(t *testing.T) {
 }
 
 func TestRegistry_Remove_StopsActorAndDeregisters(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -80,14 +80,14 @@ func TestRegistry_Remove_StopsActorAndDeregisters(t *testing.T) {
 }
 
 func TestRegistry_Remove_UnknownRace_NoOp(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 
 	// Must not panic when removing a race_id that was never spawned.
 	reg.Remove("nonexistent-race")
 }
 
 func TestRegistry_ConcurrentGetDuringSpawn(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -118,7 +118,7 @@ func TestRegistry_ConcurrentGetDuringSpawn(t *testing.T) {
 }
 
 func TestRegistry_RemoveRacingGet(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -152,7 +152,7 @@ func TestRegistry_RemoveRacingGet(t *testing.T) {
 }
 
 func TestRegistry_Count(t *testing.T) {
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{})
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, NoopRoomBus{}, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

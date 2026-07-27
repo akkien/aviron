@@ -61,7 +61,7 @@ func (b *spyBus) snapshot() []busLogEntry {
 // draining that channel; a second reader in the test would race it.
 func TestRegistry_Spawn_FeedsInboxFromBus(t *testing.T) {
 	bus := newSpyBus()
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, bus)
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, bus, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -92,12 +92,12 @@ func TestRegistry_Spawn_FeedsInboxFromBus(t *testing.T) {
 // signal is always ctx), so a naive `for range actor.Broadcast()` would
 // hang forever and never publish room_closed. distanceMeters=1 makes the
 // sole participant's first telemetry both finish them and finish the whole
-// race (finish.go) — finishRace sends its final broadcast(s) and cancels
+// race (lifecycle.go) — finishRace sends its final broadcast(s) and cancels
 // ctx right after, without blocking, the exact broadcast-vs-done race
 // internal/wsgateway/hub.go's own hub.run has to guard against too.
 func TestRegistry_Spawn_DrainsBroadcastBeforePublishingRoomClosed(t *testing.T) {
 	bus := newSpyBus()
-	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, bus)
+	reg := NewRegistry(testLogger, testTickObserver, NoopLocator{}, NoopPublisher{}, bus, NoopEvictionRecorder{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

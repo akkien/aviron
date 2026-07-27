@@ -10,7 +10,7 @@ import (
 // completes. A Registry-level dependency (like TickObserver/RoomLocator),
 // not a per-Spawn argument: every room shares the same process-wide
 // publisher. Defined here, not in internal/kafka, for the same import-
-// cycle reason as RaceFinisher/RaceLeaver/RaceCanceller (finish.go): the
+// cycle reason as RaceFinisher/RaceLeaver/RaceCanceller (lifecycle.go): the
 // concrete implementation only needs this package's own ParticipantResult
 // type, not the reverse.
 type EventPublisher interface {

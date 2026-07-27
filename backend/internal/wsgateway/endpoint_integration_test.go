@@ -2,6 +2,7 @@ package wsgateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -9,22 +10,50 @@ import (
 	"github.com/coder/websocket"
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/roomrelay"
 )
 
 // This file exercises the real github.com/coder/websocket client/server
 // round trip end to end (handshake, join_race, one race_state message) —
 // everything else in this package tests against the fake wsConn double for
 // speed and determinism, but this proves the real wire-level integration
-// actually works.
+// actually works. race-service itself is simulated with a small fake-echo
+// goroutine (startFakeRaceService below) publishing directly onto
+// internal/roomrelay, per ws-gateway.md's own Testing section: "a fake
+// race-service side that just echoes bus messages back."
 
-func newIntegrationTestServer(t *testing.T, secret []byte) (*httptest.Server, *room.Registry) {
+func newIntegrationTestServer(t *testing.T, secret []byte) (*httptest.Server, *fakeLocator, *roomrelay.FakeBus) {
 	t.Helper()
-	registry := room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{})
-	handler := NewWSHandler(registry, secret, "http://localhost:5173", testLogger)
+	locator := newFakeLocator()
+	relay := roomrelay.NewFakeBus()
+	handler := NewWSHandler(locator, relay, NewRaceHubRegistry(context.Background(), relay, testLogger), secret, "http://localhost:5173", testLogger)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return server, registry
+	return server, locator, relay
+}
+
+// startFakeRaceService subscribes to raceID's inbound subject and, for
+// every join_race message it sees, publishes back one canned race_state
+// broadcast — just enough of a fake race-service to prove a client's frame
+// round-trips through this gateway and back out again over a real NATS-
+// shaped (here, in-memory) bus, not that any real room logic runs.
+func startFakeRaceService(t *testing.T, relay *roomrelay.FakeBus, raceID string) {
+	t.Helper()
+	in, _, err := relay.SubscribeIn(context.Background(), raceID)
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
+	}
+	go func() {
+		for env := range in {
+			if env.Kind != roomrelay.InboundKindMessage {
+				continue
+			}
+			_ = relay.PublishOut(context.Background(), raceID, roomrelay.OutboundEnvelope{
+				Kind: roomrelay.OutboundKindBroadcast, RaceID: raceID,
+				Payload: []byte(`{"type":"race_state","tick":1,"participants":[]}`),
+			})
+		}
+	}()
 }
 
 func signIntegrationSessionToken(t *testing.T, secret []byte, raceID, userID string) string {
@@ -43,11 +72,9 @@ func signIntegrationSessionToken(t *testing.T, secret []byte, raceID, userID str
 
 func TestIntegration_HandshakeJoinAndReceiveSnapshot(t *testing.T) {
 	secret := []byte("test-secret")
-	server, registry := newIntegrationTestServer(t, secret)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	server, locator, relay := newIntegrationTestServer(t, secret)
+	locator.setOwner("race-1", "race-service-a:8080")
+	startFakeRaceService(t, relay, "race-1")
 
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
@@ -70,50 +97,11 @@ func TestIntegration_HandshakeJoinAndReceiveSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	if len(data) == 0 {
-		t.Error("received an empty race_state message")
+	var body struct {
+		Type string `json:"type"`
 	}
-
-	conn.Close(websocket.StatusNormalClosure, "")
-}
-
-// TestIntegration_ConnectsToPendingRace documents pending-connections.md's
-// grounding finding: GET /ws's rejection rule only ever checked whether an
-// actor exists, never race status — since early-spawn.md moved Spawn to
-// race creation, a still-pending race (actor.MarkActive() deliberately never
-// called here) already has a running actor and is a valid attach target,
-// not a rejection case.
-func TestIntegration_ConnectsToPendingRace(t *testing.T) {
-	secret := []byte("test-secret")
-	server, registry := newIntegrationTestServer(t, secret)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{}) // pending: MarkActive() never called
-
-	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
-	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
-
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer dialCancel()
-	conn, _, err := websocket.Dial(dialCtx, url, nil)
-	if err != nil {
-		t.Fatalf("Dial() error = %v, want a pending race's WebSocket connection to be accepted", err)
-	}
-	defer conn.CloseNow()
-
-	if err := conn.Write(dialCtx, websocket.MessageText, []byte(`{"type":"join_race","race_id":"race-1"}`)); err != nil {
-		t.Fatalf("Write(join_race) error = %v", err)
-	}
-
-	readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer readCancel()
-	_, data, err := conn.Read(readCtx)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(data) == 0 {
-		t.Error("received an empty race_state message")
+	if err := json.Unmarshal(data, &body); err != nil || body.Type != "race_state" {
+		t.Errorf("received %s, want a race_state message", data)
 	}
 
 	conn.Close(websocket.StatusNormalClosure, "")
@@ -121,11 +109,8 @@ func TestIntegration_ConnectsToPendingRace(t *testing.T) {
 
 func TestIntegration_RejectsInvalidToken(t *testing.T) {
 	secret := []byte("test-secret")
-	server, registry := newIntegrationTestServer(t, secret)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	server, locator, _ := newIntegrationTestServer(t, secret)
+	locator.setOwner("race-1", "race-service-a:8080")
 
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=not-a-real-token"
 
@@ -142,11 +127,9 @@ func TestIntegration_RejectsInvalidToken(t *testing.T) {
 
 func TestIntegration_RejectsRaceIDMismatch(t *testing.T) {
 	secret := []byte("test-secret")
-	server, registry := newIntegrationTestServer(t, secret)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
+	server, locator, _ := newIntegrationTestServer(t, secret)
+	locator.setOwner("race-1", "race-service-a:8080")
+	locator.setOwner("race-2", "race-service-a:8080")
 
 	// Token is valid for race-1, but the query string asks to join race-2.
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
@@ -160,36 +143,11 @@ func TestIntegration_RejectsRaceIDMismatch(t *testing.T) {
 	}
 }
 
-func TestIntegration_RejectsReconnectAfterGracePeriodExpired(t *testing.T) {
+func TestIntegration_RejectsReconnectAfterEviction(t *testing.T) {
 	secret := []byte("test-secret")
-	server, registry := newIntegrationTestServer(t, secret)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	actor := registry.Spawn(ctx, "race-1", 5, fakeFinisher{}, fakeLeaver{}, fakeCanceller{})
-
-	// A second, still-racing participant keeps the room alive once user-1 is
-	// evicted — race-completion/finish-race.md means an empty room finishes
-	// and self-cancels, at which point IsEvicted always answers false ("room's
-	// gone, nothing left to be evicted from"), which would make this test's
-	// own setup unable to observe the eviction it's trying to simulate.
-	actor.Send(room.ParticipantJoined{UserID: "user-2", DisplayName: "Bob"})
-
-	// Simulate user-1 having joined, disconnected, and had their grace
-	// period expire — without waiting the real 30s: reconnection/grace-period.md's
-	// ParticipantEvicted is exported specifically so this is reachable from
-	// here, the same as a real expiry would apply it.
-	actor.Send(room.ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
-	actor.Send(room.ParticipantDisconnected{UserID: "user-1"})
-	actor.Send(room.ParticipantEvicted{UserID: "user-1"})
-
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && !actor.IsEvicted("user-1") {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !actor.IsEvicted("user-1") {
-		t.Fatal("setup failed: user-1 was not evicted")
-	}
+	server, locator, _ := newIntegrationTestServer(t, secret)
+	locator.setOwner("race-1", "race-service-a:8080")
+	locator.setEvicted("race-1", "user-1")
 
 	token := signIntegrationSessionToken(t, secret, "race-1", "user-1")
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-1&session_token=" + token
@@ -207,9 +165,9 @@ func TestIntegration_RejectsReconnectAfterGracePeriodExpired(t *testing.T) {
 
 func TestIntegration_RejectsUnknownRace(t *testing.T) {
 	secret := []byte("test-secret")
-	server, _ := newIntegrationTestServer(t, secret)
+	server, _, _ := newIntegrationTestServer(t, secret)
 
-	// No registry.Spawn call for this race — it's not running.
+	// No locator.setOwner call for this race — it's not running anywhere.
 	token := signIntegrationSessionToken(t, secret, "race-never-started", "user-1")
 	url := "ws" + server.URL[len("http"):] + "/ws?race_id=race-never-started&session_token=" + token
 
@@ -217,6 +175,6 @@ func TestIntegration_RejectsUnknownRace(t *testing.T) {
 	defer dialCancel()
 	_, _, err := websocket.Dial(dialCtx, url, nil)
 	if err == nil {
-		t.Fatal("Dial() error = nil, want the handshake to be rejected for a race with no running actor")
+		t.Fatal("Dial() error = nil, want the handshake to be rejected for a race no instance owns")
 	}
 }

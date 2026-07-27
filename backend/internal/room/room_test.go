@@ -124,6 +124,7 @@ func newTestActor() *RoomActor {
 		cancel:               cancel,
 		logger:               testLogger,
 		tickObserver:         testTickObserver,
+		evictionRecorder:     NoopEvictionRecorder{},
 	}
 }
 
@@ -325,6 +326,59 @@ func TestRoomActor_ApplyEvent_ParticipantEvicted_RemovesAndEvicts(t *testing.T) 
 	}
 	if _, ok := r.evicted["user-1"]; !ok {
 		t.Error("user-1 not recorded as evicted after ParticipantEvicted")
+	}
+}
+
+// spyEvictionRecorder records every MarkEvicted call it receives, for
+// asserting departParticipant actually wires EvictionRecorder in
+// (ws-gateway.md) rather than just accepting the parameter.
+type spyEvictionRecorder struct {
+	calls []struct{ raceID, userID string }
+}
+
+func (s *spyEvictionRecorder) MarkEvicted(ctx context.Context, raceID, userID string) error {
+	s.calls = append(s.calls, struct{ raceID, userID string }{raceID, userID})
+	return nil
+}
+
+func TestRoomActor_ApplyEvent_ParticipantEvicted_MarksEvictedViaRecorder(t *testing.T) {
+	r := newTestActor()
+	spy := &spyEvictionRecorder{}
+	r.evictionRecorder = spy
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantDisconnected{UserID: "user-1"})
+	r.applyEvent(ParticipantEvicted{UserID: "user-1"})
+
+	if len(spy.calls) != 1 || spy.calls[0].raceID != "race-1" || spy.calls[0].userID != "user-1" {
+		t.Fatalf("MarkEvicted calls = %+v, want one call for race-1/user-1", spy.calls)
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantLeft_ActiveRace_MarksEvictedViaRecorder(t *testing.T) {
+	r := newTestActor()
+	spy := &spyEvictionRecorder{}
+	r.evictionRecorder = spy
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+
+	if len(spy.calls) != 1 || spy.calls[0].raceID != "race-1" || spy.calls[0].userID != "user-1" {
+		t.Fatalf("MarkEvicted calls = %+v, want one call for race-1/user-1", spy.calls)
+	}
+}
+
+func TestRoomActor_ApplyEvent_ParticipantLeft_Pending_DoesNotMarkEvicted(t *testing.T) {
+	r := newTestActor()
+	r.active = false
+	spy := &spyEvictionRecorder{}
+	r.evictionRecorder = spy
+
+	r.applyEvent(ParticipantJoined{UserID: "user-1", DisplayName: "Alice"})
+	r.applyEvent(ParticipantLeft{UserID: "user-1"})
+
+	if len(spy.calls) != 0 {
+		t.Fatalf("MarkEvicted calls = %+v, want none for a pre-race leave", spy.calls)
 	}
 }
 

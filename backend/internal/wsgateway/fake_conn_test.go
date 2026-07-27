@@ -4,48 +4,94 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"time"
+	"sync"
 
 	"github.com/coder/websocket"
 
-	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/roomlocator"
 )
 
 // testLogger discards output — this package's tests assert on connection
 // plumbing and delivered messages, not log lines.
 var testLogger = slog.New(slog.DiscardHandler)
 
-// testTickObserver discards tick-latency observations — this package's
-// tests assert on connection plumbing and delivered messages, not metrics.
-type testTickObserverType struct{}
-
-func (testTickObserverType) ObserveTick(d time.Duration) {}
-
-var testTickObserver = testTickObserverType{}
-
-// fakeFinisher satisfies room.RaceFinisher without touching Postgres — this
-// package's tests exercise connection plumbing, not
-// race-completion/finish-race.md's persistence step.
-type fakeFinisher struct{}
-
-func (fakeFinisher) FinishRace(ctx context.Context, raceID string, distanceMeters int, results []room.ParticipantResult) error {
-	return nil
+// fakeLocator is a RoomLocator test double (no real Redis), mirroring this
+// project's established fake-repository testing convention — merges what
+// the deleted internal/racerouter's own fakeLocator needed (Owner call
+// counting, injectable lookup/subscribe errors, a real events channel for
+// WatchRoomEvents coverage) with WSHandler's IsEvicted need.
+type fakeLocator struct {
+	mu         sync.Mutex
+	owners     map[string]string
+	ownerCalls int
+	ownerErr   error
+	evicted    map[string]bool
+	events     chan roomlocator.RoomEvent
+	subErr     error
 }
 
-// fakeLeaver satisfies room.RaceLeaver without touching Postgres, same
-// reasoning as fakeFinisher.
-type fakeLeaver struct{}
-
-func (fakeLeaver) LeaveRace(ctx context.Context, raceID, userID string) error {
-	return nil
+func newFakeLocator() *fakeLocator {
+	return &fakeLocator{
+		owners:  make(map[string]string),
+		evicted: make(map[string]bool),
+		events:  make(chan roomlocator.RoomEvent, 8),
+	}
 }
 
-// fakeCanceller satisfies room.RaceCanceller without touching Postgres, same
-// reasoning as fakeFinisher.
-type fakeCanceller struct{}
+func (f *fakeLocator) Owner(ctx context.Context, raceID string) (string, bool, error) {
+	f.mu.Lock()
+	f.ownerCalls++
+	err := f.ownerErr
+	instance, ok := f.owners[raceID]
+	f.mu.Unlock()
+	if err != nil {
+		return "", false, err
+	}
+	return instance, ok, nil
+}
 
-func (fakeCanceller) CancelRace(ctx context.Context, raceID string) error {
-	return nil
+func (f *fakeLocator) SubscribeRoomEvents(ctx context.Context) (<-chan roomlocator.RoomEvent, error) {
+	f.mu.Lock()
+	err := f.subErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.events, nil
+}
+
+func (f *fakeLocator) IsEvicted(ctx context.Context, raceID, userID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.evicted[raceID+"/"+userID], nil
+}
+
+func (f *fakeLocator) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ownerCalls
+}
+
+// setOwner marks raceID as owned by instance, satisfying WSHandler's
+// race-exists check and Gateway's routing lookup.
+func (f *fakeLocator) setOwner(raceID, instance string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.owners[raceID] = instance
+}
+
+// setEvicted marks userID as evicted from raceID.
+func (f *fakeLocator) setEvicted(raceID, userID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.evicted[raceID+"/"+userID] = true
+}
+
+// setOwnerErr injects a lookup failure into every subsequent Owner call.
+func (f *fakeLocator) setOwnerErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ownerErr = err
 }
 
 // fakeConn is a wsConn test double: Read returns pre-queued results (or

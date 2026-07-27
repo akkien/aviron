@@ -1,4 +1,4 @@
-package internal
+package main
 
 import (
 	"context"
@@ -14,16 +14,7 @@ import (
 	"github.com/akkien/aviron/internal/postgres"
 )
 
-// RunConsumer is cmd/consumer's composition root, mirroring Run's shape
-// for cmd/server. Lives here (package internal), not inside
-// internal/consumer itself, for the same reason internal/httpserver/route.go
-// is where internal/postgres and internal/room/internal/race get wired
-// together rather than any one of those packages doing it themselves:
-// internal/postgres's WorkoutSampleRepository/RaceRepository must import
-// internal/consumer's interfaces/types, so internal/consumer can't import
-// internal/postgres back without a cycle — composition has to happen one
-// level up, where both are already visible.
-func RunConsumer(cfg *config.Config) {
+func Run(cfg *config.Config) {
 	ctx := context.Background()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

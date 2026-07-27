@@ -1,4 +1,4 @@
-package internal
+package roombus
 
 import (
 	"context"
@@ -45,7 +45,7 @@ func (noopCanceller) CancelRace(ctx context.Context, raceID string) error { retu
 // room-message-bus.md's own Notes insisted on: proof the envelope format
 // actually round-trips between two independent connections over a real
 // NATS server — not just that natsRoomBus's decode logic works against
-// roomrelay.FakeBus (room_bus_adapter_test.go already covers that).
+// roomrelay.FakeBus (adapter_test.go already covers that).
 // Simulates ws-gateway's side with a second, independent *roomrelay.Bus
 // publishing raw client frames onto room.race-1.in and observing
 // room.race-1.out, exactly as ws-gateway.md's own eventual adapter will.
@@ -59,8 +59,8 @@ func TestNATSRoomBus_EndToEnd_RealNATSDrivesRoomActorToFinish(t *testing.T) {
 	}
 	t.Cleanup(nc.Close)
 
-	bus := newNATSRoomBus(roomrelay.NewBus(nc), testLogger)
-	registry := room.NewRegistry(testLogger, metrics.NewMetrics(), room.NoopLocator{}, room.NoopPublisher{}, bus)
+	bus := NewNATSRoomBus(roomrelay.NewBus(nc), testLogger)
+	registry := room.NewRegistry(testLogger, metrics.NewMetrics(), room.NoopLocator{}, room.NoopPublisher{}, bus, room.NoopEvictionRecorder{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

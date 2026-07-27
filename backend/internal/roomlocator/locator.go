@@ -17,7 +17,7 @@ import (
 )
 
 // roomEventsChannel is the single shared pub/sub channel every instance
-// publishes room ownership changes to — race-router.md's routing cache is
+// publishes room ownership changes to — ws-gateway.md's routing cache is
 // the consumer, via SubscribeRoomEvents.
 const roomEventsChannel = "room:events"
 
@@ -98,6 +98,40 @@ func (l *Locator) Release(ctx context.Context, raceID string) error {
 	return l.publish(ctx, RoomEvent{Type: RoomEventRemoved, RaceID: raceID, InstanceID: l.instanceID})
 }
 
+// evictedKey is the Redis set ws-gateway.md's evicted-reconnect check reads
+// via SISMEMBER — a separate key from roomKey, not folded into the ownership
+// record itself, since the two have different lifetimes and readers.
+func evictedKey(raceID string) string {
+	return "race:" + raceID + ":evicted"
+}
+
+// MarkEvicted records userID as evicted from raceID — called by
+// RoomActor.departParticipant (room.go) at the same moment it marks a
+// participant evicted in its own in-memory state, so ws-gateway.md's
+// SISMEMBER check (a direct Redis read, bypassing internal/roomrelay
+// entirely — room-message-bus.md's "Evicted-reconnect checks bypass the
+// bus entirely") sees the same answer. No TTL/explicit cleanup: an evicted
+// set is small (bounded by a race's own participant count) and irrelevant
+// once the race itself is gone, the same "not worth a second lifecycle to
+// manage" call this project already made for other small, self-limited
+// Redis state.
+func (l *Locator) MarkEvicted(ctx context.Context, raceID, userID string) error {
+	if err := l.client.SAdd(ctx, evictedKey(raceID), userID).Err(); err != nil {
+		return fmt.Errorf("roomlocator: mark evicted %s/%s: %w", raceID, userID, err)
+	}
+	return nil
+}
+
+// IsEvicted reports whether userID was previously marked evicted from
+// raceID — ws-gateway.md's own synchronous connection-time check.
+func (l *Locator) IsEvicted(ctx context.Context, raceID, userID string) (bool, error) {
+	evicted, err := l.client.SIsMember(ctx, evictedKey(raceID), userID).Result()
+	if err != nil {
+		return false, fmt.Errorf("roomlocator: is evicted %s/%s: %w", raceID, userID, err)
+	}
+	return evicted, nil
+}
+
 // Owner returns the instance id currently owning raceID, and false if no
 // instance does (never claimed, or the claim expired/was released).
 func (l *Locator) Owner(ctx context.Context, raceID string) (string, bool, error) {
@@ -112,9 +146,9 @@ func (l *Locator) Owner(ctx context.Context, raceID string) (string, bool, error
 }
 
 // SubscribeRoomEvents subscribes to room:events and returns a channel of
-// decoded RoomEvents — race-router.md's routing cache is the consumer, so
+// decoded RoomEvents — ws-gateway.md's routing cache is the consumer, so
 // this keeps the wire schema and raw *redis.Client access encapsulated in
-// roomlocator rather than duplicated in cmd/race-router. The returned
+// roomlocator rather than duplicated in cmd/ws-gateway. The returned
 // channel closes once ctx is done or the underlying subscription ends;
 // malformed payloads are skipped, not treated as fatal.
 func (l *Locator) SubscribeRoomEvents(ctx context.Context) (<-chan RoomEvent, error) {

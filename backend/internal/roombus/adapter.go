@@ -1,4 +1,4 @@
-package internal
+package roombus
 
 import (
 	"context"
@@ -23,15 +23,16 @@ type relayBus interface {
 // internal/ws.DecodeClientMessage/ToRoomEvent. Composed here, one level up
 // from internal/room, because internal/ws already imports internal/room
 // (for RoomEvent itself), so internal/room importing either roomrelay or ws
-// back would cycle (room-service-adapter.md) — mirrors run_consumer.go's
-// own precedent for the same import-direction constraint.
+// back would cycle (room-service-adapter.md) — mirrors cmd/consumer/run.go's
+// own precedent (internal/postgres importing internal/consumer) for the same
+// import-direction constraint.
 type natsRoomBus struct {
 	bus    relayBus
 	logger *slog.Logger
 }
 
-// newNATSRoomBus constructs a natsRoomBus around bus.
-func newNATSRoomBus(bus relayBus, logger *slog.Logger) *natsRoomBus {
+// NewNATSRoomBus constructs a natsRoomBus around bus.
+func NewNATSRoomBus(bus relayBus, logger *slog.Logger) *natsRoomBus {
 	return &natsRoomBus{bus: bus, logger: logger}
 }
 

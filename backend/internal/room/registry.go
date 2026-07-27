@@ -46,7 +46,8 @@ func (NoopLocator) Release(ctx context.Context, raceID string) error       { ret
 // internal/room (for RoomEvent itself), so internal/room importing either
 // package back would cycle. The concrete adapter that decodes raw client
 // frames into RoomEvent — the only place that needs both — lives one level
-// up, in internal/app.go's composition root, the same import-direction
+// up, in its own internal/roombus package, constructed from
+// cmd/server/run.go's composition root, the same import-direction
 // constraint kafka-consumer-postgres-sink.md's own composition already
 // established a precedent for.
 type RoomBus interface {
@@ -86,13 +87,14 @@ func (NoopRoomBus) PublishRoomClosed(ctx context.Context, raceID string) error  
 // this instance's own local map; cross-instance visibility of who owns
 // which room is locator's job (redis-room-registry.md), not this map's.
 type Registry struct {
-	mu           sync.RWMutex
-	rooms        map[string]*RoomActor
-	logger       *slog.Logger
-	tickObserver TickObserver
-	locator      RoomLocator
-	publisher    EventPublisher
-	bus          RoomBus
+	mu               sync.RWMutex
+	rooms            map[string]*RoomActor
+	logger           *slog.Logger
+	tickObserver     TickObserver
+	locator          RoomLocator
+	publisher        EventPublisher
+	bus              RoomBus
+	evictionRecorder EvictionRecorder
 }
 
 // NewRegistry constructs an empty Registry. logger is the process-wide
@@ -108,9 +110,12 @@ type Registry struct {
 // a real *kafka.Producer.
 // bus is likewise a single process-wide dependency (room-message-bus.md,
 // room-service-adapter.md) — NoopRoomBus for tests, or the real adapter
-// internal/app.go composes around *roomrelay.Bus.
-func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLocator, publisher EventPublisher, bus RoomBus) *Registry {
-	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver, locator: locator, publisher: publisher, bus: bus}
+// cmd/server/run.go composes around *roomrelay.Bus. evictionRecorder is
+// likewise process-wide (ws-gateway.md) — NoopEvictionRecorder for tests,
+// or a real *roomlocator.Locator (which also satisfies RoomLocator above,
+// against the same Redis instance).
+func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLocator, publisher EventPublisher, bus RoomBus, evictionRecorder EvictionRecorder) *Registry {
+	return &Registry{rooms: make(map[string]*RoomActor), logger: logger, tickObserver: tickObserver, locator: locator, publisher: publisher, bus: bus, evictionRecorder: evictionRecorder}
 }
 
 // Spawn constructs a RoomActor for raceID seeded with the race's
@@ -124,12 +129,12 @@ func NewRegistry(logger *slog.Logger, tickObserver TickObserver, locator RoomLoc
 // ever going active (room-lifecycle/cancelled-race-status.md) — typically
 // all three the same concrete *race.RaceService in three structural roles,
 // passed in by the caller rather than threaded through this Registry's own
-// construction, to avoid reordering how internal/app.go wires the
+// construction, to avoid reordering how cmd/server/run.go wires the
 // composition root.
 func (reg *Registry) Spawn(ctx context.Context, raceID string, distanceMeters int, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller) *RoomActor {
 	broadcast := make(chan []byte, broadcastBufferSize)
 	roomLogger := reg.logger.With(slog.String("race_id", raceID))
-	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, reg.publisher, roomLogger, reg.tickObserver)
+	actor := NewRoomActor(ctx, raceID, distanceMeters, broadcast, finisher, leaver, canceller, reg.publisher, roomLogger, reg.tickObserver, reg.evictionRecorder)
 
 	reg.mu.Lock()
 	reg.rooms[raceID] = actor

@@ -43,7 +43,7 @@ type ParticipantState struct {
 // here, next to RoomActor, so internal/metrics can depend on internal/room
 // without internal/room ever needing to import internal/metrics —
 // *metrics.Metrics satisfies this structurally, the same one-directional
-// shape as RaceFinisher/RaceLeaver/RaceCanceller (finish.go).
+// shape as RaceFinisher/RaceLeaver/RaceCanceller (lifecycle.go).
 type TickObserver interface {
 	ObserveTick(d time.Duration)
 }
@@ -78,14 +78,14 @@ type RoomActor struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	// finisher persists final results once the race completes
-	// (race-completion/finish-race.md) — see finish.go.
+	// (race-completion/finish-race.md) — see lifecycle.go.
 	finisher RaceFinisher
 	// leaver persists a pending-race participant intentionally leaving
-	// (pending-connections.md) — see finish.go.
+	// (pending-connections.md) — see lifecycle.go.
 	leaver RaceLeaver
 	// canceller persists a pending race's cancellation once the room tears
 	// down before ever going active (room-lifecycle/cancelled-race-status.md)
-	// — see finish.go.
+	// — see lifecycle.go.
 	canceller RaceCanceller
 	// publisher publishes workout.sample/race.finished events to Kafka
 	// (kafka-producer.md) — see publisher.go.
@@ -116,6 +116,9 @@ type RoomActor struct {
 	// tickObserver receives each tick's broadcastSnapshot() duration
 	// (prometheus-metrics.md) — see TickObserver.
 	tickObserver TickObserver
+	// evictionRecorder makes an eviction/mid-race quit durably visible to
+	// ws-gateway's reconnect check via Redis (eviction.go).
+	evictionRecorder EvictionRecorder
 }
 
 // NewRoomActor constructs a room actor for race id, seeded with the race
@@ -124,7 +127,7 @@ type RoomActor struct {
 // the actor later learns the race has actually started. Call go actor.Run()
 // to start it — spawning and tracking instances is room-registry.md's job,
 // not this constructor's.
-func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, publisher EventPublisher, logger *slog.Logger, tickObserver TickObserver) *RoomActor {
+func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast chan []byte, finisher RaceFinisher, leaver RaceLeaver, canceller RaceCanceller, publisher EventPublisher, logger *slog.Logger, tickObserver TickObserver, evictionRecorder EvictionRecorder) *RoomActor {
 	actorCtx, cancel := context.WithCancel(ctx)
 	r := &RoomActor{
 		id:                   id,
@@ -143,6 +146,7 @@ func NewRoomActor(ctx context.Context, id string, distanceMeters int, broadcast 
 		startedAt:            time.Now(),
 		logger:               logger,
 		tickObserver:         tickObserver,
+		evictionRecorder:     evictionRecorder,
 	}
 	time.AfterFunc(noShowTimeoutDuration, func() {
 		r.Send(noShowTimeout{})
@@ -492,6 +496,14 @@ func (r *RoomActor) departParticipant(userID string, p *ParticipantState) {
 	delete(r.participants, userID)
 	r.departedParticipants[userID] = p
 	r.evicted[userID] = struct{}{}
+	if err := r.evictionRecorder.MarkEvicted(r.ctx, r.id, userID); err != nil {
+		// Log-and-continue, no retry — same precedent as
+		// PublishWorkoutSample's own error handling below: a missed write
+		// here only affects ws-gateway's reconnect-eviction check for this
+		// one race, not this room's own in-memory correctness (r.evicted
+		// above is already set regardless).
+		r.logger.Error("mark evicted failed", slog.String("user_id", userID), slog.Any("error", err))
+	}
 	r.checkRaceFinished()
 }
 

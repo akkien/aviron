@@ -1,4 +1,4 @@
-package internal
+package main
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"github.com/akkien/aviron/internal/middleware"
 	"github.com/akkien/aviron/internal/redisclient"
 	"github.com/akkien/aviron/internal/room"
+	"github.com/akkien/aviron/internal/roombus"
 	"github.com/akkien/aviron/internal/roomlocator"
 	"github.com/akkien/aviron/internal/roomrelay"
 )
@@ -52,10 +53,10 @@ func Run(cfg *config.Config) {
 		log.Fatalf("nats: %v", err)
 	}
 	defer natsConn.Close()
-	bus := newNATSRoomBus(roomrelay.NewBus(natsConn), logger)
+	bus := roombus.NewNATSRoomBus(roomrelay.NewBus(natsConn), logger)
 
 	m := metrics.NewMetrics()
-	registry := room.NewRegistry(logger, m, locator, producer, bus)
+	registry := room.NewRegistry(logger, m, locator, producer, bus, locator)
 
 	server := httpserver.NewServer()
 	httpserver.RegisterRoutes(server, *cfg, pool, ctx, registry, logger, m)
