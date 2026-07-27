@@ -150,7 +150,7 @@ func (h *WSHandler) serveConn(conn wsConn, raceID, userID, displayName string, l
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		readLoop(connCtx, conn, h.relay, raceID, userID, displayName, logger)
+		readLoop(connCtx, hub.closed, conn, h.relay, raceID, userID, displayName, logger)
 	}()
 	go func() {
 		defer wg.Done()
@@ -168,21 +168,36 @@ func (h *WSHandler) serveConn(conn wsConn, raceID, userID, displayName string, l
 // ws.DecodeClientMessage is reused here, not ToRoomEvent — that conversion
 // stays room-service-adapter.md's job, on the other side of the bus; this
 // side only validates the frame is well-formed before ever publishing it.
-func readLoop(ctx context.Context, conn wsConn, relay relayBus, raceID, userID, displayName string, logger *slog.Logger) {
+func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay relayBus, raceID, userID, displayName string, logger *slog.Logger) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
+			// hubClosed already closed means writeLoop saw room_closed,
+			// drained the final broadcast, and cancelled this connection's
+			// own ctx as part of its own normal, expected shutdown — that
+			// cancellation is what just made Read fail, not a real
+			// disconnect. The room already told every participant it's
+			// finished via room_closed; publishing InboundKindDisconnected
+			// here would be spurious bus traffic for a race that's already
+			// torn down, not a real signal anyone still needs.
+			select {
+			case <-hubClosed:
+				return
+			default:
+			}
+
 			// Read error covers both an abrupt close and ctx cancellation
-			// (the writer side failing, or the race ending) — either way,
-			// the participant is gone from this connection's perspective.
-			// context.Background(), not ctx: ctx may already be cancelled
-			// at exactly this point (that's often what caused Read to
-			// return an error in the first place), and relay.PublishIn
-			// checks ctx.Err() first — using the connection's own
-			// (possibly-cancelled) ctx here would silently drop the one
-			// notification this path exists to deliver, the same class of
-			// bug room-service-adapter.md's drainBroadcast/cleanupWhenDone
-			// already had to guard against on the publishing side.
+			// (the writer side failing for its own unrelated reason) —
+			// either way, the participant is gone from this connection's
+			// perspective. context.Background(), not ctx: ctx may already
+			// be cancelled at exactly this point (that's often what caused
+			// Read to return an error in the first place), and
+			// relay.PublishIn checks ctx.Err() first — using the
+			// connection's own (possibly-cancelled) ctx here would silently
+			// drop the one notification this path exists to deliver, the
+			// same class of bug room-service-adapter.md's
+			// drainBroadcast/cleanupWhenDone already had to guard against
+			// on the publishing side.
 			if pubErr := relay.PublishIn(context.Background(), raceID, roomrelay.InboundEnvelope{
 				Kind: roomrelay.InboundKindDisconnected, RaceID: raceID, UserID: userID, DisplayName: displayName,
 			}); pubErr != nil {
