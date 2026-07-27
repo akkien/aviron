@@ -15,7 +15,7 @@ func TestRaceHub_FansOutToAllRegisteredConns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeOut: %v", err)
 	}
-	h := newRaceHub(out, unsubscribe, func() {})
+	h := newRaceHub("race-1", out, unsubscribe, func() {}, testLogger)
 
 	connA := make(chan []byte, connBufferSize)
 	connB := make(chan []byte, connBufferSize)
@@ -46,7 +46,7 @@ func TestRaceHub_UnregisterStopsDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeOut: %v", err)
 	}
-	h := newRaceHub(out, unsubscribe, func() {})
+	h := newRaceHub("race-1", out, unsubscribe, func() {}, testLogger)
 
 	conn := make(chan []byte, connBufferSize)
 	h.registerConn(conn)
@@ -72,7 +72,7 @@ func TestRaceHub_FullConnDoesNotBlockOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeOut: %v", err)
 	}
-	h := newRaceHub(out, unsubscribe, func() {})
+	h := newRaceHub("race-1", out, unsubscribe, func() {}, testLogger)
 
 	slow := make(chan []byte, connBufferSize)
 	fast := make(chan []byte, connBufferSize)
@@ -116,7 +116,7 @@ func TestRaceHub_RoomClosed_ClosesHub(t *testing.T) {
 		t.Fatalf("SubscribeOut: %v", err)
 	}
 	closed := make(chan struct{})
-	h := newRaceHub(out, unsubscribe, func() { close(closed) })
+	h := newRaceHub("race-1", out, unsubscribe, func() { close(closed) }, testLogger)
 
 	if err := fake.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
 		Kind: roomrelay.OutboundKindRoomClosed, RaceID: "race-1",
@@ -144,7 +144,7 @@ func TestRaceHub_SignalStop_ClosesHub(t *testing.T) {
 		t.Fatalf("SubscribeOut: %v", err)
 	}
 	closed := make(chan struct{})
-	h := newRaceHub(out, unsubscribe, func() { close(closed) })
+	h := newRaceHub("race-1", out, unsubscribe, func() { close(closed) }, testLogger)
 
 	h.signalStop()
 	h.signalStop() // must not panic on double-call

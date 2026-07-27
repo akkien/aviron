@@ -39,18 +39,18 @@ type raceHub struct {
 // (raceHubRegistry) can forget this hub instead of leaking a map entry.
 // unsubscribe is called on every exit path, so this gateway never leaves a
 // dangling room.{race_id}.out subscription behind.
-func newRaceHub(out <-chan roomrelay.OutboundEnvelope, unsubscribe func(), onClose func()) *raceHub {
+func newRaceHub(raceID string, out <-chan roomrelay.OutboundEnvelope, unsubscribe func(), onClose func(), logger *slog.Logger) *raceHub {
 	h := &raceHub{
 		register:   make(chan chan []byte),
 		unregister: make(chan chan []byte),
 		stop:       make(chan struct{}),
 		closed:     make(chan struct{}),
 	}
-	go h.run(out, unsubscribe, onClose)
+	go h.run(raceID, out, unsubscribe, onClose, logger)
 	return h
 }
 
-func (h *raceHub) run(out <-chan roomrelay.OutboundEnvelope, unsubscribe func(), onClose func()) {
+func (h *raceHub) run(raceID string, out <-chan roomrelay.OutboundEnvelope, unsubscribe func(), onClose func(), logger *slog.Logger) {
 	defer onClose()
 	defer unsubscribe()
 	defer close(h.closed)
@@ -62,6 +62,7 @@ func (h *raceHub) run(out <-chan roomrelay.OutboundEnvelope, unsubscribe func(),
 			if !ok {
 				return
 			}
+			logger.Info("wsgateway: received", slog.String("race_id", raceID), slog.String("kind", string(env.Kind)))
 			switch env.Kind {
 			case roomrelay.OutboundKindBroadcast:
 				for c := range conns {
@@ -194,11 +195,11 @@ func (hr *raceHubRegistry) attach(raceID string) (*raceHub, error) {
 		return nil, err
 	}
 
-	h := newRaceHub(out, unsubscribe, func() {
+	h := newRaceHub(raceID, out, unsubscribe, func() {
 		hr.mu.Lock()
 		delete(hr.hubs, raceID)
 		hr.mu.Unlock()
-	})
+	}, hr.logger)
 	hr.hubs[raceID] = &raceHubEntry{hub: h, refCount: 1}
 	return h, nil
 }

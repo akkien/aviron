@@ -187,6 +187,8 @@ func readLoop(ctx context.Context, conn wsConn, relay relayBus, raceID, userID, 
 				Kind: roomrelay.InboundKindDisconnected, RaceID: raceID, UserID: userID, DisplayName: displayName,
 			}); pubErr != nil {
 				logger.Error("wsgateway: publish disconnected failed", slog.Any("error", pubErr))
+			} else {
+				logger.Info("wsgateway: published", slog.String("race_id", raceID), slog.String("kind", string(roomrelay.InboundKindDisconnected)))
 			}
 			return
 		}
@@ -203,6 +205,7 @@ func readLoop(ctx context.Context, conn wsConn, relay relayBus, raceID, userID, 
 			logger.Error("wsgateway: publish message failed", slog.Any("error", err))
 			continue
 		}
+		logger.Info("wsgateway: published", slog.String("race_id", raceID), slog.String("kind", string(roomrelay.InboundKindMessage)))
 
 		if msg.Type == "leave_race" {
 			// An intentional quit (leave-race.md): the bus already has the

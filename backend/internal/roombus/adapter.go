@@ -53,6 +53,7 @@ func (b *natsRoomBus) SubscribeIn(ctx context.Context, raceID string) (<-chan ro
 			if !ok {
 				continue
 			}
+			b.logger.Info("roombus: received", slog.String("race_id", raceID), slog.String("kind", string(env.Kind)))
 			select {
 			case out <- ev:
 			case <-ctx.Done():
@@ -86,17 +87,25 @@ func (b *natsRoomBus) toRoomEvent(raceID string, env roomrelay.InboundEnvelope) 
 
 // PublishOut satisfies room.RoomBus.
 func (b *natsRoomBus) PublishOut(ctx context.Context, raceID string, payload []byte) error {
-	return b.bus.PublishOut(ctx, raceID, roomrelay.OutboundEnvelope{
+	err := b.bus.PublishOut(ctx, raceID, roomrelay.OutboundEnvelope{
 		Kind:    roomrelay.OutboundKindBroadcast,
 		RaceID:  raceID,
 		Payload: payload,
 	})
+	if err == nil {
+		b.logger.Info("roombus: published", slog.String("race_id", raceID), slog.String("kind", string(roomrelay.OutboundKindBroadcast)))
+	}
+	return err
 }
 
 // PublishRoomClosed satisfies room.RoomBus.
 func (b *natsRoomBus) PublishRoomClosed(ctx context.Context, raceID string) error {
-	return b.bus.PublishOut(ctx, raceID, roomrelay.OutboundEnvelope{
+	err := b.bus.PublishOut(ctx, raceID, roomrelay.OutboundEnvelope{
 		Kind:   roomrelay.OutboundKindRoomClosed,
 		RaceID: raceID,
 	})
+	if err == nil {
+		b.logger.Info("roombus: published", slog.String("race_id", raceID), slog.String("kind", string(roomrelay.OutboundKindRoomClosed)))
+	}
+	return err
 }

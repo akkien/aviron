@@ -4,10 +4,11 @@ import { attemptReconnect } from '../lib/reconnect-client.js';
 
 const RACE_ID = __ENV.RACE_ID;
 const SESSION_TOKEN = __ENV.SESSION_TOKEN;
+const BASE_URL = __ENV.BASE_URL;
 
-if (!RACE_ID || !SESSION_TOKEN) {
+if (!RACE_ID || !SESSION_TOKEN || !BASE_URL) {
   throw new Error(
-    'RACE_ID and SESSION_TOKEN are required (set by load/multi-instance-check.sh, after killing the owning instance)',
+    'RACE_ID, SESSION_TOKEN, and BASE_URL are required (set by load/multi-instance-check.sh, after killing the owning instance)',
   );
 }
 
@@ -30,7 +31,7 @@ export const options = {
 // failure mode is exactly what's already written down, not that anything
 // is now fixed.
 export default function () {
-  const reconnected = attemptReconnect(RACE_ID, SESSION_TOKEN);
+  const reconnected = attemptReconnect(BASE_URL, RACE_ID, SESSION_TOKEN);
   check(reconnected, {
     'reconnect eventually fails after the owning instance dies (documented gap)': (r) => r === false,
   });
