@@ -2,20 +2,20 @@
 
 ## Status
 
-Not Started
+<!-- Not Started | In Progress | Complete -->
 
 ## Goals
 
-<!-- populated by /feature load -->
+<!-- What success looks like -->
 
 ## Explain
 
-<!-- populated by /feature load -->
+<!-- Populated by `load` -->
 
 ## Plan
 
-<!-- populated by /feature load -->
+<!-- Detailed implementation plan, architecture/design notes, tradeoffs -->
 
 ## Notes
 
-<!-- populated by /feature load -->
+<!-- Additional context, constraints, or details from spec -->
