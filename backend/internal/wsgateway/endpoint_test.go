@@ -294,4 +294,15 @@ func TestServeConn_RoomClosedClosesConnectionWithoutClientDisconnect(t *testing.
 	default:
 		t.Error("conn.Close was never called")
 	}
+
+	// The test's own name's promise, actually checked: room_closed cancelling
+	// this connection's ctx (via writeLoop's drain-then-cancel) must not
+	// also make readLoop publish a spurious InboundKindDisconnected — the
+	// room already told every participant it's finished, and this
+	// connection was never actually dropped by anyone.
+	select {
+	case env := <-in:
+		t.Fatalf("expected no further envelope after room_closed (in particular no spurious InboundKindDisconnected), got: %+v", env)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
