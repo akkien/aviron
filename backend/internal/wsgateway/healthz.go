@@ -4,11 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )
+
+// ReadinessGate lets cmd/ws-gateway's SIGTERM handler flip GET /healthz to
+// unready the instant the signal arrives (graceful-shutdown.md) — before
+// http.Server.Shutdown even begins draining in-flight connections, so
+// Kubernetes' readiness-based traffic removal starts as early as
+// possible. Deliberately not shared with GET /livez: liveness must stay
+// "ok" for as long as the process is actually still running and able to
+// answer requests, shutting down gracefully or not. A small, independent
+// duplicate of internal/httpserver.ReadinessGate — this package already
+// has its own healthz convention rather than a shared one, and a shared
+// package for a two-method atomic-bool wrapper isn't worth introducing.
+type ReadinessGate struct {
+	shuttingDown atomic.Bool
+}
+
+// MarkShuttingDown flips the gate. Safe to call more than once.
+func (g *ReadinessGate) MarkShuttingDown() {
+	g.shuttingDown.Store(true)
+}
+
+// ShuttingDown reports whether MarkShuttingDown has been called.
+func (g *ReadinessGate) ShuttingDown() bool {
+	return g.shuttingDown.Load()
+}
 
 // NewHealthzHandler serves GET /healthz — unauthenticated, no Cors wrapper,
 // mirroring internal/httpserver.NewHealthzHandler's shape so this project
@@ -18,15 +43,30 @@ import (
 // dependencies this process's actual job depends on — Redis (Owner()
 // lookups, the evicted-reconnect check) and NATS (internal/roomrelay) — a
 // gateway that can reach neither is not meaningfully "up," even if the
-// process itself is still serving. No readiness/liveness split: this
-// process holds no background state whose liveness could plausibly diverge
-// from its readiness the way a room actor's tick loop could.
-func NewHealthzHandler(redisClient *redis.Client, natsConn *nats.Conn) http.HandlerFunc {
+// process itself is still serving.
+//
+// Correction (graceful-shutdown.md): this handler's own doc comment used
+// to argue no readiness/liveness split was needed here ("this process
+// holds no background state whose liveness could plausibly diverge from
+// its readiness"). That's still true for the dependency checks below, but
+// it missed a real case: once SIGTERM arrives, this pod should stop
+// receiving new traffic immediately, without waiting on a Redis/NATS
+// round-trip to say so — and reusing this same check for a
+// livenessProbe would make kubelet restart an otherwise-healthy pod over
+// a transient Redis/NATS blip. See NewLivezHandler for the dependency-free
+// counterpart.
+func NewHealthzHandler(redisClient *redis.Client, natsConn *nats.Conn, gate *ReadinessGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if gate.ShuttingDown() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-
-		w.Header().Set("Content-Type", "application/json")
 
 		if err := redisClient.Ping(ctx).Err(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -42,6 +82,17 @@ func NewHealthzHandler(redisClient *redis.Client, natsConn *nats.Conn) http.Hand
 			return
 		}
 
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+// NewLivezHandler serves GET /livez — 200 as long as this process is
+// running and able to answer requests at all, no dependency checks. See
+// NewHealthzHandler's "Correction" note for why this exists separately.
+func NewLivezHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}

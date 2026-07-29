@@ -306,3 +306,63 @@ func TestServeConn_RoomClosedClosesConnectionWithoutClientDisconnect(t *testing.
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// TestServeConn_HubsShutdown_ClosesConnectionAndPublishesRealDisconnect is
+// graceful-shutdown.md's actual acceptance test for cmd/ws-gateway: the
+// opposite case from room_closed above. Here nobody told this room it's
+// finished — the whole gateway process is shutting down — so unlike
+// room_closed, this participant genuinely is disconnecting from the
+// room's perspective (it needs its normal grace-period/reconnect handling,
+// same as a real network drop), and readLoop's ordinary disconnect path
+// must fire, not be suppressed.
+func TestServeConn_HubsShutdown_ClosesConnectionAndPublishesRealDisconnect(t *testing.T) {
+	relay := roomrelay.NewFakeBus()
+	hubs := NewRaceHubRegistry(context.Background(), relay, testLogger)
+	h := NewWSHandler(newFakeLocator(), relay, hubs, []byte("test-secret"), "http://localhost:5173", testLogger)
+
+	conn := newFakeConn()
+	conn.queueRead([]byte(`{"type":"join_race","race_id":"race-1"}`), nil)
+	// No further queued reads, and no io.EOF: hubs.Shutdown() alone must be
+	// enough to tear this connection down, the same way a real idle
+	// connection's Read would block on ctx forever without it.
+
+	in, _, err := relay.SubscribeIn(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeIn: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		h.serveConn(conn, "race-1", "user-1", "user-1", testLogger)
+		close(done)
+	}()
+
+	select {
+	case <-in:
+	case <-time.After(time.Second):
+		t.Fatal("join_race was never published")
+	}
+
+	hubs.Shutdown()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn did not return after hubs.Shutdown() — reader goroutine left blocked forever")
+	}
+
+	select {
+	case <-conn.closed:
+	default:
+		t.Error("conn.Close was never called")
+	}
+
+	select {
+	case env := <-in:
+		if env.Kind != roomrelay.InboundKindDisconnected || env.UserID != "user-1" {
+			t.Fatalf("unexpected inbound envelope: %+v", env)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disconnect was never published onto room.race-1.in after hubs.Shutdown()")
+	}
+}

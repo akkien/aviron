@@ -18,9 +18,9 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
-func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry, logger *slog.Logger, m *metrics.Metrics) {
-	healthzHandler := NewHealthzHandler(pool)
-	server.HandleFunc("GET /healthz", healthzHandler)
+func RegisterRoutes(server *http.ServeMux, cfg config.Config, pool *pgxpool.Pool, ctx context.Context, registry *room.Registry, logger *slog.Logger, m *metrics.Metrics, gate *ReadinessGate) {
+	server.HandleFunc("GET /healthz", NewHealthzHandler(pool, gate))
+	server.HandleFunc("GET /livez", NewLivezHandler())
 
 	m.RegisterRoomGauges(registry)
 	// Not wrapped in requireAuth or middleware.Cors: a Prometheus scraper

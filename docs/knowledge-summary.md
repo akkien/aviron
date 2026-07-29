@@ -964,3 +964,143 @@ A common production architecture combines all three:
 - **NATS** for realtime gameplay messaging.
 - **Redis** for cache, sessions, presence, and room registry.
 - **Kafka** for durable business events and analytics.
+
+## Graceful Shutdown
+
+**Status: implemented** (`graceful-shutdown.md` — Phase 5's second spec, shipped 2026-07-29, verified live against all three binaries, not just unit-tested).
+
+### Why this was needed
+
+Before this spec, none of `cmd/server`, `cmd/ws-gateway`, or `cmd/consumer` handled `SIGTERM` at all — confirmed by reading every `run.go` directly, and `cmd/ws-gateway/run.go` said so in its own comment. A process receiving it just died, exactly as abruptly as `SIGKILL` would, just a few seconds sooner. Concretely:
+
+- A race in progress on `cmd/server` gets cut off mid-flight — `finishRace`'s Postgres transaction never runs, so that race's results are lost, not delayed.
+- A WebSocket client connected through `cmd/ws-gateway` sees its connection silently drop (a raw TCP reset), not a clean close.
+- `cmd/consumer` could be killed mid-batch — the least risky of the three, since its fetch loops were already written defensively, but still untested against a real cancellation.
+
+This matters specifically because of how Kubernetes tears down a pod: it sends `SIGTERM` first, waits up to `terminationGracePeriodSeconds` (30s default), *then* sends `SIGKILL` if the process hasn't exited on its own. Without handling the first signal, that whole window goes to waste — the process dies instantly instead of using it to wind down cleanly. `project-overview.md` §7 names the cost directly: a pod "must close its active room actors properly, without cutting off the WebSocket of someone mid-race."
+
+### Who triggers it, and how
+
+| Trigger | Fires from | Caught by |
+| --- | --- | --- |
+| Rolling update, `kubectl rollout restart` | kubelet, on the node the pod is scheduled to | Same code path in all three binaries |
+| Scaling down replicas | kubelet | Same |
+| Node drain / eviction | kubelet | Same |
+| `kubectl delete pod` | kubelet | Same |
+| `Ctrl+C` / `kill -TERM <pid>` (local dev) | The shell / operator directly | Same |
+
+Every binary catches both `SIGTERM` and `SIGINT` identically, via one line repeated in each `run.go`:
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+defer stop()
+```
+
+`SIGKILL` is never in that list — it can't be, by OS design, no process can catch it. It's the unconditional backstop if graceful shutdown doesn't finish inside the grace period.
+
+### Three binaries, three different amounts of work
+
+| Binary | What already existed | What this spec actually added |
+| --- | --- | --- |
+| `cmd/consumer` | Fetch loops (`workout_sample_loop.go`, `race_finished_loop.go`) already checked `ctx.Err()` every iteration and flushed in-flight batches before returning — built defensively, just never exercised | One line: wire the signal-derived context into `c.Run(ctx)` instead of `context.Background()` |
+| `cmd/server` | Nothing | Explicit `*http.Server` + `Shutdown`, a `ReadinessGate` (`GET /healthz` vs. new `GET /livez`), and `waitForRoomsToDrain` — a real product decision, not just plumbing |
+| `cmd/ws-gateway` | Nothing | Same `Shutdown`/`ReadinessGate` pattern, plus a genuinely new `raceHubRegistry.Shutdown()` — nothing before this could force-disconnect a locally-held connection at all |
+
+### Flow: `cmd/server`
+
+```mermaid
+sequenceDiagram
+    participant K8s as kubelet / operator
+    participant Srv as cmd/server
+    participant Gate as ReadinessGate
+    participant HTTP as http.Server
+    participant Room as room.Registry
+
+    K8s->>Srv: SIGTERM
+    Srv->>Gate: MarkShuttingDown()
+    Note over Gate: GET /healthz now 503 shutting_down<br/>GET /livez still 200 (unaffected)
+    Srv->>HTTP: Shutdown(shutdownCtx)
+    HTTP-->>Srv: returns fast — REST requests are short-lived
+    Srv->>Room: waitForRoomsToDrain — poll Count() every 250ms
+    Note over Room: Room actors were never cancelled —<br/>root ctx is independent of the signal ctx —<br/>so in-progress races keep ticking
+    Room-->>Srv: Count() == 0 (race finished naturally)<br/>or shutdownTimeout (25s) elapsed
+    Srv->>K8s: process exits
+```
+
+The one line that makes "let races finish naturally" actually true, not just a comment: `main.go` calls `Run(cfg)` and returns — the process exits the instant `Run` returns, regardless of any goroutine still running in the background. Without `waitForRoomsToDrain` explicitly blocking on `registry.Count()`, the room actors' own goroutines would simply get killed the moment the process exited, making the whole design a no-op.
+
+**Verified live**, not just designed: starting a race, then sending `SIGTERM` mid-race, produced this real log sequence —
+
+```json
+{"msg":"shutdown signal received, marking unready"}
+{"msg":"waiting for in-progress races to finish","active_rooms":1}
+{"msg":"roombus: published","kind":"broadcast"}   // ~10 more ticks, over ~2.5s
+{"msg":"roombus: published","kind":"room_closed"}
+{"msg":"shutdown complete"}
+```
+
+The room kept broadcasting for roughly 2.5 more seconds after the signal arrived, and the process only exited once the race reached its own natural end — not force-cancelled the instant `SIGTERM` landed.
+
+### Flow: `cmd/ws-gateway`
+
+The harder case, since this is the binary actually holding live client connections:
+
+```mermaid
+sequenceDiagram
+    participant K8s as kubelet / operator
+    participant GW as cmd/ws-gateway
+    participant Gate as ReadinessGate
+    participant Hubs as raceHubRegistry
+    participant Conn as A local WS connection
+    participant HTTP as http.Server
+
+    K8s->>GW: SIGTERM
+    GW->>Gate: MarkShuttingDown()
+    Note over Gate: GET /healthz now 503
+    GW->>GW: sleep(connFlushWindow ≈ 500ms)
+    Note over Conn: Any broadcast already in flight over<br/>NATS still reaches this connection here
+    GW->>Hubs: Shutdown()
+    Hubs->>Conn: disconnectAll() → cancel() this conn's own context
+    Note over Conn: conn.Read(ctx) fails —<br/>readLoop takes the same path a real<br/>network disconnect would (publishes<br/>InboundKindDisconnected)
+    Conn-->>HTTP: serveConn returns, conn.Close() called
+    GW->>HTTP: Shutdown(shutdownCtx)
+    HTTP-->>GW: returns promptly — connections already unblocking
+    GW->>K8s: process exits
+```
+
+The one deliberate design choice worth calling out: `hubs.Shutdown()` cancels each connection's **own** context, not `hub.closed` (the signal used when a room actually finishes). That distinction matters semantically — the room hasn't ended here, this gateway is just going away, so its participants should go through the *same* grace-period/reconnect handling a real network drop would trigger, not be told "the race is over."
+
+**Verified live**: connected a real WebSocket client, sent `SIGTERM` to the gateway ~0.8s later —
+
+```json
+{"msg":"shutdown signal received, marking unready"}   // 15:46:25.199839
+{"msg":"wsgateway: received","kind":"broadcast"}        // 15:46:25.222544 — still flowing
+{"msg":"wsgateway: received","kind":"broadcast"}        // 15:46:25.474089 — flush window
+{"msg":"shutdown complete"}                              // 15:46:25.702053
+```
+
+Total: 502ms from signal to clean exit — matching `connFlushWindow` (500ms) almost exactly, not the 25s budget — and the client's own read loop ended with a clean close at the same instant, not a hang.
+
+### Flow: `cmd/consumer`
+
+```mermaid
+sequenceDiagram
+    participant K8s as kubelet / operator
+    participant Con as cmd/consumer
+    participant Loop as fetch loop (workout_sample / race_finished)
+
+    K8s->>Con: SIGTERM
+    Con->>Loop: ctx cancelled (same signal-derived context, passed straight into c.Run(ctx))
+    Loop->>Loop: ctx.Err() != nil on next iteration
+    Loop->>Loop: flush in-flight batch (context.Background(), not the cancelled ctx —<br/>so the flush itself isn't cut off)
+    Loop-->>Con: returns
+    Con->>K8s: process exits — no draining wait needed
+```
+
+No per-connection state to drain here, unlike the other two — the fetch loops' own defensive `ctx.Err()` checks (already in place before this spec, just never wired to anything cancellable) do all the real work.
+
+### The core design decision: let races finish naturally
+
+`cmd/server`'s choice — flip readiness immediately, but never cancel the room actors' own root context — is a real, disclosed product tradeoff, not the only option. The alternative (cancel that context too, the instant `SIGTERM` arrives) would force-end every in-progress race the moment a rolling update starts, which reads as a worse outcome given `project-overview.md` §7's own wording. It's bounded, not unbounded: `waitForRoomsToDrain` still respects the same `shutdownTimeout` (25s) `http.Server.Shutdown` uses, and if a room genuinely outlives that budget, Kubernetes' own `SIGKILL` after `terminationGracePeriodSeconds` is the backstop — the same category of accepted, bounded-impact limitation already disclosed for an owning instance crashing outright (a room's live state exists only in that one pod's RAM; no snapshotting or reassignment exists or is planned).
+
+This decision is expected to hold up under a *graceful* rolling update — `multi-instance-k8s-verification.md` (Phase 5, spec 6/6) is where that gets proven against a real `kubectl rollout restart`, not just a locally-sent signal. If it doesn't hold up there, the convention this project already follows applies: fix the design and update `graceful-shutdown.md`'s file, don't just patch around it.

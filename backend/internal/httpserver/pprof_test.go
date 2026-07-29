@@ -32,7 +32,7 @@ func TestPprof_EnabledServesDebugEndpoints(t *testing.T) {
 	defer cancel()
 
 	mux := httpserver.NewServer()
-	httpserver.RegisterRoutes(mux, config.Config{PprofEnabled: true}, pool, ctx, room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{}, room.NoopEvictionRecorder{}), testLogger, newTestMetrics())
+	httpserver.RegisterRoutes(mux, config.Config{PprofEnabled: true}, pool, ctx, room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{}, room.NoopEvictionRecorder{}), testLogger, newTestMetrics(), &httpserver.ReadinessGate{})
 	srv := newTestServer(t, mux)
 	defer srv.Close()
 
@@ -54,7 +54,7 @@ func TestPprof_DisabledReturns404(t *testing.T) {
 	defer cancel()
 
 	mux := httpserver.NewServer()
-	httpserver.RegisterRoutes(mux, config.Config{PprofEnabled: false}, pool, ctx, room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{}, room.NoopEvictionRecorder{}), testLogger, newTestMetrics())
+	httpserver.RegisterRoutes(mux, config.Config{PprofEnabled: false}, pool, ctx, room.NewRegistry(testLogger, testTickObserver, room.NoopLocator{}, room.NoopPublisher{}, room.NoopRoomBus{}, room.NoopEvictionRecorder{}), testLogger, newTestMetrics(), &httpserver.ReadinessGate{})
 	srv := newTestServer(t, mux)
 	defer srv.Close()
 

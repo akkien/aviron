@@ -289,3 +289,26 @@ type Gateway struct {
   piece would run its dependency clustered; this project runs one of
   each, deliberately, for local-dev simplicity, the same category of
   accepted risk already carried for Postgres.
+- **Resolved (`graceful-shutdown.md`, Phase 5): process-wide shutdown
+  needed a new `raceHubRegistry.Shutdown()`, not previously designed
+  here.** This spec's own `hub`/`raceHub` sketch above only ever tore a
+  connection down for two reasons — the room ending (`room_closed`) or
+  this gateway's last local connection for that race detaching
+  (`stop`/`signalStop`) — with no path for "the whole gateway process is
+  shutting down, disconnect everyone now." `graceful-shutdown.md` added a
+  third signal (`raceHub.shutdown`, triggered by a new
+  `raceHubRegistry.Shutdown()`) that force-cancels every locally
+  registered connection's own `context.CancelFunc` (tracked via a new
+  `connRegistration{ch, cancel}` pairing passed into `registerConn`,
+  replacing the bare `chan []byte` the sketch above shows). Cancelling a
+  connection's own context — not closing `hub.closed` — is the
+  deliberate choice: it drives `readLoop` down the same path a real
+  network disconnect takes (publishing `InboundKindDisconnected`), which
+  is the semantically correct outcome here — unlike `room_closed`, the
+  room hasn't ended, so from its perspective these participants are
+  genuinely disconnecting (and will go through the normal grace-period/
+  reconnect handling), not being told the race is over. Each hub's own
+  refcount/`stop` bookkeeping is untouched by this and still runs its
+  normal course afterward, as every force-disconnected connection's
+  `serveConn` returns and calls `detach` exactly like an ordinary
+  disconnect would.
