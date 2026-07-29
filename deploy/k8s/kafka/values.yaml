@@ -1,0 +1,53 @@
+# Bitnami Kafka chart values for this project's local kind cluster —
+# see context/features/phase5/k8s-core-infra.md's "Kafka" section.
+#
+# Installed via:
+#   helm install aviron-kafka bitnami/kafka --version 32.4.3 \
+#     --namespace aviron -f deploy/k8s/kafka/values.yaml
+#
+# image.registry/repository overridden to bitnamilegacy: as of August 2025
+# Broadcom moved most docker.io/bitnami/* tags behind a paid "Bitnami
+# Secure Images" subscription and pruned the free ones — this chart
+# version's own default (docker.io/bitnami/kafka:4.0.0-debian-12-r10)
+# 404s on a real pull, confirmed directly against this cluster
+# (ImagePullBackOff). bitnamilegacy is the community mirror of the old
+# free images Bitnami/Broadcom itself set up as a stopgap; used
+# deliberately here, not as an oversight, and worth revisiting if it ever
+# stops being maintained.
+image:
+  registry: docker.io
+  repository: bitnamilegacy/kafka
+
+# KRaft mode is the only mode this chart version supports (Kafka 4.0
+# dropped ZooKeeper entirely) — no zookeeper.enabled toggle needed.
+# controllerOnly stays false (chart default): a single node acting as
+# both broker and controller, matching docker-compose.yml's own
+# KAFKA_PROCESS_ROLES: broker,controller single-process topology.
+controller:
+  replicaCount: 1
+  persistence:
+    # Matches docker-compose.yml's own kafka service, which mounts no
+    # volume today — topics/messages not surviving a broker pod restart
+    # is already this project's accepted local-dev stance, not a new
+    # regression introduced by moving to Kubernetes.
+    enabled: false
+
+# broker.replicaCount stays at the chart default (0) — no separate
+# broker-only pool, single combined node above is the whole cluster.
+
+# The chart defaults every listener to SASL_PLAINTEXT — this project's
+# own Kafka client code (internal/kafka.Producer, internal/consumer,
+# both plain segmentio/kafka-go with no SASL mechanism configured) has
+# never done SASL, matching docker-compose.yml's own plain PLAINTEXT
+# listener (KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: ...:PLAINTEXT
+# everywhere, no SASL at all). Overridden here deliberately, not an
+# oversight — same "this is a local kind cluster, not a real deployment
+# target" stance already taken for Postgres/JWT credentials in
+# secret.yaml.
+listeners:
+  client:
+    protocol: PLAINTEXT
+  controller:
+    protocol: PLAINTEXT
+  interbroker:
+    protocol: PLAINTEXT

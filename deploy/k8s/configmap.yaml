@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aviron-config
+  namespace: aviron
+data:
+  CORS_ALLOWED_ORIGIN: "http://localhost:5173"
+  PPROF_ENABLED: "true"
+  REDIS_URL: "redis://redis.aviron.svc.cluster.local:6379/0"
+  NATS_URL: "nats://nats.aviron.svc.cluster.local:4222"
+  # Bitnami Kafka chart's bootstrap Service DNS name — filled in once the
+  # chart is installed (k8s-core-infra.md's "Kafka" section), not knowable
+  # in advance since it's versioned by the chart / release name.
+  KAFKA_BROKERS: "aviron-kafka.aviron.svc.cluster.local:9092"
