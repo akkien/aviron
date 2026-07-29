@@ -59,13 +59,17 @@ ws-gateway/
   design, mirroring `race-service`'s split for the identical reason (a
   transient Redis or NATS blip must not cause `kubelet` to restart an
   otherwise-healthy gateway pod).
-- `terminationGracePeriodSeconds` aligned with `graceful-shutdown.md`'s
-  `ws-gateway`-side `Shutdown` timeout plus its flush window — this
-  binary's shutdown path is the most involved of the three (closing every
-  locally-held connection via the new `raceHubRegistry.Shutdown()`), so
-  give it a little more headroom than `race-service`'s if the two
-  timeouts genuinely differ; confirm against `graceful-shutdown.md`'s
-  actual chosen numbers rather than assuming parity.
+- `terminationGracePeriodSeconds: 30` — **resolved the other way from
+  what this spec originally expected.** `ws-gateway`'s own
+  `shutdownTimeout` (25s) stayed unchanged while `race-service`'s grew to
+  2 minutes (`graceful-shutdown.md`'s "Correction" note): `ws-gateway`
+  holds no race state of its own, so `raceHubRegistry.Shutdown()`
+  force-disconnects every local connection instead of waiting for a race
+  to finish — confirmed by a real rolling-update run
+  (`multi-instance-k8s-verification.md`) landing at ~15-17s per
+  disconnect, comfortably inside 30s. `ws-gateway`'s shutdown ended up
+  the *fastest* of the three binaries, not the one needing the most
+  headroom this spec originally guessed.
 - Env: `REDIS_URL`/`NATS_URL`/`JWT_SECRET`/`CORS_ALLOWED_ORIGIN` from the
   shared `ConfigMap`/`Secret`; `RACE_SERVICE_INSTANCES` and
   `WS_GATEWAY_LISTEN_ADDR` set directly on this Deployment (per-binary,
