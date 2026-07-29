@@ -19,8 +19,8 @@ func TestRaceHub_FansOutToAllRegisteredConns(t *testing.T) {
 
 	connA := make(chan []byte, connBufferSize)
 	connB := make(chan []byte, connBufferSize)
-	h.registerConn(connA)
-	h.registerConn(connB)
+	h.registerConn(connA, func() {})
+	h.registerConn(connB, func() {})
 
 	if err := fake.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
 		Kind: roomrelay.OutboundKindBroadcast, RaceID: "race-1", Payload: []byte(`{"type":"race_state"}`),
@@ -49,7 +49,7 @@ func TestRaceHub_UnregisterStopsDelivery(t *testing.T) {
 	h := newRaceHub("race-1", out, unsubscribe, func() {}, testLogger)
 
 	conn := make(chan []byte, connBufferSize)
-	h.registerConn(conn)
+	h.registerConn(conn, func() {})
 	h.unregisterConn(conn)
 
 	if err := fake.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
@@ -76,8 +76,8 @@ func TestRaceHub_FullConnDoesNotBlockOthers(t *testing.T) {
 
 	slow := make(chan []byte, connBufferSize)
 	fast := make(chan []byte, connBufferSize)
-	h.registerConn(slow)
-	h.registerConn(fast)
+	h.registerConn(slow, func() {})
+	h.registerConn(fast, func() {})
 
 	publish := func(payload string) {
 		if err := fake.PublishOut(context.Background(), "race-1", roomrelay.OutboundEnvelope{
@@ -158,7 +158,7 @@ func TestRaceHub_SignalStop_ClosesHub(t *testing.T) {
 	// registerConn/unregisterConn must not block forever against a closed hub.
 	regDone := make(chan struct{})
 	go func() {
-		h.registerConn(make(chan []byte, connBufferSize))
+		h.registerConn(make(chan []byte, connBufferSize), func() {})
 		h.unregisterConn(make(chan []byte, connBufferSize))
 		close(regDone)
 	}()
@@ -303,4 +303,65 @@ func TestRaceHubRegistry_ConcurrentAttachDetach(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestRaceHub_DisconnectAll_CancelsEveryRegisteredConn proves
+// graceful-shutdown.md's design choice: disconnectAll cancels each
+// connection's own context (not h.closed), the same path a real network
+// disconnect takes, rather than silently dropping them.
+func TestRaceHub_DisconnectAll_CancelsEveryRegisteredConn(t *testing.T) {
+	fake := roomrelay.NewFakeBus()
+	out, unsubscribe, err := fake.SubscribeOut(context.Background(), "race-1")
+	if err != nil {
+		t.Fatalf("SubscribeOut: %v", err)
+	}
+	h := newRaceHub("race-1", out, unsubscribe, func() {}, testLogger)
+
+	cancelledA := make(chan struct{})
+	cancelledB := make(chan struct{})
+	h.registerConn(make(chan []byte, connBufferSize), func() { close(cancelledA) })
+	h.registerConn(make(chan []byte, connBufferSize), func() { close(cancelledB) })
+
+	h.disconnectAll()
+
+	for name, ch := range map[string]chan struct{}{"A": cancelledA, "B": cancelledB} {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatalf("conn %s was never cancelled after disconnectAll", name)
+		}
+	}
+}
+
+// TestRaceHubRegistry_Shutdown_DisconnectsAcrossAllRaces proves Shutdown
+// reaches every race this gateway currently holds a local connection
+// for, not just one — the real scenario graceful-shutdown.md's
+// cmd/ws-gateway wiring depends on.
+func TestRaceHubRegistry_Shutdown_DisconnectsAcrossAllRaces(t *testing.T) {
+	fake := roomrelay.NewFakeBus()
+	hr := NewRaceHubRegistry(context.Background(), fake, testLogger)
+
+	h1, err := hr.attach("race-1")
+	if err != nil {
+		t.Fatalf("attach race-1: %v", err)
+	}
+	h2, err := hr.attach("race-2")
+	if err != nil {
+		t.Fatalf("attach race-2: %v", err)
+	}
+
+	cancelled1 := make(chan struct{})
+	cancelled2 := make(chan struct{})
+	h1.registerConn(make(chan []byte, connBufferSize), func() { close(cancelled1) })
+	h2.registerConn(make(chan []byte, connBufferSize), func() { close(cancelled2) })
+
+	hr.Shutdown()
+
+	for name, ch := range map[string]chan struct{}{"race-1": cancelled1, "race-2": cancelled2} {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatalf("connection for %s was never cancelled after registry Shutdown", name)
+		}
+	}
 }

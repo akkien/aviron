@@ -5,7 +5,9 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/akkien/aviron/internal/config"
 	"github.com/akkien/aviron/internal/consumer"
@@ -15,7 +17,11 @@ import (
 )
 
 func Run(cfg *config.Config) {
-	ctx := context.Background()
+	// internal/consumer's fetch loops already check ctx.Err() and flush
+	// their in-flight batch before returning (graceful-shutdown.md) — the
+	// only thing missing was a context that ever actually gets cancelled.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 

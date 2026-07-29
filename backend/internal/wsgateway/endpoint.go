@@ -142,7 +142,7 @@ func (h *WSHandler) serveConn(conn wsConn, raceID, userID, displayName string, l
 	defer cancel()
 
 	connCh := make(chan []byte, connBufferSize)
-	hub.registerConn(connCh)
+	hub.registerConn(connCh, cancel)
 	defer hub.unregisterConn(connCh)
 
 	var wg sync.WaitGroup

@@ -25,10 +25,22 @@ const connBufferSize = 8
 // Like RoomActor itself, raceHub uses a single goroutine (run) as the only
 // mutator of its connection set, driven by channels rather than a mutex —
 // consistent with this project's single-writer concurrency style.
+// connRegistration pairs one connection's outbound fan-out channel with
+// the context.CancelFunc that ends that connection's readLoop/writeLoop
+// (serveConn's own connCtx). Tracked so a raceHub can force-disconnect
+// every local connection it holds on process shutdown
+// (graceful-shutdown.md's raceHubRegistry.Shutdown), not just when the
+// room itself ends or a connection detaches on its own.
+type connRegistration struct {
+	ch     chan []byte
+	cancel context.CancelFunc
+}
+
 type raceHub struct {
-	register   chan chan []byte
+	register   chan connRegistration
 	unregister chan chan []byte
 	stop       chan struct{}
+	shutdown   chan struct{}
 	closed     chan struct{}
 	stopOnce   sync.Once
 }
@@ -41,9 +53,10 @@ type raceHub struct {
 // dangling room.{race_id}.out subscription behind.
 func newRaceHub(raceID string, out <-chan roomrelay.OutboundEnvelope, unsubscribe func(), onClose func(), logger *slog.Logger) *raceHub {
 	h := &raceHub{
-		register:   make(chan chan []byte),
+		register:   make(chan connRegistration),
 		unregister: make(chan chan []byte),
 		stop:       make(chan struct{}),
+		shutdown:   make(chan struct{}),
 		closed:     make(chan struct{}),
 	}
 	go h.run(raceID, out, unsubscribe, onClose, logger)
@@ -55,7 +68,7 @@ func (h *raceHub) run(raceID string, out <-chan roomrelay.OutboundEnvelope, unsu
 	defer unsubscribe()
 	defer close(h.closed)
 
-	conns := make(map[chan []byte]struct{})
+	conns := make(map[chan []byte]context.CancelFunc)
 	for {
 		select {
 		case env, ok := <-out:
@@ -94,10 +107,25 @@ func (h *raceHub) run(raceID string, out <-chan roomrelay.OutboundEnvelope, unsu
 				// same loop, before this one ever saw room_closed at all.
 				return
 			}
-		case c := <-h.register:
-			conns[c] = struct{}{}
+		case reg := <-h.register:
+			conns[reg.ch] = reg.cancel
 		case c := <-h.unregister:
 			delete(conns, c)
+		case <-h.shutdown:
+			// Force-disconnects every connection this hub currently holds
+			// — used only when the whole gateway process is shutting down
+			// (graceful-shutdown.md's raceHubRegistry.Shutdown), never as
+			// part of this hub's own normal per-race lifecycle. Cancelling
+			// a connection's own ctx (not closing h.closed) means its
+			// readLoop takes the same path a real network disconnect
+			// would — publishing InboundKindDisconnected — which is
+			// exactly right here: from the room's perspective this
+			// participant really is disconnecting (this gateway is going
+			// away), unlike the room_closed case above where the room
+			// already told everyone it's finished.
+			for _, cancel := range conns {
+				cancel()
+			}
 		case <-h.stop:
 			// Triggered by raceHubRegistry once this race's last local
 			// connection detaches — nobody's left to deliver to, so
@@ -115,13 +143,15 @@ func (h *raceHub) signalStop() {
 	h.stopOnce.Do(func() { close(h.stop) })
 }
 
-// registerConn attaches c to the fan-out. Safe to call even if the hub has
-// already closed (room gone, or this gateway's last local connection for
-// it already detached) — it just becomes a no-op instead of blocking
-// forever on an unread channel.
-func (h *raceHub) registerConn(c chan []byte) {
+// registerConn attaches c to the fan-out, tracking cancel (serveConn's own
+// connCtx cancel func) so disconnectAll can force this connection closed
+// later if the whole gateway process shuts down. Safe to call even if the
+// hub has already closed (room gone, or this gateway's last local
+// connection for it already detached) — it just becomes a no-op instead
+// of blocking forever on an unread channel.
+func (h *raceHub) registerConn(c chan []byte, cancel context.CancelFunc) {
 	select {
-	case h.register <- c:
+	case h.register <- connRegistration{ch: c, cancel: cancel}:
 	case <-h.closed:
 	}
 }
@@ -130,6 +160,19 @@ func (h *raceHub) registerConn(c chan []byte) {
 func (h *raceHub) unregisterConn(c chan []byte) {
 	select {
 	case h.unregister <- c:
+	case <-h.closed:
+	}
+}
+
+// disconnectAll signals run to force-cancel every locally registered
+// connection's context (graceful-shutdown.md). Fire-and-forget — it
+// doesn't wait for those connections to actually finish closing;
+// raceHubRegistry.Shutdown's own caller doesn't need it to, since
+// http.Server.Shutdown already waits for each affected ServeHTTP call to
+// return on its own. Same closed-hub guard as registerConn/unregisterConn.
+func (h *raceHub) disconnectAll() {
+	select {
+	case h.shutdown <- struct{}{}:
 	case <-h.closed:
 	}
 }
@@ -222,5 +265,26 @@ func (hr *raceHubRegistry) detach(raceID string) {
 	if entry.refCount <= 0 {
 		delete(hr.hubs, raceID)
 		entry.hub.signalStop()
+	}
+}
+
+// Shutdown force-disconnects every locally-held connection across every
+// race this gateway currently has at least one connection for
+// (graceful-shutdown.md). Called once, during process shutdown — never
+// as part of this registry's normal per-race attach/detach lifecycle.
+// Each affected hub's own refcount/stop bookkeeping still runs its normal
+// course afterward: as each disconnected connection's serveConn returns,
+// it calls detach exactly like a real disconnect would, tearing the hub
+// down once its last connection is gone.
+func (hr *raceHubRegistry) Shutdown() {
+	hr.mu.Lock()
+	hubs := make([]*raceHub, 0, len(hr.hubs))
+	for _, entry := range hr.hubs {
+		hubs = append(hubs, entry.hub)
+	}
+	hr.mu.Unlock()
+
+	for _, hub := range hubs {
+		hub.disconnectAll()
 	}
 }
