@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: race-service
+  namespace: aviron
+spec:
+  serviceName: race-service
+  # The actual point of this spec: two replicas is what makes Phase 4's
+  # horizontal-scaling design (redis-room-registry.md, room-message-bus.md)
+  # matter in practice instead of just in theory.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: race-service
+  template:
+    metadata:
+      labels:
+        app: race-service
+    spec:
+      # Aligned with graceful-shutdown.md's cmd/server shutdownTimeout
+      # (25s) — comfortably longer, so http.Server.Shutdown and
+      # waitForRoomsToDrain get their own full internal budget before
+      # Kubernetes sends SIGKILL.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: race-service
+          image: aviron-backend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            # INSTANCE_ID from the downward API — a pod's own name is
+            # already a stable, human-legible identity for its lifetime
+            # (race-service-0/race-service-1), unlike
+            # internal/config.getEnvInstanceID's crypto/rand fallback —
+            # legible in both kubectl logs and redis-cli GET room:<id>.
+            - name: INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PORT
+              value: "8080"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: aviron-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: aviron-secret
+                  key: POSTGRES_PASSWORD
+            # Composed from the Secret's own parts via Kubernetes' $(VAR)
+            # env-value interpolation — same shape docker-compose.yml
+            # already uses literally, just pointed at the postgres
+            # StatefulSet's headless Service instead of a compose
+            # service name.
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres.aviron.svc.cluster.local:5432/aviron?sslmode=disable"
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: REDIS_URL
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: NATS_URL
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: KAFKA_BROKERS
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aviron-secret
+                  key: JWT_SECRET
+            - name: CORS_ALLOWED_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: CORS_ALLOWED_ORIGIN
+            - name: PPROF_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: PPROF_ENABLED
+          # Readiness: graceful-shutdown.md's existing, dependency-checking
+          # /healthz (Postgres reachability) — a pod that can't reach
+          # Postgres genuinely shouldn't receive traffic.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          # Liveness: the new, dependency-free /livez — a transient
+          # Postgres/Redis/NATS blip must not make kubelet restart an
+          # otherwise-healthy pod (graceful-shutdown.md's whole reason for
+          # splitting these two probes apart).
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+  # No volumeClaimTemplates: this StatefulSet is purely for the stable
+  # per-pod network identity the headless Service below needs, not for
+  # per-pod storage — race-service holds no state that must survive a
+  # pod restart.
