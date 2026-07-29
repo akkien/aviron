@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: aviron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          # nats:2-alpine, not nats:latest — the latter is distroless-style
+          # with no shell, which already broke docker-compose.yml's own
+          # exec-based healthcheck and load/multi-instance-check.md's NATS
+          # readiness wait the same way once before.
+          image: nats:2-alpine
+          args: ["-m", "8222"]
+          ports:
+            - containerPort: 4222
+              name: client
+            - containerPort: 8222
+              name: monitor
+          # Native httpGet probes — strictly better than
+          # docker-compose.yml's own wget-inside-exec healthcheck, since
+          # this doesn't depend on a shell existing in the image at all.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

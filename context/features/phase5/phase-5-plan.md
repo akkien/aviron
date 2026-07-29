@@ -95,9 +95,9 @@ against it.
 ## Specs, in build order
 
 1. `k8s-core-infra.md` — namespace, `ConfigMap`/`Secret`, Postgres
-   (StatefulSet + PVC), Redis (Deployment), Kafka (Strimzi or Bitnami
-   chart), NATS (new vs. the original plan). Runs none of this project's
-   own binaries yet. Confirms `backend/Dockerfile`'s existing image loads
+   (StatefulSet + PVC), Redis (Deployment), Kafka (Bitnami Helm chart,
+   KRaft mode), NATS (new vs. the original plan). Runs none of this
+   project's own binaries yet. Confirms `backend/Dockerfile`'s existing image loads
    cleanly via `kind load docker-image`.
 2. `graceful-shutdown.md` — `SIGTERM` handling across `cmd/server`,
    `cmd/ws-gateway`, `cmd/consumer`: `http.Server.Shutdown`, the

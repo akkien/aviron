@@ -30,9 +30,8 @@ deploy/k8s/
   configmap.yaml
   secret.yaml
   postgres/
-    statefulset.yaml
+    statefulset.yaml   # includes volumeClaimTemplates — no separate pvc.yaml, see "Postgres" below
     service.yaml
-    pvc.yaml
   redis/
     deployment.yaml
     service.yaml
@@ -40,7 +39,8 @@ deploy/k8s/
     deployment.yaml
     service.yaml
   kafka/
-    # via an existing chart (Strimzi or Bitnami) — see "Kafka" below
+    values.yaml   # Bitnami Helm chart values — see "Kafka" below; the
+                  # release itself is a `helm install`, not an `apply`d manifest
   race-service/     # k8s-race-service-deploy.md, not this spec
   ws-gateway/        # k8s-ws-gateway-deploy.md, not this spec
   consumer/          # k8s-consumer-deploy.md, not this spec
@@ -81,8 +81,16 @@ explicitly (`metadata.namespace: aviron`), not `default`.
 ## Postgres
 
 - `StatefulSet` (single replica — this project runs one Postgres, same as
-  `docker-compose.yml`) + `PersistentVolumeClaim` + headless `Service`,
-  same `postgres:18-alpine` image `docker-compose.yml` already uses.
+  `docker-compose.yml`) + headless `Service`, same `postgres:18-alpine`
+  image `docker-compose.yml` already uses. **Correction from this spec's
+  original layout**: no separate, hand-written `pvc.yaml` — a
+  `StatefulSet`'s idiomatic storage mechanism is an inline
+  `volumeClaimTemplates` block, which provisions and binds one PVC per
+  replica automatically (`pgdata-postgres-0`); a manually created static
+  PVC isn't how a `StatefulSet` normally consumes storage, and `kind`'s
+  default `standard` `StorageClass` (`rancher.io/local-path`) supports the
+  dynamic provisioning this needs out of the box. Confirmed working
+  end to end against a real cluster.
 - **Migrations need no separate `Job`.** `cmd/server/run.go` already
   calls `db.Migrate(cfg.DatabaseURL)` unconditionally at startup, before
   serving — the same "migrations run automatically on startup, no
@@ -132,40 +140,119 @@ now needs standing up here too.
 ## Kafka
 
 Per `project-overview.md` §7/§11's explicit steer: "use an existing chart
-(Strimzi or Bitnami) rather than writing your own." Strimzi's own KRaft
-mode (no ZooKeeper) is the natural fit — it's the same broker topology
-`docker-compose.yml`'s `kafka` service already runs
-(`KAFKA_PROCESS_ROLES: broker,controller`, no ZooKeeper container),
-translated into an operator-managed single-node `Kafka` custom resource
-rather than a hand-written broker Deployment.
+(Strimzi or Bitnami) rather than writing your own." **Decided: the
+Bitnami Kafka Helm chart, not Strimzi** — a plain Helm release rather
+than an operator + custom-resource model, lighter to reason about and to
+run on a laptop-hosted `kind` cluster, which is what this project
+actually needs rather than Strimzi's fuller operator lifecycle (rolling
+upgrades, multi-cluster management) this project has no use for.
 
-- Single broker, minimal resource requests — this is a laptop-hosted
-  `kind` cluster, not a production-sized Kafka footprint.
-- `KAFKA_BROKERS` in the shared `ConfigMap` points `consumer`'s and
-  `race-service`'s producer/consumer at whatever Service name the chosen
-  chart exposes (confirm the exact bootstrap-service DNS name at `start`
-  — it's chart-specific).
+Installed as chart version `32.4.3` (app version `4.0.0` — Kafka 4.0,
+which dropped ZooKeeper entirely, so this chart version has no
+`zookeeper.enabled` toggle at all; KRaft is simply the only mode):
+
+```sh
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm install aviron-kafka bitnami/kafka --version 32.4.3 \
+  --namespace aviron -f deploy/k8s/kafka/values.yaml
+```
+
+- `controller.replicaCount: 1`, `controller.controllerOnly` left at its
+  chart default (`false`) — a single combined broker+controller node,
+  matching `docker-compose.yml`'s own single-process
+  `KAFKA_PROCESS_ROLES: broker,controller` topology, not a multi-broker
+  production shape. `broker.replicaCount` stays at its chart default
+  (`0`) — no separate broker-only pool.
+- `controller.persistence.enabled: false` — matching `docker-compose.yml`'s
+  own `kafka` service, which mounts no volume today (only `pgdata`/
+  `pgadmin_data` are named volumes in that file); topics/messages not
+  surviving a broker pod restart is already this project's accepted
+  local-dev stance, not a new regression introduced by moving to
+  Kubernetes.
+- **`listeners.{client,controller,interbroker}.protocol: PLAINTEXT`,
+  overriding the chart's own default (`SASL_PLAINTEXT` on every
+  listener).** Real finding, not anticipated when this spec was first
+  written: this project's Kafka client code (`internal/kafka.Producer`,
+  `internal/consumer`, both plain `segmentio/kafka-go` with no SASL
+  mechanism ever configured) has never done SASL, matching
+  `docker-compose.yml`'s own plain-`PLAINTEXT` broker — leaving the
+  chart's SASL defaults in place would make `race-service`/`consumer`
+  fail to authenticate against it. Same "local kind cluster, not a real
+  deployment target" stance already taken for the Postgres/JWT
+  credentials in `secret.yaml`.
+- Resources left at the chart's own `resourcesPreset: small` default
+  (not overridden) — already proportionate to a laptop-hosted `kind`
+  cluster, no need to hand-pick CPU/memory numbers on top of it.
+- `KAFKA_BROKERS` in the shared `ConfigMap` points at the chart's real,
+  confirmed bootstrap `Service` DNS name for release name `aviron-kafka`:
+  `aviron-kafka.aviron.svc.cluster.local:9092` (printed by `helm install`'s
+  own `NOTES`, and matches what `k8s-core-infra.md`'s `configmap.yaml`
+  already has set).
+
+### Real blocker hit during implementation: the chart's own image is unpullable for free
+
+`helm install` itself deploys, but the controller pod then sits in
+`ImagePullBackOff` against the chart's default image,
+`docker.io/bitnami/kafka:4.0.0-debian-12-r10` — confirmed directly
+against this cluster, not a hypothetical:
+
+```text
+Failed to pull image "docker.io/bitnami/kafka:4.0.0-debian-12-r10":
+docker.io/bitnami/kafka:4.0.0-debian-12-r10: not found
+```
+
+Since August 2025, Broadcom (Bitnami's owner) moved most
+`docker.io/bitnami/*` tags behind a paid "Bitnami Secure Images"
+subscription and pruned the free ones — `helm install` itself even prints
+a warning to this effect on every install of this chart now. This isn't
+the resource-weight risk this spec originally anticipated ("too heavy for
+local `kind`") — it's that the free chart, as published, references an
+image that no longer exists for free pulling, a different failure mode
+entirely.
+
+**Resolved by overriding `image.registry`/`image.repository` to
+`bitnamilegacy/kafka`** — a community mirror of the pre-August-2025 free
+images that Bitnami/Broadcom itself stood up as a stopgap, confirmed to
+have the exact same tag (`4.0.0-debian-12-r10`) pullable. `helm
+upgrade`/`install` prints its own security warning about substituted,
+"unrecognized" containers when this override is in place — expected and
+accepted here, not a sign of a misconfiguration; this is a local `kind`
+cluster, and `bitnamilegacy` is worth revisiting if it ever stops being
+maintained (it has no support guarantee the way a paid subscription
+would).
 
 ## Resource requests/limits
 
-Every manifest in this spec gets an explicit `resources.requests`/
-`limits` block, deliberately small — this is a laptop-hosted `kind`
-cluster. Postgres and Kafka are the two most likely to need a real
-memory limit to avoid starving Redis/NATS on a constrained machine.
+Postgres, Redis, and NATS each get an explicit, small
+`resources.requests`/`limits` block in their hand-written manifests —
+proportionate to a laptop-hosted `kind` cluster. Kafka's resources come
+from the Bitnami chart's own `resourcesPreset: small` default instead
+(left un-overridden — already proportionate, no need to hand-pick
+numbers on top of it).
 
 ## Verification
 
-- `kind create cluster --name aviron` (fresh), apply every manifest in
+Confirmed end to end against a real cluster, not just planned:
+
+- `kind create cluster --name aviron` (fresh), applied every manifest in
   this spec in dependency order (`namespace` → `configmap`/`secret` →
-  `postgres` → `redis` → `nats` → `kafka`), confirm every pod reaches
-  `Running`/`Ready` via `kubectl get pods -n aviron -w`.
-- `kubectl exec`/`kubectl port-forward` to confirm each dependency
-  actually works, not just that its pod exists: Postgres is reachable and
-  migrated (nothing to check yet — no binary has run `Migrate` until
-  `k8s-race-service-deploy.md` deploys `race-service`, so defer the "is it
-  actually migrated" check to that spec's own verification), Redis
-  responds to `PING`, NATS's monitoring endpoint answers, Kafka's broker
-  is listable via the chosen chart's own CLI tooling.
+  `postgres` → `redis` → `nats` → `kafka`) — every pod reached
+  `Running 1/1 Ready` (`aviron-kafka-controller-0` only after the
+  `bitnamilegacy` image override above).
+- Each dependency confirmed actually reachable, not just pod-exists:
+  - Postgres: `kubectl exec postgres-0 -- pg_isready -U aviron` →
+    `accepting connections`. (Not migrated yet — no binary has run
+    `Migrate` until `k8s-race-service-deploy.md` deploys `race-service`,
+    so that check is deferred to that spec's own verification, as
+    originally planned.)
+  - Redis: `kubectl exec deploy/redis -- redis-cli ping` → `PONG`.
+  - NATS: `curl http://nats:8222/healthz` (from a throwaway in-cluster
+    pod) → `{"status":"ok"}`, HTTP 200.
+  - Kafka: `kafka-broker-api-versions.sh --bootstrap-server localhost:9092`
+    (run inside `aviron-kafka-controller-0`) → broker `id: 0` listed with
+    its full supported-API-version range.
+- `go build ./...` and `go test ./...` still pass unmodified — this spec
+  touches no Go code, only `deploy/k8s/` manifests and a Helm release.
 
 ## Notes
 
@@ -175,11 +262,11 @@ memory limit to avoid starving Redis/NATS on a constrained machine.
   Deployment/StatefulSet/probe/graceful-shutdown logic in the same
   troubleshooting session, same separation the original, deleted
   `k8s-core-infra.md` already established.
-- If Strimzi's chart turns out too heavy for a reasonable local `kind`
-  cluster (a real risk the original plan already flagged — Kafka's
-  operator-managed setups are not lightweight even single-broker),
-  document that finding here and consider scoping Kafka out of the
-  Kubernetes phase specifically, keeping Phase 4's `event-pipeline/`
-  verified only against `docker-compose` — a legitimate judgment call to
-  make once the real resource cost is observed, not a failure if it
-  happens.
+- If the Bitnami chart still turns out too heavy for a reasonable local
+  `kind` cluster (a real risk the original plan already flagged for Kafka
+  generally — even a single-broker setup isn't a lightweight footprint,
+  chart-managed or not), document that finding here and consider scoping
+  Kafka out of the Kubernetes phase specifically, keeping Phase 4's
+  `event-pipeline/` verified only against `docker-compose` — a legitimate
+  judgment call to make once the real resource cost is observed, not a
+  failure if it happens.
