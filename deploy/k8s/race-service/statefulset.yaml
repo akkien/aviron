@@ -17,11 +17,15 @@ spec:
       labels:
         app: race-service
     spec:
-      # Aligned with graceful-shutdown.md's cmd/server shutdownTimeout
-      # (25s) — comfortably longer, so http.Server.Shutdown and
-      # waitForRoomsToDrain get their own full internal budget before
-      # Kubernetes sends SIGKILL.
-      terminationGracePeriodSeconds: 30
+      # Aligned with graceful-shutdown.md's cmd/server shutdownTimeout —
+      # corrected to 2m after a real rolling-update run
+      # (multi-instance-k8s-verification.md) found the original 25s/30s
+      # pair too short for entirely ordinary races (this project's own
+      # default k6 scenario, a 30-word race, already averages ~36s to
+      # finish). 150s comfortably exceeds the 2-minute internal budget so
+      # http.Server.Shutdown and waitForRoomsToDrain get their own full
+      # window before Kubernetes sends SIGKILL.
+      terminationGracePeriodSeconds: 150
       containers:
         - name: race-service
           image: aviron-backend:local

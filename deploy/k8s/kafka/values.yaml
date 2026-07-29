@@ -31,6 +31,31 @@ controller:
     # is already this project's accepted local-dev stance, not a new
     # regression introduced by moving to Kubernetes.
     enabled: false
+  # Real bug found live, not anticipated when this file was first
+  # written: with no override, Kafka defaults to
+  # offsets.topic.replication.factor=3 for its internal
+  # __consumer_offsets topic — impossible to satisfy with a single
+  # broker, so the topic never gets created and every consumer group
+  # fetch fails with "Group Coordinator Not Available" forever, not just
+  # during a slow startup. docker-compose.yml's own kafka service
+  # already carries the equivalent fix
+  # (KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1).
+  #
+  # overrideConfiguration, not the top-level config key: the top-level
+  # config key REPLACES the chart's entire auto-generated configuration
+  # wholesale (its own doc comment says as much — "this will override
+  # the configuration based on values, please act carefully"), stripping
+  # out the auto-generated KRaft bootstrap settings (process.roles,
+  # node.id, controller.quorum.voters, ...) this single combined node
+  # actually needs to start at all. Confirmed the hard way: a bare
+  # top-level `config:` block with only these 3 keys crash-looped the
+  # broker at the storage-format step on every attempt, fresh install
+  # included. overrideConfiguration layers specific keys on top of the
+  # chart's own generated config instead of replacing it outright.
+  overrideConfiguration:
+    offsets.topic.replication.factor: "1"
+    transaction.state.log.replication.factor: "1"
+    transaction.state.log.min.isr: "1"
 
 # broker.replicaCount stays at the chart default (0) — no separate
 # broker-only pool, single combined node above is the whole cluster.

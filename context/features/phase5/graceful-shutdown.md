@@ -49,10 +49,11 @@ Replace the blocking `log.Fatal(http.ListenAndServe(...))` call with an
 explicit `*http.Server`, started via `go server.ListenAndServe()`, with
 the main goroutine blocking on a `signal.NotifyContext(context.Background(),
 syscall.SIGTERM, syscall.SIGINT)`-derived context instead. On signal:
-call `server.Shutdown(shutdownCtx)` with a bounded timeout (e.g. 25s,
-comfortably inside Kubernetes' default 30s `terminationGracePeriodSeconds`
-— the two numbers must agree, confirmed against whatever
-`k8s-race-service-deploy.md` actually sets, not chosen independently).
+call `server.Shutdown(shutdownCtx)` with a bounded timeout — **2 minutes**,
+corrected from an original 25s guess (see the correction below) — with
+`terminationGracePeriodSeconds` set to comfortably exceed it; the two
+numbers must agree, confirmed against whatever
+`k8s-race-service-deploy.md` actually sets, not chosen independently.
 
 ### The real question: what happens to in-progress room actors
 
@@ -88,6 +89,30 @@ same writeup). A graceful rolling update is expected to look nothing like
 that crash scenario in practice — `multi-instance-k8s-verification.md`
 below is where that expectation actually gets tested against a real
 `kubectl rollout restart`.
+
+**Correction (found by `multi-instance-k8s-verification.md`'s own first
+live run): the original 25s `shutdownTimeout` was too short for entirely
+ordinary races, not just extreme ones.** A real rolling update against a
+race running `ROLLOUT_TEST_DISTANCE_METERS=40` hung until the `k6`
+scenario's own 2-minute `maxDuration` — neither client ever received
+`race_finished`. Root cause, traced directly rather than guessed: this
+project's own default k6 load scenario
+(`load/scenarios/race-lifecycle.js`) already uses a 30-word race, which
+alone averages ~36s to finish at realistic telemetry pacing
+(`project-overview.md` §4.2's 0.4-2s per word) — comfortably longer than
+the 25s budget `waitForRoomsToDrain` had to work with, so the old pod
+gave up waiting (or Kubernetes' own `SIGKILL` arrived first) before the
+race could finish naturally, losing that room's state exactly like an
+ungraceful crash would. Fixed by raising `shutdownTimeout` to **2
+minutes** (`cmd/server/run.go`) and `terminationGracePeriodSeconds` to
+**150s** (`k8s-race-service-deploy.md`'s `statefulset.yaml`) — confirmed
+against a real re-run afterward: the same rollout now delivers
+`race_finished` to both clients. A genuinely long race (e.g.
+`project-overview.md` §3's own `distance_meters: 1000` example) still
+would not fully survive a graceful rollout within this larger budget —
+an accepted, disclosed limitation, the same category as this project's
+other bounded scope decisions (single Redis/NATS instance), not silently
+pretended away.
 
 ### Readiness vs. liveness — resolving gap 3 from `phase-5-plan.md`
 

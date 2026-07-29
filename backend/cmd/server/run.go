@@ -31,10 +31,24 @@ import (
 // in-flight REST requests, then waiting for any still-running room
 // actors to finish naturally (graceful-shutdown.md's product decision:
 // let in-progress races finish rather than force-cancelling them the
-// instant SIGTERM arrives) — comfortably inside Kubernetes' default 30s
-// terminationGracePeriodSeconds. The two numbers must agree once
-// k8s-race-service-deploy.md sets the manifest side.
-const shutdownTimeout = 25 * time.Second
+// instant SIGTERM arrives).
+//
+// Corrected after a real rolling-update run
+// (multi-instance-k8s-verification.md) found the original 25s budget
+// too short for entirely ordinary races, not just extreme ones: this
+// project's own default k6 scenario (load/scenarios/race-lifecycle.js)
+// uses a 30-word race, which alone averages ~36s to finish at realistic
+// telemetry pacing (project-overview.md §4.2's 0.4-2s per word) — comfortably
+// longer than the old budget. 2 minutes covers ordinary short-to-medium
+// races with real margin. A genuinely long race (e.g. project-overview.md
+// §3's own distance_meters: 1000 example) still would not fully survive a
+// graceful rollout within this budget — an accepted, disclosed limitation,
+// the same category as this project's other bounded scope decisions
+// (single Redis/NATS instance), not silently pretended away.
+// terminationGracePeriodSeconds must comfortably exceed this; the two
+// numbers must agree, confirmed against k8s-race-service-deploy.md's and
+// k8s-ws-gateway-deploy.md's actual manifest values, not assumed.
+const shutdownTimeout = 2 * time.Minute
 
 // roomDrainPollInterval is how often Run rechecks whether every room
 // actor has finished during shutdown — small relative to

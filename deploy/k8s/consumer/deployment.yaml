@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: aviron
+spec:
+  # No horizontal-scaling story needed here — a Kafka consumer group
+  # already handles partition rebalancing if this were ever scaled up
+  # (internal/consumer's two GroupIDs), and nothing about this phase
+  # requires exercising that.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      # No http.Server.Shutdown involved here (cmd/consumer never opens
+      # one) — just the fetch loops draining on ctx cancellation
+      # (graceful-shutdown.md), which return promptly. Tighter than
+      # race-service's/ws-gateway's 30s.
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: consumer
+          image: aviron-backend:local
+          imagePullPolicy: IfNotPresent
+          # The shared image's own CMD defaults to /app/server — override
+          # to run the consumer binary instead, same as
+          # docker-compose.yml's own `command: ["/app/consumer"]`.
+          command: ["/app/consumer"]
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: aviron-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: aviron-secret
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres.aviron.svc.cluster.local:5432/aviron?sslmode=disable"
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: KAFKA_BROKERS
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # No readinessProbe/livenessProbe: this binary exposes no HTTP
+          # surface at all (confirmed by reading cmd/consumer/run.go — no
+          # http.ListenAndServe call), and there's no Service routing
+          # traffic to it for a readinessProbe to gate anyway. An exec
+          # probe (e.g. pgrep) was considered but rejected as inventing
+          # a signal this binary has no other reason to expose —
+          # restartPolicy: Always's own crash-detection (the Deployment
+          # default) is a sufficient substitute for a local kind cluster.

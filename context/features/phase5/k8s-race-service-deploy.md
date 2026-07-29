@@ -71,10 +71,16 @@ race-service/
 - `livenessProbe`: `httpGet /livez` (`graceful-shutdown.md`'s new,
   dependency-free endpoint) — a Postgres blip must not cause `kubelet` to
   restart an otherwise-healthy pod.
-- `terminationGracePeriodSeconds` set to comfortably exceed
-  `graceful-shutdown.md`'s `Shutdown(ctx)` timeout (e.g. 30s against a 25s
-  internal timeout) — the two numbers must agree; confirm the exact
-  values chosen there before setting this one.
+- `terminationGracePeriodSeconds: 150`, set to comfortably exceed
+  `graceful-shutdown.md`'s `Shutdown(ctx)` timeout. **Corrected from an
+  original 30s/25s pair** — `multi-instance-k8s-verification.md`'s own
+  first live run found 25s too short for entirely ordinary races (this
+  project's own default k6 scenario, a 30-word race, already averages
+  ~36s to finish), losing a room's state on a graceful rollout the same
+  way an ungraceful crash would. See `graceful-shutdown.md`'s own
+  "Correction" note for the full trace; the two numbers (2 minutes
+  internal, 150s here) must still agree with each other, not chosen
+  independently.
 - `resources.requests`/`limits` — proportionate to a laptop `kind`
   cluster, same reasoning as `k8s-core-infra.md`'s dependencies.
 - Env: `DATABASE_URL`/`REDIS_URL`/`NATS_URL`/`KAFKA_BROKERS`/`JWT_SECRET`/
