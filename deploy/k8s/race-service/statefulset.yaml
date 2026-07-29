@@ -30,15 +30,23 @@ spec:
             - containerPort: 8080
               name: http
           env:
-            # INSTANCE_ID from the downward API — a pod's own name is
-            # already a stable, human-legible identity for its lifetime
-            # (race-service-0/race-service-1), unlike
-            # internal/config.getEnvInstanceID's crypto/rand fallback —
-            # legible in both kubectl logs and redis-cli GET room:<id>.
-            - name: INSTANCE_ID
+            # INSTANCE_ID must be the pod's fully-qualified, actually
+            # dialable stable DNS name (matching docker-compose.yml's own
+            # INSTANCE_ID: server-a:8080 convention: a real address, not
+            # just an identity label) — ws-gateway's REST routing dials
+            # Owner()'s stored value directly. The downward API alone only
+            # gives the bare pod name (race-service-0), which is not
+            # resolvable on its own; POD_NAME + the headless Service's
+            # DNS suffix composes the real, dialable name. Confirmed the
+            # hard way: a bare pod name here produces "no such host"
+            # errors in ws-gateway's REST proxy the instant a room-scoped
+            # request needs to route to its actual owner.
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: INSTANCE_ID
+              value: "$(POD_NAME).race-service.aviron.svc.cluster.local:8080"
             - name: PORT
               value: "8080"
             - name: POSTGRES_USER

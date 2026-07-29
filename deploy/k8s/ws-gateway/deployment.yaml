@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ws-gateway
+  namespace: aviron
+spec:
+  # Matches docker-compose.yml's own two-gateway topology, and the exact
+  # topology load/multi-instance-check.md already proved by hand.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ws-gateway
+  template:
+    metadata:
+      labels:
+        app: ws-gateway
+    spec:
+      # cmd/ws-gateway's own shutdownTimeout (25s) + connFlushWindow
+      # (500ms) is slightly larger than race-service's internal budget —
+      # 30s still leaves a healthy margin, confirmed against the actual
+      # constants in cmd/ws-gateway/run.go, not assumed.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ws-gateway
+          image: aviron-backend:local
+          imagePullPolicy: IfNotPresent
+          # The shared image's own CMD defaults to /app/server —
+          # override it to run the gateway binary instead, same as
+          # docker-compose.yml's own `command: ["/app/ws-gateway"]`.
+          command: ["/app/ws-gateway"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: WS_GATEWAY_LISTEN_ADDR
+              value: ":8080"
+            # Static list of race-service's two stable StatefulSet DNS
+            # names (k8s-race-service-deploy.md) — per-binary, not the
+            # shared ConfigMap. MUST be updated by hand if
+            # race-service's replicas ever changes; this is the one
+            # value in this whole phase most likely to silently drift
+            # out of sync with reality (phase-5-plan.md's own Notes).
+            - name: RACE_SERVICE_INSTANCES
+              value: "race-service-0.race-service.aviron.svc.cluster.local:8080,race-service-1.race-service.aviron.svc.cluster.local:8080"
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: REDIS_URL
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: NATS_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aviron-secret
+                  key: JWT_SECRET
+            - name: CORS_ALLOWED_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: aviron-config
+                  key: CORS_ALLOWED_ORIGIN
+          # Readiness: internal/wsgateway/healthz.go's existing Redis +
+          # NATS check.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          # Liveness: the new, dependency-free /livez (graceful-shutdown.md)
+          # — a transient Redis/NATS blip must not make kubelet restart an
+          # otherwise-healthy gateway pod.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi

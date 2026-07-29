@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-gateway
+  namespace: aviron
+spec:
+  # Normal ClusterIP, not headless — ws-gateway is stateless (no
+  # INSTANCE_ID-equivalent, no per-pod identity needed), so ordinary
+  # load-balancing across replicas is exactly right here, unlike
+  # race-service's headless Service.
+  selector:
+    app: ws-gateway
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

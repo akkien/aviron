@@ -1,0 +1,29 @@
+# kind cluster config for this project — not a kubectl-applied manifest
+# (that's what deploy/k8s/ is for), this configures the cluster itself.
+#
+# Maps host ports 80/443 onto the control-plane node and labels it
+# ingress-ready, per kind's own documented ingress-nginx quick-start
+# (https://kind.sigs.k8s.io/docs/user/ingress/) — k8s-ws-gateway-deploy.md
+# needs a real Ingress reachable from the host machine (the React
+# frontend runs on the host, never moved into the cluster per
+# project-overview.md §11), which a plain `kind create cluster` with no
+# port mappings can't provide.
+#
+# Usage: kind create cluster --name aviron --config deploy/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

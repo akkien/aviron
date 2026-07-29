@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ws-gateway
+  namespace: aviron
+  annotations:
+    # ws-gateway's own WSHandler.ServeHTTP does the WebSocket upgrade
+    # itself — nginx just needs to not time out an otherwise-idle
+    # long-lived connection while a race is in progress.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    # No host restriction — reachable directly at http://localhost/ once
+    # kind's own hostPort mapping (deploy/kind-config.yaml) is in place,
+    # so VITE_API_URL can point straight at it without needing a
+    # host-header/DNS entry for local dev.
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ws-gateway
+                port:
+                  number: 8080
