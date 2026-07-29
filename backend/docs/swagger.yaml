@@ -32,6 +32,21 @@ definitions:
       id:
         type: string
     type: object
+  internal_leaderboard.LeaderboardEntryResponse:
+    properties:
+      avg_wpm:
+        type: number
+      display_name:
+        type: string
+      races:
+        type: integer
+      rank:
+        type: integer
+      user_id:
+        type: string
+      wins:
+        type: integer
+    type: object
   internal_leaderboard.LeaderboardMeResponse:
     properties:
       avg_wpm:
@@ -40,6 +55,19 @@ definitions:
         type: integer
       races_won:
         type: integer
+    type: object
+  internal_leaderboard.LeaderboardTopResponse:
+    properties:
+      entries:
+        items:
+          $ref: '#/definitions/internal_leaderboard.LeaderboardEntryResponse'
+        type: array
+      page:
+        type: integer
+      total_pages:
+        type: integer
+      window:
+        type: string
     type: object
   internal_race.createRaceRequest:
     properties:
@@ -229,7 +257,7 @@ paths:
       - auth
   /healthz:
     get:
-      description: Pings the database connection pool and reports service health
+      description: Pings the database connection pool and reports service readiness
       produces:
       - application/json
       responses:
@@ -240,14 +268,49 @@ paths:
               type: string
             type: object
         "503":
-          description: 'status: db_unreachable'
+          description: 'status: shutting_down'
           schema:
             additionalProperties:
               type: string
             type: object
-      summary: Health check
+      summary: Readiness check
       tags:
       - system
+  /leaderboard:
+    get:
+      description: Returns one page (5 entries) of the requested window, ranked by
+        wins (avg WPM as tiebreaker).
+      parameters:
+      - description: alltime or weekly
+        in: query
+        name: window
+        required: true
+        type: string
+      - description: 1-indexed page number (default 1)
+        in: query
+        name: page
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_leaderboard.LeaderboardTopResponse'
+        "400":
+          description: field-keyed validation errors
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: 'error: unauthorized'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get the ranked leaderboard
+      tags:
+      - leaderboard
   /leaderboard/me:
     get:
       description: Returns the caller's own races-joined/races-won/avg-WPM stats.
@@ -268,6 +331,25 @@ paths:
       summary: Get my leaderboard stats
       tags:
       - leaderboard
+  /livez:
+    get:
+      description: 'Reports 200 as long as this process is running and able to answer
+        requests at all — no dependency checks, deliberately: a livenessProbe wired
+        to a dependency check would make kubelet restart an otherwise-healthy pod
+        over a transient Postgres blip, not just remove it from Service rotation the
+        way a failed readinessProbe correctly does.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'status: ok'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness check
+      tags:
+      - system
   /races:
     get:
       description: Returns pending, joinable races the caller hasn't already created

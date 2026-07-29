@@ -110,14 +110,14 @@ const docTemplate = `{
         },
         "/healthz": {
             "get": {
-                "description": "Pings the database connection pool and reports service health",
+                "description": "Pings the database connection pool and reports service readiness",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "system"
                 ],
-                "summary": "Health check",
+                "summary": "Readiness check",
                 "responses": {
                     "200": {
                         "description": "status: ok",
@@ -129,7 +129,58 @@ const docTemplate = `{
                         }
                     },
                     "503": {
-                        "description": "status: db_unreachable",
+                        "description": "status: shutting_down",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/leaderboard": {
+            "get": {
+                "description": "Returns one page (5 entries) of the requested window, ranked by wins (avg WPM as tiebreaker).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "leaderboard"
+                ],
+                "summary": "Get the ranked leaderboard",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "alltime or weekly",
+                        "name": "window",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "1-indexed page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_leaderboard.LeaderboardTopResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "field-keyed validation errors",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "error: unauthorized",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -159,6 +210,29 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "error: unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/livez": {
+            "get": {
+                "description": "Reports 200 as long as this process is running and able to answer requests at all — no dependency checks, deliberately: a livenessProbe wired to a dependency check would make kubelet restart an otherwise-healthy pod over a transient Postgres blip, not just remove it from Service rotation the way a failed readinessProbe correctly does.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Liveness check",
+                "responses": {
+                    "200": {
+                        "description": "status: ok",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -558,6 +632,29 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_leaderboard.LeaderboardEntryResponse": {
+            "type": "object",
+            "properties": {
+                "avg_wpm": {
+                    "type": "number"
+                },
+                "display_name": {
+                    "type": "string"
+                },
+                "races": {
+                    "type": "integer"
+                },
+                "rank": {
+                    "type": "integer"
+                },
+                "user_id": {
+                    "type": "string"
+                },
+                "wins": {
+                    "type": "integer"
+                }
+            }
+        },
         "internal_leaderboard.LeaderboardMeResponse": {
             "type": "object",
             "properties": {
@@ -569,6 +666,26 @@ const docTemplate = `{
                 },
                 "races_won": {
                     "type": "integer"
+                }
+            }
+        },
+        "internal_leaderboard.LeaderboardTopResponse": {
+            "type": "object",
+            "properties": {
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_leaderboard.LeaderboardEntryResponse"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "total_pages": {
+                    "type": "integer"
+                },
+                "window": {
+                    "type": "string"
                 }
             }
         },
