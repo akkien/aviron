@@ -1,0 +1,22 @@
+# CPU-based; per-instance floor matches the two-gateway topology proven
+# as a permanent baseline; ceiling is generous headroom for a laptop
+# kind cluster, not a real capacity estimate.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ws-gateway
+  namespace: aviron
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ws-gateway
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

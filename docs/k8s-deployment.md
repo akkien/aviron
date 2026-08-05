@@ -8,37 +8,38 @@ companion to `context/features/phase5/phase-5-plan.md` (the roadmap) and
 was built from) — those two explain *why* each choice was made; this doc
 is just the commands.
 
-**Current scope**: only core infrastructure (Postgres, Redis, NATS,
-Kafka) is deployed today. This project's own binaries
-(`race-service`/`ws-gateway`/`consumer`) don't have Kubernetes manifests
-yet — that's `k8s-race-service-deploy.md`, `k8s-ws-gateway-deploy.md`, and
-`k8s-consumer-deploy.md` in `phase-5-plan.md`'s build order. This doc gets
-a "Deploying `race-service`/`ws-gateway`/`consumer`" section once those
-land.
+**Current scope**: the whole stack — Postgres, Redis, NATS, Kafka, and
+this project's own three binaries (`race-service`, `ws-gateway`,
+`consumer`) — is deployed, autoscaled, and verified against a real
+cluster. Every step below is what actually stood it up, in the order
+that actually works (each binary depends on the one before it being
+reachable).
 
 ## What's running today
 
 ```text
-                         Namespace: aviron
-   ┌───────────────────────────────────────────────────────────┐
-   │                                                             │
-   │   postgres-0                       redis                  │
-   │   (StatefulSet, 1Gi PVC)            (Deployment)            │
-   │        │                                │                  │
-   │   Service: postgres                 Service: redis         │
-   │   (headless)                                                │
-   │                                                             │
-   │   nats                              aviron-kafka-controller-0 │
-   │   (Deployment)                       (Helm: Bitnami chart,   │
-   │        │                              StatefulSet under the  │
-   │   Service: nats                       hood — see Components) │
-   │                                            │                │
-   │                                       Service: aviron-kafka  │
-   │                                                             │
-   └───────────────────────────────────────────────────────────┘
-
-   race-service / ws-gateway / consumer — not deployed yet, see
-   "Current scope" above.
+                        Namespace: aviron
++---------------------------------------------------------------+
+| Ingress: ws-gateway (nginx)  ->  http://localhost/            |
+|    |                                                          |
+| ws-gateway x2 (Deployment, HPA 2-5)                           |
+|    Service: ws-gateway                                        |
+|    ServiceAccount + Role (EndpointSlice watch)                |
+|    |                                                          |
+|    | discovers dynamically                                    |
+|    v                                                          |
+| race-service x2 (StatefulSet, HPA 2-5)                        |
+|    Service: race-service (headless)                           |
+|    |                                                          |
+|    +---------+---------+----------------------+               |
+|    v         v         v                      v               |
+| postgres-0  redis     nats     aviron-kafka-controller-0      |
+| (StatefulSet (Deploy-  (Deploy-  (Helm: Bitnami chart,        |
+|  Set, PVC)    ment)     ment)     StatefulSet under the hood) |
+|                                                               |
+| consumer (Deployment, 1 replica, no Service)                  |
+|    reads Kafka, writes Postgres                               |
++---------------------------------------------------------------+
 ```
 
 ## Prerequisites
@@ -53,8 +54,25 @@ land.
 
 ## Creating the cluster
 
+Use `deploy/kind-config.yaml`, not a plain `kind create cluster` — it
+maps host ports 80/443 onto the node and labels it `ingress-ready=true`,
+both required for `ws-gateway`'s real `Ingress` to be reachable from the
+host at all (a plain `kind create cluster` has no port mapping for
+either):
+
 ```sh
-kind create cluster --name aviron
+kind create cluster --name aviron --config deploy/kind-config.yaml
+```
+
+Install the `nginx` ingress controller itself — it's a cluster addon,
+not something `kubectl apply -f deploy/k8s/` provisions:
+
+```sh
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=180s
 ```
 
 `backend/Dockerfile` already builds all three of this project's binaries
@@ -67,8 +85,11 @@ docker build -t aviron-backend:local ./backend
 kind load docker-image aviron-backend:local --name aviron
 ```
 
-Nothing consumes this image yet (see "Current scope" above) — this step
-just gets it in place ahead of the specs that will.
+Whenever the backend code changes, both of those commands need to be
+re-run, followed by a rollout restart of whatever's already running the
+old image (see "A rebuilt backend image doesn't seem to take effect" in
+Troubleshooting) — `kind` doesn't share the host's Docker build cache or
+watch for rebuilds automatically.
 
 ## Deploying core infrastructure
 
@@ -129,6 +150,62 @@ you go changing them:
   chart's default in place would make `race-service`/`consumer` fail to
   authenticate.
 
+## Deploying `race-service`
+
+Needs Postgres/Redis/NATS/Kafka already up (above) — apply the
+`StatefulSet` and its headless `Service`:
+
+```sh
+kubectl apply -f deploy/k8s/race-service/statefulset.yaml -f deploy/k8s/race-service/service.yaml
+kubectl wait --for=condition=Ready pod -l app=race-service -n aviron --timeout=120s
+```
+
+`replicas: 2` is fixed in the manifest itself, matching the two-instance
+topology `multi-instance-k8s-verification.md` proved — the
+`HorizontalPodAutoscaler` in "Autoscaling" below takes over managing the
+actual replica count once applied, this is just the starting point.
+
+## Deploying `ws-gateway`
+
+Depends on `race-service` already being up — `ws-gateway` discovers its
+pods dynamically via a Kubernetes `EndpointSlice` watch
+(`dynamic-backend-discovery.md`), which needs its own RBAC applied
+first:
+
+```sh
+kubectl apply -f deploy/k8s/ws-gateway/rbac.yaml
+kubectl apply -f deploy/k8s/ws-gateway/deployment.yaml -f deploy/k8s/ws-gateway/service.yaml -f deploy/k8s/ws-gateway/ingress.yaml
+kubectl wait --for=condition=Ready pod -l app=ws-gateway -n aviron --timeout=120s
+```
+
+Confirm the `Ingress` actually resolves (needs `deploy/kind-config.yaml`
+and the `nginx` controller from "Creating the cluster" above — without
+both, this hangs or connection-refuses):
+
+```sh
+curl -i http://localhost/healthz
+```
+
+`ingress.yaml`'s two annotations
+(`nginx.ingress.kubernetes.io/proxy-read-timeout`/`-send-timeout`,
+both `"3600"`) aren't optional tuning — without them, `nginx` applies
+its own default proxy timeout to an idle-but-open connection and kills
+a live WebSocket mid-race; `ws-gateway`'s own `WSHandler` already does
+the upgrade itself, `nginx` just has to get out of the way for as long
+as a race can run.
+
+## Deploying `consumer`
+
+No dependency on `race-service`/`ws-gateway` — only needs Postgres/Kafka.
+No `Service` (it exposes no HTTP surface, confirmed by reading
+`cmd/consumer/run.go` — no `http.ListenAndServe` call), so nothing to
+wait on beyond the pod itself:
+
+```sh
+kubectl apply -f deploy/k8s/consumer/deployment.yaml
+kubectl wait --for=condition=Ready pod -l app=consumer -n aviron --timeout=60s
+```
+
 ## Components
 
 Quick reference — especially the DNS names, which are exactly what you'd
@@ -140,6 +217,9 @@ need when debugging a connection issue from inside the cluster:
 | Redis | `Deployment` | `redis:7-alpine` | 6379 | `redis.aviron.svc.cluster.local` | None — self-healing TTL data |
 | NATS | `Deployment` | `nats:2-alpine` | 4222 (client), 8222 (monitor) | `nats.aviron.svc.cluster.local` | None — NATS Core, no JetStream |
 | Kafka | Helm release (`bitnami/kafka`, `StatefulSet` under the hood) | `bitnamilegacy/kafka:4.0.0-debian-12-r10` | 9092 | `aviron-kafka.aviron.svc.cluster.local` | None — `persistence.enabled: false` |
+| `race-service` | `StatefulSet` (2-5, HPA) | `aviron-backend:local` (`/app/server`) | 8080 | `race-service-<N>.race-service.aviron.svc.cluster.local` (headless) | None — no room state survives a restart by design |
+| `ws-gateway` | `Deployment` (2-5, HPA) | `aviron-backend:local` (`/app/ws-gateway`) | 8080 | `ws-gateway.aviron.svc.cluster.local`; externally `http://localhost/` via `Ingress` | None — stateless |
+| `consumer` | `Deployment` (1) | `aviron-backend:local` (`/app/consumer`) | none — no `Service` | n/a | None |
 
 ## Verifying it's actually working
 
@@ -166,9 +246,117 @@ kubectl exec -n aviron aviron-kafka-controller-0 -c kafka -- \
 # -> lists broker id: 0 with its supported API version ranges
 ```
 
-Postgres migration status isn't checked here — nothing has run
-`db.Migrate` yet, since no binary is deployed (see "Current scope"). That
-check belongs to whichever spec actually deploys `race-service`.
+Postgres migrations run automatically on `race-service`'s own startup
+(`db.Migrate`, `cmd/server/run.go`) — confirmed by their presence in
+`workout_samples`/`race_participants` etc. once a real race finishes,
+not checked separately here.
+
+This project's own three binaries, plus one real end-to-end flow through
+all of them:
+
+```sh
+# race-service / ws-gateway readiness (dependency-checking) and liveness
+# (dependency-free) endpoints — both should be 200
+curl -i http://localhost/healthz
+curl -i http://localhost/livez
+
+# consumer has no HTTP surface to curl — confirm it's actually consuming
+# by checking its own logs for a batch flush after a race finishes
+kubectl logs -n aviron -l app=consumer --tail=20
+
+# The real proof: register, create, start, and finish a race entirely
+# through the Ingress, then confirm the row landed in Postgres
+kubectl exec -n aviron postgres-0 -- psql -U aviron -d aviron \
+  -c "select count(*) from race_participants;"
+```
+
+## Autoscaling (`HorizontalPodAutoscaler`)
+
+`race-service` and `ws-gateway` both scale on CPU utilization
+(`k8s-hpa.md` — `race-service`'s own manifest, `deploy/k8s/race-service/hpa.yaml`,
+targets its `StatefulSet`; `ws-gateway`'s, `deploy/k8s/ws-gateway/hpa.yaml`,
+targets its `Deployment`). Redis/Postgres/Kafka are deliberately not
+autoscaled — see that spec's "What about Redis, Postgres, Kafka?" section
+for why.
+
+**One-time prerequisite**: `metrics-server` isn't part of a plain `kind`
+cluster and has to be installed once per cluster:
+
+```sh
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl patch deployment metrics-server -n kube-system --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+The patch is `kind`-specific: kubelet's serving certs on a `kind` node
+aren't signed by a CA `metrics-server` trusts by default, so without
+`--kubelet-insecure-tls` it stays permanently unable to scrape. Confirm
+it's actually serving before relying on it for anything —
+`kubectl top nodes`/`kubectl top pods -n aviron` should return real
+numbers, not an error.
+
+**Applying the HPAs** — not automatic, and not part of "Deploying
+`race-service`"/"Deploying `ws-gateway`" above on purpose: they're
+useless without `metrics-server` already serving, so apply them only
+once the prerequisite above is confirmed working:
+
+```sh
+kubectl apply -f deploy/k8s/race-service/hpa.yaml -f deploy/k8s/ws-gateway/hpa.yaml
+```
+
+**Reading HPA status**:
+
+```sh
+kubectl get hpa -n aviron
+```
+
+```text
+NAME           REFERENCE                  TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+race-service   StatefulSet/race-service   cpu: 1%/70%   2         5         2          25m
+ws-gateway     Deployment/ws-gateway      cpu: 2%/70%   2         5         5          25m
+```
+
+- `TARGETS` showing `<unknown>` instead of a percentage means
+  `metrics-server` isn't serving yet (or was never installed) — not an
+  HPA misconfiguration, check the prerequisite above first.
+- `REPLICAS` only climbs above `MINPODS` under real sustained load; it
+  settles back down on its own once load stops, but not instantly —
+  `autoscaling/v2`'s default 5-minute `scaleDown.stabilizationWindowSeconds`
+  means a replica count can stay elevated for a while after CPU has
+  already dropped, by design (avoids flapping on a brief lull).
+- `kubectl get hpa -n aviron -w` to watch it live during a load test.
+
+**Generating enough load to see it actually scale**: `race-service` and
+`ws-gateway` respond very differently to the same traffic —
+`race-service` is the CPU-heavy side under a normal race workload (room
+actor ticking + broadcast fan-out), while `ws-gateway` is a thin proxy
+that stays cheap under that same workload and needs its own dedicated
+REST-proxy burst to cross 70%:
+
+```sh
+# race-service: real races via k6 (this project's own documented default —
+# NUM_RACES=8 VUS_PER_RACE=8 also works for load, but pushes setup() close
+# to k6's own 60s default setup timeout; 5/8 stays comfortably under it)
+BASE_URL=http://localhost NUM_RACES=5 VUS_PER_RACE=8 k6 run load/scenarios/race-lifecycle.js
+
+# ws-gateway: a raw REST-proxy burst (room-less path, no simulation cost).
+# $TOKEN is any valid JWT — register + log in once to get one:
+#   curl -s -X POST http://localhost/auth/register -H "Content-Type: application/json" \
+#     -d '{"email":"loadtest@example.com","password":"loadtest-pw-1","display_name":"Load Test"}'
+#   TOKEN=$(curl -s -X POST http://localhost/auth/login -H "Content-Type: application/json" \
+#     -d '{"email":"loadtest@example.com","password":"loadtest-pw-1"}' | jq -r .token)
+ab -n 60000 -c 150 -H "Authorization: Bearer $TOKEN" http://localhost/races
+```
+
+**Scale-down safety**: a `HorizontalPodAutoscaler`-triggered scale-down
+uses the exact same Pod-deletion path `kubectl delete pod` does — so
+`kubectl delete pod race-service-<N>` while it owns an in-progress race
+is a faithful, controllable stand-in for testing the real thing without
+waiting on the stabilization window. Watch its logs for the sequence
+`graceful-shutdown.md` designed: `shutdown signal received` →
+`waiting for in-progress races to finish` → (room keeps broadcasting) →
+`shutdown complete`, only after the room actually finishes — not cut off
+mid-race.
 
 ## Maintaining the cluster
 
@@ -247,9 +435,15 @@ check belongs to whichever spec actually deploys `race-service`.
 ## Shutting down
 
 Tear down one piece at a time if you just want to reclaim resources but
-keep iterating:
+keep iterating — delete the `HorizontalPodAutoscaler`s first, or a
+scale-down attempt can race the rest of the teardown:
 
 ```sh
+kubectl delete -f deploy/k8s/race-service/hpa.yaml -f deploy/k8s/ws-gateway/hpa.yaml
+kubectl delete -f deploy/k8s/consumer/deployment.yaml
+kubectl delete -f deploy/k8s/ws-gateway/ingress.yaml -f deploy/k8s/ws-gateway/service.yaml -f deploy/k8s/ws-gateway/deployment.yaml
+kubectl delete -f deploy/k8s/ws-gateway/rbac.yaml
+kubectl delete -f deploy/k8s/race-service/service.yaml -f deploy/k8s/race-service/statefulset.yaml
 helm uninstall aviron-kafka -n aviron
 kubectl delete -f deploy/k8s/nats/
 kubectl delete -f deploy/k8s/redis/

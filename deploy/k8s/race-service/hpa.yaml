@@ -1,0 +1,23 @@
+# Same shape as ws-gateway/hpa.yaml, targeting the StatefulSet instead
+# of the Deployment (autoscaling/v2 scales anything exposing a /scale
+# subresource). Safe because ws-gateway discovers race-service pods
+# dynamically instead of reading a static instance list.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: race-service
+  namespace: aviron
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: race-service
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

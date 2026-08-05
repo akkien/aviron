@@ -181,12 +181,15 @@ left its own §2/§8 correction as a pending follow-up.
 
 ## Explicitly out of scope
 
-- **HPA.** §7 offers it as optional ("strong plus"); if pursued at all,
-  document the intended metric (connection count, via the already-exposed
-  `aviron_connections_active` — the original `k8s-race-service-deploy.md`'s
-  own reasoning) without necessarily wiring a working Prometheus
-  Adapter/KEDA setup. Same accepted stopping point that spec already
-  chose.
+- **HPA.** §7 offers it as optional ("strong plus"). **No longer open —
+  see `k8s-hpa.md`**: `aviron_connections_active` doesn't actually exist
+  (removed from `race-service` when connections moved to `ws-gateway`,
+  never rebuilt there — that spec confirms it by reading
+  `internal/metrics/metrics.go` directly), so it targets CPU utilization
+  via the standard Kubernetes metrics-server instead, and only against
+  `ws-gateway` — `race-service` turns out to be unsafe to autoscale under
+  today's static `RACE_SERVICE_INSTANCES` discovery, a real constraint
+  that spec found and left as its own open question.
 - **Helm chart packaging.** Plain `deploy/k8s/` manifests, same call the
   original plan made — revisit only if the tree becomes unwieldy in
   practice.
