@@ -6,11 +6,11 @@
 4. Reset current-feature.md:
    - Change H1 back to `# Current Feature`
    - Clear Goals, Explain, Plan, and Notes sections (keep placeholder comments)
-5. Prepend the feature summary to the top of the entries in
-   context/feature-history.md (newest first), just under its own
-   heading/intro — current-feature.md no longer has a History section of
-   its own (moved out 2026-07-26 once it grew large enough to hit
-   read-truncation limits)
+5. Append the feature summary to the bottom of the entries in
+   context/feature-history.md (oldest first, reordered 2026-08-05) —
+   current-feature.md no longer has a History section of its own (moved
+   out 2026-07-26 once it grew large enough to hit read-truncation
+   limits)
 6. Commit both files together: `chore: reset current-feature.md after completing [feature]`
 7. Ask user for confirmation before pushing, then push main to origin ONCE (single push with all changes)
 8. If feature branch was previously pushed, delete it from origin
