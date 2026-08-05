@@ -3,21 +3,32 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/akkien/aviron/internal/redisclient"
 	"github.com/akkien/aviron/internal/roomlocator"
 	"github.com/akkien/aviron/internal/roomrelay"
 	"github.com/akkien/aviron/internal/wsgateway"
 )
+
+// inClusterNamespaceFile is where every pod's mounted ServiceAccount
+// exposes its own namespace — reading it directly avoids a new
+// POD_NAMESPACE downward-API env var (dynamic-backend-discovery.md),
+// unlike race-service's POD_NAME, which needed the downward API because
+// nothing else already exposed that value to the container.
+const inClusterNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 // shutdownTimeout bounds how long Shutdown waits for in-flight ServeHTTP
 // calls (REST proxy requests and WebSocket connections alike) to return
@@ -56,7 +67,12 @@ func Run(cfg wsgateway.Config) {
 	defer natsConn.Close()
 	relay := roomrelay.NewBus(natsConn)
 
-	gw := wsgateway.NewGateway(locator, cfg.Backends, cfg.CacheTTL, logger)
+	discovery, err := newBackendDiscovery(ctx, cfg, logger)
+	if err != nil {
+		log.Fatalf("backend discovery: %v", err)
+	}
+
+	gw := wsgateway.NewGateway(locator, discovery, cfg.CacheTTL, logger)
 	go gw.WatchRoomEvents(ctx)
 
 	hubs := wsgateway.NewRaceHubRegistry(ctx, relay, logger)
@@ -64,7 +80,7 @@ func Run(cfg wsgateway.Config) {
 
 	gate := &wsgateway.ReadinessGate{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", wsgateway.NewHealthzHandler(redisClient, natsConn, gate))
+	mux.HandleFunc("GET /healthz", wsgateway.NewHealthzHandler(redisClient, natsConn, discovery, gate))
 	mux.HandleFunc("GET /livez", wsgateway.NewLivezHandler())
 	mux.Handle("GET /ws", wsHandler)
 	mux.Handle("/", gw)
@@ -108,4 +124,48 @@ func Run(cfg wsgateway.Config) {
 	} else {
 		logger.Info("shutdown complete")
 	}
+}
+
+// newBackendDiscovery decides StaticBackends vs. K8sBackendDiscovery by
+// whether rest.InClusterConfig succeeds — no new env var
+// (dynamic-backend-discovery.md): RACE_SERVICE_INSTANCES stays required
+// for local go run/docker-compose (where InClusterConfig always fails)
+// and is simply unused in-cluster (where it succeeds).
+func newBackendDiscovery(ctx context.Context, cfg wsgateway.Config, logger *slog.Logger) (wsgateway.BackendDiscovery, error) {
+	restCfg, err := rest.InClusterConfig()
+	if errors.Is(err, rest.ErrNotInCluster) {
+		logger.Info("wsgateway: not running in-cluster, using static RACE_SERVICE_INSTANCES")
+		return wsgateway.StaticBackends(cfg.Backends), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("build k8s clientset: %w", err)
+	}
+
+	nsBytes, err := os.ReadFile(inClusterNamespaceFile)
+	if err != nil {
+		return nil, fmt.Errorf("read in-cluster namespace: %w", err)
+	}
+	namespace := strings.TrimSpace(string(nsBytes))
+
+	discovery, err := wsgateway.NewK8sBackendDiscovery(ctx, clientset, namespace, logger)
+	if err != nil {
+		return nil, fmt.Errorf("start k8s backend discovery: %w", err)
+	}
+
+	logger.Info("wsgateway: running in-cluster, using dynamic EndpointSlice discovery", slog.String("namespace", namespace))
+
+	// Blocks startup until the informer's first List completes — this
+	// process must not start serving room-less traffic against an empty
+	// backend pool (dynamic-backend-discovery.md's "Readiness: don't
+	// accept traffic before the first list lands").
+	if !discovery.WaitForSync(ctx) {
+		return nil, fmt.Errorf("k8s backend discovery: informer sync did not complete")
+	}
+
+	return discovery, nil
 }

@@ -33,7 +33,7 @@ func newHealthyNATS(t *testing.T) *nats.Conn {
 }
 
 func TestHealthz_OKWhenBothReachable(t *testing.T) {
-	handler := NewHealthzHandler(newHealthyRedis(t), newHealthyNATS(t), &ReadinessGate{})
+	handler := NewHealthzHandler(newHealthyRedis(t), newHealthyNATS(t), StaticBackends(nil), &ReadinessGate{})
 
 	w := httptest.NewRecorder()
 	handler(w, httptest.NewRequest("GET", "/healthz", nil))
@@ -52,7 +52,7 @@ func TestHealthz_ServiceUnavailableWhenRedisUnreachable(t *testing.T) {
 	defer redisClient.Close()
 	mr.Close() // Redis now unreachable; NATS stays fine.
 
-	handler := NewHealthzHandler(redisClient, newHealthyNATS(t), &ReadinessGate{})
+	handler := NewHealthzHandler(redisClient, newHealthyNATS(t), StaticBackends(nil), &ReadinessGate{})
 
 	w := httptest.NewRecorder()
 	handler(w, httptest.NewRequest("GET", "/healthz", nil))
@@ -81,7 +81,7 @@ func TestHealthz_ServiceUnavailableWhenNATSUnreachable(t *testing.T) {
 		t.Fatal("setup failed: nats connection still reports CONNECTED after server shutdown")
 	}
 
-	handler := NewHealthzHandler(newHealthyRedis(t), nc, &ReadinessGate{})
+	handler := NewHealthzHandler(newHealthyRedis(t), nc, StaticBackends(nil), &ReadinessGate{})
 
 	w := httptest.NewRecorder()
 	handler(w, httptest.NewRequest("GET", "/healthz", nil))
@@ -98,7 +98,7 @@ func TestHealthz_ShuttingDown(t *testing.T) {
 	gate := &ReadinessGate{}
 	gate.MarkShuttingDown()
 
-	handler := NewHealthzHandler(newHealthyRedis(t), newHealthyNATS(t), gate)
+	handler := NewHealthzHandler(newHealthyRedis(t), newHealthyNATS(t), StaticBackends(nil), gate)
 
 	w := httptest.NewRecorder()
 	handler(w, httptest.NewRequest("GET", "/healthz", nil))
@@ -108,6 +108,34 @@ func TestHealthz_ShuttingDown(t *testing.T) {
 	}
 	if body := w.Body.String(); !strings.Contains(body, "shutting_down") {
 		t.Fatalf("body = %q, want it to contain %q", body, "shutting_down")
+	}
+}
+
+// fakeUnsyncedDiscovery satisfies both BackendDiscovery and syncedChecker,
+// always reporting HasSynced()=false — a stand-in for a K8sBackendDiscovery
+// whose informer hasn't completed its initial List yet.
+type fakeUnsyncedDiscovery struct{}
+
+func (fakeUnsyncedDiscovery) Backends() []string { return nil }
+func (fakeUnsyncedDiscovery) HasSynced() bool     { return false }
+
+// TestHealthz_ServiceUnavailableWhenBackendDiscoveryNotSynced proves a
+// syncedChecker-implementing discovery source (K8sBackendDiscovery, in
+// production) that hasn't completed its initial sync fails /healthz —
+// dynamic-backend-discovery.md's "don't accept traffic before the first
+// list lands" — even with Redis/NATS both healthy and the gate not
+// shutting down.
+func TestHealthz_ServiceUnavailableWhenBackendDiscoveryNotSynced(t *testing.T) {
+	handler := NewHealthzHandler(newHealthyRedis(t), newHealthyNATS(t), fakeUnsyncedDiscovery{}, &ReadinessGate{})
+
+	w := httptest.NewRecorder()
+	handler(w, httptest.NewRequest("GET", "/healthz", nil))
+
+	if w.Code != 503 {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "backend_discovery_not_synced") {
+		t.Fatalf("body = %q, want it to contain %q", body, "backend_discovery_not_synced")
 	}
 }
 

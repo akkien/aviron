@@ -55,13 +55,34 @@ func (g *ReadinessGate) ShuttingDown() bool {
 // livenessProbe would make kubelet restart an otherwise-healthy pod over
 // a transient Redis/NATS blip. See NewLivezHandler for the dependency-free
 // counterpart.
-func NewHealthzHandler(redisClient *redis.Client, natsConn *nats.Conn, gate *ReadinessGate) http.HandlerFunc {
+// syncedChecker is optionally satisfied by a BackendDiscovery
+// implementation with an async initial-sync phase (k8sBackendDiscovery).
+// StaticBackends doesn't implement it — it's synced the instant it's
+// constructed, nothing to wait on — so the type assertion in
+// NewHealthzHandler below simply skips this check for local
+// go run/docker-compose, unchanged from before this discovery existed.
+type syncedChecker interface {
+	HasSynced() bool
+}
+
+func NewHealthzHandler(redisClient *redis.Client, natsConn *nats.Conn, discovery BackendDiscovery, gate *ReadinessGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if gate.ShuttingDown() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+			return
+		}
+
+		// dynamic-backend-discovery.md: a freshly-started pod must not
+		// report ready before its informer's first List completes, or it
+		// would start receiving room-less traffic with an empty backend
+		// pool. Non-blocking — HasSynced is a plain bool read, unlike
+		// WaitForSync, which this handler must never call.
+		if sc, ok := discovery.(syncedChecker); ok && !sc.HasSynced() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "backend_discovery_not_synced"})
 			return
 		}
 

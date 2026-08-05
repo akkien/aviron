@@ -1104,3 +1104,119 @@ No per-connection state to drain here, unlike the other two — the fetch loops'
 `cmd/server`'s choice — flip readiness immediately, but never cancel the room actors' own root context — is a real, disclosed product tradeoff, not the only option. The alternative (cancel that context too, the instant `SIGTERM` arrives) would force-end every in-progress race the moment a rolling update starts, which reads as a worse outcome given `project-overview.md` §7's own wording. It's bounded, not unbounded: `waitForRoomsToDrain` still respects the same `shutdownTimeout` (25s) `http.Server.Shutdown` uses, and if a room genuinely outlives that budget, Kubernetes' own `SIGKILL` after `terminationGracePeriodSeconds` is the backstop — the same category of accepted, bounded-impact limitation already disclosed for an owning instance crashing outright (a room's live state exists only in that one pod's RAM; no snapshotting or reassignment exists or is planned).
 
 This decision is expected to hold up under a *graceful* rolling update — `multi-instance-k8s-verification.md` (Phase 5, spec 6/6) is where that gets proven against a real `kubectl rollout restart`, not just a locally-sent signal. If it doesn't hold up there, the convention this project already follows applies: fix the design and update `graceful-shutdown.md`'s file, don't just patch around it.
+
+## Dynamic Backend Discovery
+
+**Status: implemented** (`dynamic-backend-discovery.md`, Phase 4's `horizontal-scaling/` sub-area — built after Phase 5's Kubernetes work, closing an open question `ws-gateway.md`'s own Notes had left twice). This section is a from-first-principles walkthrough of *how* it actually works under the hood — not just what was built, but the Kubernetes mechanics that make it possible, since that's genuinely useful to understand on its own.
+
+### The problem this solves
+
+`ws-gateway`'s room-less REST routing (register, login, `POST /races`, `GET /races`, `/leaderboard/*` — anything with no `race_id` in the path) used to round-robin across a fixed list read once from `RACE_SERVICE_INSTANCES` at process startup. Scaling `race-service` — by hand, or later by an `HorizontalPodAutoscaler` (`k8s-hpa.md`) — never updated that list, so a scaled-down pod would stay in rotation forever (requests routed to a dead address) and a scaled-up pod would never receive any room-less traffic at all.
+
+Room-*scoped* routing (`/races/{id}/...`) never had this problem — it already resolves the owning pod's address live, on every request, via a Redis lookup (`roomlocator.Owner`). The fix for the round-robin path is conceptually the same idea, applied with a different tool: **stop reading a static list, start asking something that always knows the live answer.** For room-scoped routing, that "something" is Redis. For the round-robin pool, it's Kubernetes itself — specifically, the `EndpointSlice` objects Kubernetes already maintains for every `Service`.
+
+### How a pod learns who it is: the ServiceAccount token volume
+
+Every pod gets a small, read-only volume auto-mounted by `kubelet` at `/var/run/secrets/kubernetes.io/serviceaccount/`, populated once at pod startup from data the API server already had the moment the `Pod` object was created — not a shared, cluster-wide file, and not something any pod ever writes to:
+
+| File | Contents | Used for | Changes during the pod's life? |
+| --- | --- | --- | --- |
+| `token` | A JWT identifying this pod's `ServiceAccount` | Authenticating every API request this pod makes | Yes — `kubelet` rotates it periodically before it expires, transparently |
+| `ca.crt` | The cluster's own CA certificate | Verifying the API server's TLS certificate | No |
+| `namespace` | Plain text, e.g. `aviron` | Scoping API queries (like the `EndpointSlice` watch below) to the right namespace | No — a pod's namespace is fixed for its whole lifetime |
+
+`rest.InClusterConfig()` (`k8s.io/client-go/rest`) reads `token` and `ca.crt` from here, plus the `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT` env vars `kubelet` also injects into every pod, to build a ready-to-use client configuration — no manifest wiring needed for any of it. `cmd/ws-gateway/run.go` reads `namespace` itself, directly, since that value isn't part of what `InClusterConfig` returns but the informer below still needs it.
+
+### The request that actually reaches Kubernetes
+
+Building the discovery client is a handful of local steps; only one part of it ever leaves the pod:
+
+```mermaid
+sequenceDiagram
+    participant Run as cmd/ws-gateway/run.go
+    participant SA as ServiceAccount volume<br/>(local files, kubelet-mounted)
+    participant Rest as rest.InClusterConfig()
+    participant CS as kubernetes.Clientset
+    participant Inf as SharedIndexInformer
+    participant API as kube-apiserver
+
+    Run->>Rest: InClusterConfig()
+    Rest->>SA: read token, ca.crt
+    Note over Rest: + KUBERNETES_SERVICE_HOST/PORT (env vars)
+    Rest-->>Run: *rest.Config (address + auth, all local so far)
+    Run->>CS: kubernetes.NewForConfig(restCfg)
+    Run->>SA: read namespace (own file read, not via client-go)
+    Run->>Inf: NewK8sBackendDiscovery(ctx, clientset, namespace, ...)
+    Inf->>API: LIST EndpointSlices<br/>(namespace=aviron, label=kubernetes.io/service-name=race-service)
+    API-->>Inf: current EndpointSlice objects
+    Inf->>API: WATCH (same query, streamed)
+    Note over Inf,API: Long-lived HTTP connection,<br/>stays open for the process's whole life
+```
+
+Everything before the first `LIST` call is local file/env reads — no network involved. The `LIST` and the `WATCH` that follows it are the only two things this whole mechanism ever sends over the wire, and the pod only ever talks to the API server (`kube-apiserver`) — never to etcd directly. That's true for every workload in a cluster, not just this one: etcd is the API server's own private datastore, and the API server is the sole gatekeeper in front of it.
+
+### Who's actually keeping that data current
+
+`ws-gateway` never computes "which `race-service` pods are alive" itself — it only *reads* data a built-in Kubernetes controller already maintains, the same data `kube-proxy` reads to program its own routing rules:
+
+```mermaid
+flowchart LR
+    subgraph writers["Writing EndpointSlice data — not ws-gateway's job"]
+        Kubelet["kubelet on each node<br/>reports Pod readiness<br/>(from race-service's own /healthz probe)"]
+        Ctrl["EndpointSlice controller<br/>(inside kube-controller-manager)"]
+    end
+
+    subgraph store["Kubernetes' own storage"]
+        API["kube-apiserver"]
+        Etcd[("etcd")]
+    end
+
+    subgraph readers["Reading it — this is ws-gateway's whole job here"]
+        Informer["ws-gateway's SharedIndexInformer<br/>(LIST once, then WATCH)"]
+        KubeProxy["kube-proxy<br/>(a different reader entirely,<br/>same data, different purpose)"]
+    end
+
+    Kubelet -->|"Pod.status.conditions"| API
+    Ctrl -->|"watches Pods + the race-service Service"| API
+    Ctrl -->|"creates/updates EndpointSlice objects"| API
+    API <--> Etcd
+
+    API -->|"LIST + WATCH EndpointSlices"| Informer
+    API -->|"LIST + WATCH EndpointSlices"| KubeProxy
+```
+
+Concretely: `race-service`'s own `readinessProbe` (`GET /healthz`, `k8s-race-service-deploy.md`) is what ultimately drives the `Ready` condition on each `EndpointSlice` entry — `kubelet` reports probe results back to the API server, the `EndpointSlice` controller reflects that into the `Endpoint.Conditions.Ready` field, and `ws-gateway`'s informer sees it change a moment later. This is why `dynamic-backend-discovery.md`'s readiness filtering (below) is really just *trusting* a signal Kubernetes was already producing, not inventing a second one.
+
+### From "the store updated" to "a request gets routed"
+
+Two clearly separate speeds are worth telling apart: the informer's background sync (network-bound, happens whenever Kubernetes says something changed) and a request being routed (must be fast, every time, with zero network calls of its own):
+
+```mermaid
+flowchart TB
+    subgraph background["Background — client-go's own goroutine, runs continuously"]
+        Watch["WATCH stream from kube-apiserver"]
+        Store["informer's local cache<br/>(an in-memory indexer)"]
+        Recompute["recompute()<br/>filters to Ready endpoints,<br/>builds host:port strings"]
+        Watch -->|ADDED / MODIFIED / DELETED event| Store
+        Store --> Recompute
+        Recompute -->|"atomic.Pointer[[]string].Store(...)"| Backends
+    end
+
+    subgraph request["Request path — must never block on the network"]
+        Req(["Room-less request arrives<br/>(e.g. GET /races)"]) --> ServeHTTP["Gateway.ServeHTTP"]
+        ServeHTTP --> NextBackend["nextBackend()"]
+        NextBackend -->|"single atomic load"| Backends[("atomic.Pointer[[]string]")]
+        Backends --> Picked["one address, round-robin"]
+        Picked --> Proxy["proxied to that race-service pod"]
+    end
+```
+
+The two halves only ever touch through that one `atomic.Pointer[[]string]` — a request never waits on `kube-apiserver`, and the background sync never blocks on a request being handled. This is the same "no lock needed on the read path" property the old, fully-static `[]string` field had; the pointer swap just makes the value itself capable of changing.
+
+### Why this design, specifically
+
+- **`SharedIndexInformer`, not a hand-rolled `Watch()` loop.** A raw `Watch()` call silently stops seeing updates if the connection drops, unless the caller handles `resourceVersion` expiry and relists by hand — `client-go`'s informer does List-then-Watch, periodic resync, and relist-on-error internally, the same machinery every real Kubernetes controller (including `kube-proxy` in the diagram above) already relies on.
+- **A `Role`, not a `ClusterRole`.** `ws-gateway` only ever needs to read one resource type (`endpointslices`) in one namespace (`aviron`) — granting anything broader would be more access than the mechanism actually uses.
+- **No new env var to pick discovery mode.** Whether `rest.InClusterConfig()` succeeds already tells `cmd/ws-gateway/run.go` everything it needs: succeeds → real cluster → dynamic discovery; fails with `rest.ErrNotInCluster` → local `go run`/`docker-compose` → fall back to the original static `RACE_SERVICE_INSTANCES` list, unchanged.
+- **Readiness is gated on the informer's own first sync**, not assumed instant — `GET /healthz` fails until the informer's initial `LIST` has actually completed, so a freshly-started `ws-gateway` pod can't pass its own readiness probe and then immediately 503 every room-less request against an empty backend pool.
+- **Why not a second registry (etcd, Consul, ZooKeeper) instead of Kubernetes' own API**: Kubernetes already runs its own etcd as the backing store for exactly this data. Standing up a second, independent registry would mean a second source of truth that could itself drift from what's actually running — strictly more infrastructure to solve a problem Kubernetes' own API already solves for free.

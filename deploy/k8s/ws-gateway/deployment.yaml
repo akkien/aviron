@@ -20,6 +20,9 @@ spec:
       # 30s still leaves a healthy margin, confirmed against the actual
       # constants in cmd/ws-gateway/run.go, not assumed.
       terminationGracePeriodSeconds: 30
+      # dynamic-backend-discovery.md — read access to this namespace's
+      # own EndpointSlice objects, nothing else. See rbac.yaml.
+      serviceAccountName: ws-gateway
       containers:
         - name: ws-gateway
           image: aviron-backend:local
@@ -34,12 +37,15 @@ spec:
           env:
             - name: WS_GATEWAY_LISTEN_ADDR
               value: ":8080"
-            # Static list of race-service's two stable StatefulSet DNS
-            # names (k8s-race-service-deploy.md) — per-binary, not the
-            # shared ConfigMap. MUST be updated by hand if
-            # race-service's replicas ever changes; this is the one
-            # value in this whole phase most likely to silently drift
-            # out of sync with reality (phase-5-plan.md's own Notes).
+            # Superseded as the actual routing source by
+            # dynamic-backend-discovery.md's EndpointSlice-based
+            # discovery, which wins automatically in-cluster (decided by
+            # whether rest.InClusterConfig succeeds, not this value) —
+            # kept only because Config.LoadConfig still requires a
+            # non-empty RACE_SERVICE_INSTANCES to start at all. No longer
+            # the "most likely to silently drift" risk phase-5-plan.md
+            # once flagged for this value, since nothing in-cluster
+            # actually reads it anymore.
             - name: RACE_SERVICE_INSTANCES
               value: "race-service-0.race-service.aviron.svc.cluster.local:8080,race-service-1.race-service.aviron.svc.cluster.local:8080"
             - name: REDIS_URL

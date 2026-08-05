@@ -32,7 +32,7 @@ func TestGateway_RoomLessRequest_RoundRobins(t *testing.T) {
 	addr2, close2 := newTestBackend(t, "b2")
 	defer close2()
 
-	gw := NewGateway(newFakeLocator(), []string{addr1, addr2}, 30*time.Second, testLogger)
+	gw := NewGateway(newFakeLocator(), StaticBackends{addr1, addr2}, 30*time.Second, testLogger)
 
 	var got []string
 	for i := 0; i < 4; i++ {
@@ -56,7 +56,7 @@ func TestGateway_CacheMiss_CallsOwnerOncePopulatesCache(t *testing.T) {
 
 	loc := newFakeLocator()
 	loc.owners["race-1"] = addr
-	gw := NewGateway(loc, []string{"unused:1"}, 30*time.Second, testLogger)
+	gw := NewGateway(loc, StaticBackends{"unused:1"}, 30*time.Second, testLogger)
 
 	req := httptest.NewRequest(http.MethodGet, "/races/race-1", nil)
 	w := httptest.NewRecorder()
@@ -83,7 +83,7 @@ func TestGateway_CacheHit_DoesNotCallOwnerAgain(t *testing.T) {
 
 	loc := newFakeLocator()
 	loc.owners["race-1"] = addr
-	gw := NewGateway(loc, nil, 30*time.Second, testLogger)
+	gw := NewGateway(loc, StaticBackends(nil), 30*time.Second, testLogger)
 
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/races/race-1", nil)
@@ -99,8 +99,26 @@ func TestGateway_CacheHit_DoesNotCallOwnerAgain(t *testing.T) {
 	}
 }
 
+// TestGateway_RoomLessRequest_EmptyBackends_Returns503 proves a room-less
+// request fails cleanly with 503, not a panic (index out of range /
+// modulo by zero), when the discovery source's pool is momentarily empty
+// — possible now that the pool can change at runtime
+// (dynamic-backend-discovery.md), unlike when it was a fixed,
+// LoadConfig-validated non-empty slice.
+func TestGateway_RoomLessRequest_EmptyBackends_Returns503(t *testing.T) {
+	gw := NewGateway(newFakeLocator(), StaticBackends(nil), 30*time.Second, testLogger)
+
+	req := httptest.NewRequest(http.MethodGet, "/races", nil)
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, req)
+
+	if w.Result().StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Result().StatusCode)
+	}
+}
+
 func TestGateway_GenuineMiss_Returns404_ProxyNeverInvoked(t *testing.T) {
-	gw := NewGateway(newFakeLocator(), nil, 30*time.Second, testLogger)
+	gw := NewGateway(newFakeLocator(), StaticBackends(nil), 30*time.Second, testLogger)
 
 	req := httptest.NewRequest(http.MethodGet, "/races/nonexistent", nil)
 	w := httptest.NewRecorder()
@@ -114,7 +132,7 @@ func TestGateway_GenuineMiss_Returns404_ProxyNeverInvoked(t *testing.T) {
 func TestGateway_LookupError_Returns503(t *testing.T) {
 	loc := newFakeLocator()
 	loc.setOwnerErr(errors.New("redis unreachable"))
-	gw := NewGateway(loc, nil, 30*time.Second, testLogger)
+	gw := NewGateway(loc, StaticBackends(nil), 30*time.Second, testLogger)
 
 	req := httptest.NewRequest(http.MethodGet, "/races/race-1", nil)
 	w := httptest.NewRecorder()
@@ -172,7 +190,7 @@ func TestGateway_ConcurrentServeHTTP_RacesWatchRoomEvents(t *testing.T) {
 	defer closeFn()
 
 	loc := newFakeLocator()
-	gw := NewGateway(loc, []string{addr}, 30*time.Second, testLogger)
+	gw := NewGateway(loc, StaticBackends{addr}, 30*time.Second, testLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -212,7 +230,7 @@ func TestGateway_ConcurrentCacheMissesForSameRaceID_NoRace(t *testing.T) {
 
 	loc := newFakeLocator()
 	loc.owners["race-1"] = addr
-	gw := NewGateway(loc, nil, 30*time.Second, testLogger)
+	gw := NewGateway(loc, StaticBackends(nil), 30*time.Second, testLogger)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {

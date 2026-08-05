@@ -47,27 +47,31 @@ const targetContextKey contextKey = 0
 // (WSHandler, endpoint.go) and never reaches this proxy at all — see
 // extractRaceID.
 type Gateway struct {
-	mu       sync.RWMutex
-	cache    map[string]cacheEntry
-	locator  RoomLocator
-	backends []string
-	next     atomic.Uint64
-	cacheTTL time.Duration
-	proxy    *httputil.ReverseProxy
-	logger   *slog.Logger
+	mu        sync.RWMutex
+	cache     map[string]cacheEntry
+	locator   RoomLocator
+	discovery BackendDiscovery
+	next      atomic.Uint64
+	cacheTTL  time.Duration
+	proxy     *httputil.ReverseProxy
+	logger    *slog.Logger
 }
 
 // NewGateway constructs a Gateway. Run WatchRoomEvents in its own goroutine
 // to keep the cache warm from room:events — the fast path; resolveTarget's
 // lazy Owner()+TTL is the safety net for whatever that subscription misses
-// (a dropped connection, a gateway restart).
-func NewGateway(locator RoomLocator, backends []string, cacheTTL time.Duration, logger *slog.Logger) *Gateway {
+// (a dropped connection, a gateway restart). discovery is StaticBackends
+// for local go run/docker-compose, or a real k8sBackendDiscovery once
+// running in-cluster (dynamic-backend-discovery.md) — unlike locator's
+// Owner() lookups (already dynamic via Redis), the room-less round-robin
+// pool had no live source until that spec, only a fixed slice.
+func NewGateway(locator RoomLocator, discovery BackendDiscovery, cacheTTL time.Duration, logger *slog.Logger) *Gateway {
 	gw := &Gateway{
-		cache:    make(map[string]cacheEntry),
-		locator:  locator,
-		backends: backends,
-		cacheTTL: cacheTTL,
-		logger:   logger,
+		cache:     make(map[string]cacheEntry),
+		locator:   locator,
+		discovery: discovery,
+		cacheTTL:  cacheTTL,
+		logger:    logger,
 	}
 	gw.proxy = &httputil.ReverseProxy{Director: gw.Director}
 	return gw
@@ -83,7 +87,13 @@ func (gw *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var target string
 	if !roomScoped {
-		target = gw.nextBackend()
+		addr, err := gw.nextBackend()
+		if err != nil {
+			gw.logger.Error("wsgateway: no backends available", slog.Any("error", err))
+			http.Error(w, "routing lookup failed", http.StatusServiceUnavailable)
+			return
+		}
+		target = addr
 	} else {
 		addr, found, err := gw.resolveTarget(r.Context(), raceID)
 		if err != nil {
@@ -160,9 +170,17 @@ func (gw *Gateway) resolveTarget(ctx context.Context, raceID string) (string, bo
 	return instanceID, true, nil
 }
 
-func (gw *Gateway) nextBackend() string {
+// nextBackend round-robins across the discovery source's current backend
+// pool. Returns an error if that pool is momentarily empty — possible
+// now that it can change at runtime (dynamic-backend-discovery.md),
+// unlike when it was a fixed, LoadConfig-validated non-empty slice.
+func (gw *Gateway) nextBackend() (string, error) {
+	backends := gw.discovery.Backends()
+	if len(backends) == 0 {
+		return "", errNoBackends
+	}
 	n := gw.next.Add(1)
-	return gw.backends[(n-1)%uint64(len(gw.backends))]
+	return backends[(n-1)%uint64(len(backends))], nil
 }
 
 // WatchRoomEvents subscribes to room:events for the gateway's entire

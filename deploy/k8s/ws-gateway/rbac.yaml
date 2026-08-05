@@ -1,0 +1,33 @@
+# dynamic-backend-discovery.md — ws-gateway watches EndpointSlice
+# objects for the race-service Service to discover its live pod pool
+# instead of a static env var. Scoped to exactly one resource type, one
+# namespace: a Role, not a ClusterRole.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ws-gateway
+  namespace: aviron
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ws-gateway-endpointslice-reader
+  namespace: aviron
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ws-gateway-endpointslice-reader
+  namespace: aviron
+subjects:
+  - kind: ServiceAccount
+    name: ws-gateway
+    namespace: aviron
+roleRef:
+  kind: Role
+  name: ws-gateway-endpointslice-reader
+  apiGroup: rbac.authorization.k8s.io
