@@ -1,0 +1,42 @@
+# metrics/prometheus-deploy.md — kubernetes_sd_configs (role: pod), not a
+# static scrape target list: race-service/ws-gateway both scale under
+# their own HorizontalPodAutoscaler (k8s-hpa.md, 2-5 replicas), so a fixed
+# list would go stale the same way ws-gateway's old RACE_SERVICE_INSTANCES
+# did before dynamic-backend-discovery.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: aviron
+data:
+  prometheus.yml: |
+    scrape_configs:
+      - job_name: aviron-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["aviron"]
+        relabel_configs:
+          # Only scrape pods that opt in via annotation — every one of
+          # this project's own binaries will, but this keeps
+          # Postgres/Redis/NATS/Kafka pods (which expose no /metrics
+          # today) from generating scrape-failure noise.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          # pod/replica-aware labels for later per-pod dashboard panels
+          # (phase-6-plan.md Decisions #7) — without these, every scrape
+          # target for a given app collapses into indistinguishable series.
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app

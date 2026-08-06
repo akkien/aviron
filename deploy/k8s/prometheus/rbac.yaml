@@ -1,0 +1,35 @@
+# metrics/prometheus-deploy.md — Prometheus's own kubernetes_sd_configs
+# (role: pod) discovery needs read access to this namespace's Pod objects
+# to find scrape targets dynamically instead of a static list. Scoped to
+# exactly one resource type, one namespace — a Role, not a ClusterRole,
+# the same shape ws-gateway/rbac.yaml already established for its own
+# EndpointSlice watch (dynamic-backend-discovery.md).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: aviron
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-pod-reader
+  namespace: aviron
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-pod-reader
+  namespace: aviron
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: aviron
+roleRef:
+  kind: Role
+  name: prometheus-pod-reader
+  apiGroup: rbac.authorization.k8s.io

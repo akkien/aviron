@@ -16,6 +16,13 @@ spec:
     metadata:
       labels:
         app: race-service
+      # Scraped by Prometheus's kubernetes_sd_configs role: pod discovery
+      # (metrics/prometheus-deploy.md) — no static target list to keep in
+      # sync as this StatefulSet scales under its own HPA (k8s-hpa.md).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       # Aligned with graceful-shutdown.md's cmd/server shutdownTimeout —
       # corrected to 2m after a real rolling-update run

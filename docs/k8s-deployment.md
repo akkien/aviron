@@ -37,8 +37,14 @@ reachable).
 | (StatefulSet (Deploy-  (Deploy-  (Helm: Bitnami chart,        |
 |  Set, PVC)    ment)     ment)     StatefulSet under the hood) |
 |                                                               |
-| consumer (Deployment, 1 replica, no Service)                  |
+| consumer (Deployment, 1 replica)                              |
+|    Service: consumer                                          |
 |    reads Kafka, writes Postgres                               |
+|                                                               |
+| prometheus (Deployment, 1 replica)                            |
+|    Service: prometheus | ServiceAccount + Role (pod watch)   |
+|    scrapes race-service/ws-gateway/consumer's /metrics via    |
+|    kubernetes_sd_configs (role: pod), not a static list       |
 +---------------------------------------------------------------+
 ```
 
@@ -197,13 +203,30 @@ as a race can run.
 ## Deploying `consumer`
 
 No dependency on `race-service`/`ws-gateway` — only needs Postgres/Kafka.
-No `Service` (it exposes no HTTP surface, confirmed by reading
-`cmd/consumer/run.go` — no `http.ListenAndServe` call), so nothing to
-wait on beyond the pod itself:
+It gained a small `Service` (`deploy/k8s/consumer/service.yaml`) once
+`metrics/metrics-parity.md` gave it a real HTTP surface — `/metrics` and
+`/debug/pprof/*` only, nothing app-facing routes through it:
 
 ```sh
-kubectl apply -f deploy/k8s/consumer/deployment.yaml
+kubectl apply -f deploy/k8s/consumer/deployment.yaml -f deploy/k8s/consumer/service.yaml
 kubectl wait --for=condition=Ready pod -l app=consumer -n aviron --timeout=60s
+```
+
+## Deploying Prometheus
+
+Scrapes all three binaries' `/metrics` via `kubernetes_sd_configs`
+(`role: pod`), not a static target list — see
+`context/features/phase6/metrics/prometheus-deploy.md` for why:
+
+```sh
+kubectl apply -f deploy/k8s/prometheus/rbac.yaml -f deploy/k8s/prometheus/configmap.yaml \
+  -f deploy/k8s/prometheus/deployment.yaml -f deploy/k8s/prometheus/service.yaml
+kubectl wait --for=condition=Ready pod -l app=prometheus -n aviron --timeout=60s
+
+# Check discovered targets
+kubectl port-forward -n aviron svc/prometheus 9090:9090
+# then open http://localhost:9090/targets — every race-service/ws-gateway/
+# consumer pod should show up, discovered automatically.
 ```
 
 ## Components
@@ -219,7 +242,8 @@ need when debugging a connection issue from inside the cluster:
 | Kafka | Helm release (`bitnami/kafka`, `StatefulSet` under the hood) | `bitnamilegacy/kafka:4.0.0-debian-12-r10` | 9092 | `aviron-kafka.aviron.svc.cluster.local` | None — `persistence.enabled: false` |
 | `race-service` | `StatefulSet` (2-5, HPA) | `aviron-backend:local` (`/app/server`) | 8080 | `race-service-<N>.race-service.aviron.svc.cluster.local` (headless) | None — no room state survives a restart by design |
 | `ws-gateway` | `Deployment` (2-5, HPA) | `aviron-backend:local` (`/app/ws-gateway`) | 8080 | `ws-gateway.aviron.svc.cluster.local`; externally `http://localhost/` via `Ingress` | None — stateless |
-| `consumer` | `Deployment` (1) | `aviron-backend:local` (`/app/consumer`) | none — no `Service` | n/a | None |
+| `consumer` | `Deployment` (1) | `aviron-backend:local` (`/app/consumer`) | 8091 (`/metrics`, `/debug/pprof/*` only) | `consumer.aviron.svc.cluster.local` | None |
+| Prometheus | `Deployment` (1) | `prom/prometheus:latest` | 9090 | `prometheus.aviron.svc.cluster.local` | None — `emptyDir`, TSDB doesn't survive a pod restart |
 
 ## Verifying it's actually working
 
@@ -260,8 +284,9 @@ all of them:
 curl -i http://localhost/healthz
 curl -i http://localhost/livez
 
-# consumer has no HTTP surface to curl — confirm it's actually consuming
-# by checking its own logs for a batch flush after a race finishes
+# consumer exposes only /metrics + /debug/pprof/* (no app-facing routes) —
+# confirm it's actually consuming by checking its own logs for a batch
+# flush after a race finishes
 kubectl logs -n aviron -l app=consumer --tail=20
 
 # The real proof: register, create, start, and finish a race entirely

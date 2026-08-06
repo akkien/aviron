@@ -16,6 +16,13 @@ spec:
     metadata:
       labels:
         app: consumer
+      # Scraped by Prometheus's kubernetes_sd_configs role: pod discovery
+      # (metrics/prometheus-deploy.md), now that metrics/metrics-parity.md
+      # gave this binary a real /metrics endpoint.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8091"
+        prometheus.io/path: "/metrics"
     spec:
       # No http.Server.Shutdown involved here (cmd/consumer never opens
       # one) — just the fetch loops draining on ctx cancellation
@@ -30,7 +37,18 @@ spec:
           # to run the consumer binary instead, same as
           # docker-compose.yml's own `command: ["/app/consumer"]`.
           command: ["/app/consumer"]
+          ports:
+            - containerPort: 8091
+              name: http
           env:
+            # Explicit, matching this project's convention elsewhere
+            # (ws-gateway sets WS_GATEWAY_LISTEN_ADDR even though it also
+            # matches its own default) — metrics/metrics-parity.md gave
+            # this binary an HTTP server purely for /metrics+pprof, this
+            # spec is what makes it reachable in-cluster via the new
+            # consumer Service.
+            - name: CONSUMER_LISTEN_ADDR
+              value: ":8091"
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
@@ -56,11 +74,11 @@ spec:
             limits:
               cpu: 125m
               memory: 64Mi
-          # No readinessProbe/livenessProbe: this binary exposes no HTTP
-          # surface at all (confirmed by reading cmd/consumer/run.go — no
-          # http.ListenAndServe call), and there's no Service routing
-          # traffic to it for a readinessProbe to gate anyway. An exec
-          # probe (e.g. pgrep) was considered but rejected as inventing
-          # a signal this binary has no other reason to expose —
+          # No readinessProbe/livenessProbe: this binary's only HTTP
+          # surface is /metrics+/debug/pprof/* (metrics/metrics-parity.md)
+          # — a Prometheus scrape failing simply shows the target down,
+          # it's not user-facing traffic a readiness gate needs to protect.
+          # An exec probe (e.g. pgrep) was considered but rejected as
+          # inventing a signal this binary has no other reason to expose —
           # restartPolicy: Always's own crash-detection (the Deployment
           # default) is a sufficient substitute for a local kind cluster.

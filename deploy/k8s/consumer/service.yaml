@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: consumer
+  namespace: aviron
+spec:
+  # Plain ClusterIP, not headless — nothing looks up consumer by stable
+  # per-pod DNS the way race-service is (metrics/prometheus-deploy.md);
+  # this only needs to exist so Prometheus's scrape target actually
+  # resolves, matching redis/nats's own shape.
+  selector:
+    app: consumer
+  ports:
+    - port: 8091
+      targetPort: 8091
+      name: http

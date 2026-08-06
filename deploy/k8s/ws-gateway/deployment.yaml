@@ -14,6 +14,13 @@ spec:
     metadata:
       labels:
         app: ws-gateway
+      # Scraped by Prometheus's kubernetes_sd_configs role: pod discovery
+      # (metrics/prometheus-deploy.md) — no static target list to keep in
+      # sync as this Deployment scales under its own HPA (k8s-hpa.md).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       # cmd/ws-gateway's own shutdownTimeout (25s) + connFlushWindow
       # (500ms) is slightly larger than race-service's internal budget —
