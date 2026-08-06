@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/roomrelay"
+	"github.com/akkien/aviron/internal/tracing"
 	"github.com/akkien/aviron/internal/ws"
 )
 
@@ -235,12 +236,15 @@ func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay
 			// same class of bug room-service-adapter.md's
 			// drainBroadcast/cleanupWhenDone already had to guard against
 			// on the publishing side.
-			if pubErr := publishInboundTraced(context.Background(), relay, raceID, userID, string(roomrelay.InboundKindDisconnected), roomrelay.InboundEnvelope{
+			spanCtx, pubErr := publishInboundTraced(context.Background(), relay, raceID, userID, string(roomrelay.InboundKindDisconnected), roomrelay.InboundEnvelope{
 				Kind: roomrelay.InboundKindDisconnected, RaceID: raceID, UserID: userID, DisplayName: displayName,
-			}); pubErr != nil {
-				logger.Error("wsgateway: publish disconnected failed", slog.Any("error", pubErr))
+			})
+			if pubErr != nil {
+				fields := append([]any{slog.Any("error", pubErr)}, tracing.LogAttrs(spanCtx)...)
+				logger.Error("wsgateway: publish disconnected failed", fields...)
 			} else {
-				logger.Info("wsgateway: published", slog.String("race_id", raceID), slog.String("kind", string(roomrelay.InboundKindDisconnected)))
+				fields := append([]any{slog.String("race_id", raceID), slog.String("kind", string(roomrelay.InboundKindDisconnected))}, tracing.LogAttrs(spanCtx)...)
+				logger.Info("wsgateway: published", fields...)
 			}
 			return
 		}
@@ -260,13 +264,16 @@ func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay
 		// propagates into roomrelay.publish's NATS header injection below, so
 		// this span and race-service's corresponding roomrelay.receive span
 		// land in the same trace.
-		if err := publishInboundTraced(ctx, relay, raceID, userID, msg.Type, roomrelay.InboundEnvelope{
+		spanCtx, err := publishInboundTraced(ctx, relay, raceID, userID, msg.Type, roomrelay.InboundEnvelope{
 			Kind: roomrelay.InboundKindMessage, RaceID: raceID, UserID: userID, DisplayName: displayName, Message: data,
-		}); err != nil {
-			logger.Error("wsgateway: publish message failed", slog.Any("error", err))
+		})
+		if err != nil {
+			fields := append([]any{slog.Any("error", err)}, tracing.LogAttrs(spanCtx)...)
+			logger.Error("wsgateway: publish message failed", fields...)
 			continue
 		}
-		logger.Info("wsgateway: published", slog.String("race_id", raceID), slog.String("kind", string(roomrelay.InboundKindMessage)))
+		fields := append([]any{slog.String("race_id", raceID), slog.String("kind", string(roomrelay.InboundKindMessage))}, tracing.LogAttrs(spanCtx)...)
+		logger.Info("wsgateway: published", fields...)
 
 		if msg.Type == "leave_race" {
 			// An intentional quit (leave-race.md): the bus already has the
@@ -281,8 +288,12 @@ func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay
 // publishInboundTraced wraps relay.PublishIn in a span (ws.frame), tagged
 // with the frame kind — used by readLoop for both a decoded client message
 // and the synthesized disconnect notification, so every InboundEnvelope this
-// gateway ever publishes gets one, not just telemetry.
-func publishInboundTraced(ctx context.Context, relay relayBus, raceID, userID, kind string, env roomrelay.InboundEnvelope) error {
+// gateway ever publishes gets one, not just telemetry. Returns spanCtx (not
+// just the error) so the caller's own log line can pull trace_id/span_id
+// out of it via tracing.LogAttrs (logging/log-trace-correlation.md) — the
+// span itself already ended by the time this returns, but a span's context
+// still carries valid trace/span IDs after End().
+func publishInboundTraced(ctx context.Context, relay relayBus, raceID, userID, kind string, env roomrelay.InboundEnvelope) (context.Context, error) {
 	spanCtx, span := tracer.Start(ctx, "ws.frame", trace.WithAttributes(
 		attribute.String("race_id", raceID),
 		attribute.String("user_id", userID),
@@ -294,7 +305,7 @@ func publishInboundTraced(ctx context.Context, relay relayBus, raceID, userID, k
 	if err != nil {
 		span.RecordError(err)
 	}
-	return err
+	return spanCtx, err
 }
 
 // writeLoop owns connCh, this connection's slice of the race's fan-out (see

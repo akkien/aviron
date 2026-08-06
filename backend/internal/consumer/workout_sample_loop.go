@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/kafka"
+	"github.com/akkien/aviron/internal/tracing"
 )
 
 // tracer is this package's own OpenTelemetry tracer (tracing/instrumentation.md).
@@ -59,7 +60,12 @@ func (c *Consumer) runWorkoutSampleLoop(ctx context.Context, reader *kafkago.Rea
 			// many-to-one aggregation this one message's trace shouldn't
 			// pretend to own alone.
 			msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), kafka.HeaderCarrier{Headers: &msg.Headers})
-			_, span := tracer.Start(msgCtx, "kafka.consume", trace.WithAttributes(
+			// spanCtx (not discarded via _) so the malformed-message log
+			// lines below can pull trace_id/span_id off it
+			// (logging/log-trace-correlation.md) — the span is still ended
+			// immediately either way, since a span's context keeps valid
+			// trace/span IDs after End().
+			spanCtx, span := tracer.Start(msgCtx, "kafka.consume", trace.WithAttributes(
 				attribute.String("topic", kafka.TopicWorkoutSample),
 				attribute.String("group_id", workoutSampleGroupID),
 			))
@@ -71,10 +77,10 @@ func (c *Consumer) runWorkoutSampleLoop(ctx context.Context, reader *kafkago.Rea
 				// A malformed message will never become parseable by
 				// retrying it — dead-letter it and commit immediately so
 				// it doesn't crash-loop the consumer on the same offset.
-				c.logger.Warn("dropping malformed workout sample", slog.Any("error", decodeErr))
+				c.logger.Warn("dropping malformed workout sample", append([]any{slog.Any("error", decodeErr)}, tracing.LogAttrs(spanCtx)...)...)
 				c.deadLetter(ctx, workoutSampleDLQTopic, msg)
 				if cerr := reader.CommitMessages(ctx, msg); cerr != nil {
-					c.logger.Error("commit malformed workout sample failed", slog.Any("error", cerr))
+					c.logger.Error("commit malformed workout sample failed", append([]any{slog.Any("error", cerr)}, tracing.LogAttrs(spanCtx)...)...)
 				}
 				continue
 			}

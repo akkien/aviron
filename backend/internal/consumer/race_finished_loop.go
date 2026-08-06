@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/kafka"
+	"github.com/akkien/aviron/internal/tracing"
 )
 
 // runRaceFinishedLoop has no batching — race.finished volume is orders of
@@ -54,10 +55,10 @@ func (c *Consumer) processRaceFinishedMessage(ctx context.Context, reader commit
 	decoded, decodeErr := decodeRaceFinished(msg.Value)
 	if decodeErr != nil {
 		span.RecordError(decodeErr)
-		c.logger.Warn("dropping malformed race finished message", slog.Any("error", decodeErr))
+		c.logger.Warn("dropping malformed race finished message", append([]any{slog.Any("error", decodeErr)}, tracing.LogAttrs(ctx)...)...)
 		c.deadLetter(ctx, raceFinishedDLQTopic, msg)
 		if cerr := reader.CommitMessages(ctx, msg); cerr != nil {
-			c.logger.Error("commit malformed race finished message failed", slog.Any("error", cerr))
+			c.logger.Error("commit malformed race finished message failed", append([]any{slog.Any("error", cerr)}, tracing.LogAttrs(ctx)...)...)
 		}
 		return
 	}
@@ -68,19 +69,19 @@ func (c *Consumer) processRaceFinishedMessage(ctx context.Context, reader commit
 	if err != nil {
 		span.RecordError(err)
 		if errors.Is(err, ErrPermanentWrite) {
-			c.logger.Warn("dead-lettering race finished message", slog.Any("error", err))
+			c.logger.Warn("dead-lettering race finished message", append([]any{slog.Any("error", err)}, tracing.LogAttrs(ctx)...)...)
 			c.deadLetter(ctx, raceFinishedDLQTopic, msg)
 			if cerr := reader.CommitMessages(ctx, msg); cerr != nil {
-				c.logger.Error("commit dead-lettered race finished message failed", slog.Any("error", cerr))
+				c.logger.Error("commit dead-lettered race finished message failed", append([]any{slog.Any("error", cerr)}, tracing.LogAttrs(ctx)...)...)
 			}
 			return
 		}
 		// Transient — do not commit, let redelivery retry.
-		c.logger.Error("reconcile race finished failed", slog.Any("error", err))
+		c.logger.Error("reconcile race finished failed", append([]any{slog.Any("error", err)}, tracing.LogAttrs(ctx)...)...)
 		return
 	}
 
 	if cerr := reader.CommitMessages(ctx, msg); cerr != nil {
-		c.logger.Error("commit race finished message failed", slog.Any("error", cerr))
+		c.logger.Error("commit race finished message failed", append([]any{slog.Any("error", cerr)}, tracing.LogAttrs(ctx)...)...)
 	}
 }

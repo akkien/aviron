@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/akkien/aviron/internal/tracing"
 )
 
 // requestLogAttrsKeyType/requestLogAttrsKey let Auth (an inner middleware,
@@ -52,6 +54,7 @@ func RequestLog(logger *slog.Logger) func(http.Handler) http.Handler {
 			if attrs.userID != "" {
 				fields = append(fields, slog.String("user_id", attrs.userID))
 			}
+			fields = append(fields, tracing.LogAttrs(r.Context())...)
 			logger.Info("http_request", fields...)
 		})
 	}

@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/akkien/aviron/internal/middleware"
 )
@@ -60,6 +63,43 @@ func TestRequestLog_LogsMethodPathStatusDuration(t *testing.T) {
 	}
 	if _, ok := fields["user_id"]; ok {
 		t.Error("user_id present, want absent — Auth never ran in this chain")
+	}
+	if _, ok := fields["trace_id"]; ok {
+		t.Error("trace_id present, want absent — no span was ever started on this request's context")
+	}
+	if _, ok := fields["span_id"]; ok {
+		t.Error("span_id present, want absent — no span was ever started on this request's context")
+	}
+}
+
+// TestRequestLog_IncludesTraceAndSpanIDWhenSpanContextPresent is
+// logging/log-trace-correlation.md's own coverage: RequestLog runs inside
+// otelhttp in the real cmd/server/run.go chain, so by the time it reads
+// r.Context() a span (started by otelhttp) is already there — simulated
+// here by starting one directly rather than standing up a full otelhttp
+// middleware layer, since RequestLog only ever reads whatever span
+// context already exists, the same as it does for request_id/user_id.
+func TestRequestLog_IncludesTraceAndSpanIDWhenSpanContextPresent(t *testing.T) {
+	logger, buf := newTestLogger()
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tp := sdktrace.NewTracerProvider()
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	ctx, span := tp.Tracer("test").Start(context.Background(), "test-span")
+	defer span.End()
+	sc := span.SpanContext()
+
+	req := httptest.NewRequest(http.MethodGet, "/races", nil).WithContext(ctx)
+	middleware.RequestLog(logger)(next).ServeHTTP(httptest.NewRecorder(), req)
+
+	fields := decodeLastLogLine(t, buf)
+	if fields["trace_id"] != sc.TraceID().String() {
+		t.Errorf("trace_id = %v, want %q", fields["trace_id"], sc.TraceID().String())
+	}
+	if fields["span_id"] != sc.SpanID().String() {
+		t.Errorf("span_id = %v, want %q", fields["span_id"], sc.SpanID().String())
 	}
 }
 
