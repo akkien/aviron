@@ -1,0 +1,55 @@
+# dashboards/grafana-deploy.md — provisioned data sources, not clicked
+# together by hand: reproducible from a fresh `kubectl apply`. `uid` is set
+# explicitly on Tempo and Elasticsearch (not left to Grafana's
+# auto-generated one) — tracesToLogsV2.datasourceUid and derivedFields'
+# datasourceUid below both need a UID they can rely on resolving
+# deterministically, confirmed against Grafana's own provisioning docs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: aviron
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://prometheus.aviron.svc.cluster.local:9090
+        isDefault: true
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        access: proxy
+        url: http://tempo.aviron.svc.cluster.local:3200
+        jsonData:
+          # "Trace to logs": clicking a span in Tempo jumps straight to its
+          # matching log lines in Elasticsearch, filtered by trace_id — the
+          # concrete feature phase-6-plan.md's Overview means by "pivot
+          # from a metric spike to the logs and traces that explain it."
+          tracesToLogsV2:
+            datasourceUid: elasticsearch
+            filterByTraceID: true
+            tags: ["trace_id"]
+      - name: Elasticsearch
+        type: elasticsearch
+        uid: elasticsearch
+        access: proxy
+        url: http://elasticsearch.aviron.svc.cluster.local:9200
+        jsonData:
+          index: aviron-logs
+          timeField: "@timestamp"
+          # "Derived field": a trace_id value found in a log line renders
+          # as a clickable link straight into the matching Tempo trace —
+          # the reverse direction of Tempo's tracesToLogsV2 above, so
+          # correlation works starting from either side. Inert until
+          # logging/log-trace-correlation.md's trace_id field actually
+          # appears in a log line — already shipped, so this is live, not
+          # aspirational.
+          derivedFields:
+            - name: trace_id
+              matcherRegex: '"trace_id":"(\w+)"'
+              datasourceUid: tempo
+              url: "$${__value.raw}"

@@ -48,8 +48,8 @@ reachable).
 |                                                               |
 | otel-collector (Deployment, 1 replica)                        |
 |    Service: otel-collector (OTLP gRPC :4317)                  |
-|    receives OTLP from all 3 binaries once instrumentation.md  |
-|    lands; today, verified with one manual test span only      |
+|    receives real OTLP spans from all 3 binaries               |
+|    (tracing/instrumentation.md)                                |
 |    |                                                          |
 |    v                                                          |
 | tempo (Deployment, 1 replica)                                 |
@@ -64,6 +64,14 @@ reachable).
 |                                                                |
 | kibana (Deployment, 1 replica)                                 |
 |    Service: kibana — no Ingress, port-forward only            |
+|                                                                |
+| kube-state-metrics (Deployment, 1 replica)                     |
+|    scraped by prometheus (pod discovery) for HPA metrics       |
+|                                                                |
+| grafana (Deployment, 1 replica)                                |
+|    Service: grafana — no Ingress, port-forward only            |
+|    datasources: prometheus, tempo, elasticsearch (correlated) |
+|    dashboards: RED x3, USE+HPA x1 — ConfigMap-provisioned      |
 +---------------------------------------------------------------+
 ```
 
@@ -317,6 +325,51 @@ kubectl port-forward -n aviron svc/kibana 5601:5601
 # then open http://localhost:5601
 ```
 
+## Deploying `kube-state-metrics` + Grafana
+
+`kube-state-metrics` is a real, additional prerequisite for the HPA panel
+specifically (`kube_horizontalpodautoscaler_*` metrics come from it, not
+from `metrics/prometheus-deploy.md`'s own app-level scrape targets) — it's
+scraped automatically by Prometheus's existing pod-discovery mechanism, no
+separate scrape job needed. Grafana then ties Prometheus/Tempo/Elasticsearch
+together as one correlation layer and provisions the RED/USE/HPA
+dashboards. See `context/features/phase6/dashboards/grafana-deploy.md`:
+
+```sh
+kubectl apply -f deploy/k8s/kube-state-metrics/serviceaccount.yaml \
+  -f deploy/k8s/kube-state-metrics/clusterrole.yaml \
+  -f deploy/k8s/kube-state-metrics/clusterrolebinding.yaml \
+  -f deploy/k8s/kube-state-metrics/deployment.yaml \
+  -f deploy/k8s/kube-state-metrics/service.yaml
+kubectl apply -f deploy/k8s/grafana/configmap-datasources.yaml \
+  -f deploy/k8s/grafana/configmap-dashboards-config.yaml \
+  -f deploy/k8s/grafana/configmap-dashboards.yaml \
+  -f deploy/k8s/grafana/deployment.yaml \
+  -f deploy/k8s/grafana/service.yaml
+kubectl wait --for=condition=Ready pod -l 'app in (kube-state-metrics,grafana)' -n aviron --timeout=180s
+```
+
+Verify all three data sources are actually reachable, not just registered
+(Grafana's default login is `admin`/`admin`):
+
+```sh
+kubectl port-forward -n aviron svc/grafana 3000:3000
+for uid in prometheus tempo elasticsearch; do
+  curl -s -X POST "http://admin:admin@localhost:3000/api/datasources/uid/$uid/health"
+done
+# each should report {"status":"OK", ...}
+```
+
+Generate real traffic (a k6 race, `load/scenarios/race-lifecycle.js`) and
+confirm the RED/USE dashboards under the "Aviron" folder populate with
+non-zero, correctly `pod`-labeled series — then click a span in Tempo's
+Explore view and confirm "Trace to logs" opens the matching Elasticsearch
+lines (the concrete proof correlation is real, not aspirational):
+
+```sh
+BASE_URL=http://localhost NUM_RACES=5 VUS_PER_RACE=8 k6 run load/scenarios/race-lifecycle.js
+```
+
 ## Components
 
 Quick reference — especially the DNS names, which are exactly what you'd
@@ -337,6 +390,8 @@ need when debugging a connection issue from inside the cluster:
 | Elasticsearch | `StatefulSet` (1) | `docker.elastic.co/elasticsearch/elasticsearch:8.15.0` | 9200 | `elasticsearch.aviron.svc.cluster.local` | None — `emptyDir`, index data doesn't survive a pod restart |
 | Fluent Bit | `DaemonSet` (1 per node) | `fluent/fluent-bit:latest` | n/a (tails `hostPath`) | n/a — no Service, ships to Elasticsearch | None — stateless log shipper |
 | Kibana | `Deployment` (1) | `docker.elastic.co/kibana/kibana:8.15.0` | 5601 | `kibana.aviron.svc.cluster.local`; reached via `kubectl port-forward` only, no `Ingress` | None — stateless |
+| `kube-state-metrics` | `Deployment` (1) | `registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1` | 8080 (metrics), 8081 (telemetry) | Headless `Service`; scraped via Prometheus pod discovery, not addressed by DNS | None — stateless, reads cluster API state at scrape time |
+| Grafana | `Deployment` (1) | `grafana/grafana:latest` | 3000 | `grafana.aviron.svc.cluster.local`; reached via `kubectl port-forward` only, no `Ingress` | None — data sources/dashboards are entirely `ConfigMap`-provisioned |
 
 ## Verifying it's actually working
 

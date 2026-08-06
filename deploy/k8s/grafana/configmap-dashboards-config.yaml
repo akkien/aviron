@@ -1,0 +1,22 @@
+# The dashboard *provider* config — tells Grafana to auto-load whatever
+# JSON files land in /var/lib/grafana/dashboards (grafana-dashboards
+# ConfigMap, mounted there) rather than requiring dashboards to be clicked
+# together and saved by hand through the UI.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-config
+  namespace: aviron
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: aviron
+        orgId: 1
+        folder: Aviron
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards

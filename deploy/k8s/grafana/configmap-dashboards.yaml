@@ -1,0 +1,243 @@
+# dashboards/grafana-deploy.md — provisioned dashboard JSON, not clicked
+# together by hand. Every panel aggregates `by (pod, ...)`, never a bare
+# average across a service's 2-5 HPA'd replicas, per phase-6-plan.md
+# Decisions #7 — `pod`/`app` labels come from Prometheus's own
+# kubernetes_sd_configs relabeling (metrics/prometheus-deploy.md), not from
+# the app's own metric labels.
+#
+# Panel queries deliberately do NOT use the spec sketch's literal
+# `aviron_..._total`/`http_requests`-equivalent placeholder — grepped
+# metrics/metrics-parity.md's actual shipped code instead
+# (internal/metrics/*.go, internal/roomrelay/bus.go,
+# internal/roomlocator/locator.go) and found no per-HTTP-request
+# rate/error counter exists anywhere in this codebase; race-service and
+# ws-gateway were never instrumented at that layer. Real RED signal for
+# each service instead: race-service's own defining traffic is
+# roomrelay/room-tick activity (aviron_roomrelay_publish_total/
+# _errors_total/_duration_seconds, aviron_tick_latency_seconds);
+# ws-gateway's is the same roomrelay publish plus its own connection-scoped
+# aviron_roomlocator_lookup_duration_seconds/_errors_total; consumer's Rate
+# comes from its own duration histogram's auto-exposed `_count` series
+# (aviron_consumer_batch_insert_duration_seconds_count), the idiomatic way
+# to derive a request-rate from a HistogramVec that has no separate total
+# counter.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: aviron
+data:
+  race-service-red.json: |
+    {
+      "title": "Aviron - race-service (RED)",
+      "uid": "aviron-race-service-red",
+      "tags": ["aviron", "red"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        {
+          "id": 1, "title": "Rate — roomrelay publish/sec", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum by (pod, subject_kind) (rate(aviron_roomrelay_publish_total{app=\"race-service\"}[5m]))", "legendFormat": "{{pod}} ({{subject_kind}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 2, "title": "Errors — publish + roomlocator lookup errors/sec", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum by (pod, subject_kind) (rate(aviron_roomrelay_publish_errors_total{app=\"race-service\"}[5m]))", "legendFormat": "{{pod}} publish ({{subject_kind}})", "refId": "A" },
+            { "expr": "sum by (pod, op) (rate(aviron_roomlocator_errors_total{app=\"race-service\"}[5m]))", "legendFormat": "{{pod}} locator ({{op}})", "refId": "B" }
+          ]
+        },
+        {
+          "id": 3, "title": "Duration — room broadcast tick p95/p50", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (pod, le) (rate(aviron_tick_latency_seconds_bucket{app=\"race-service\"}[5m])))", "legendFormat": "{{pod}} p95", "refId": "A" },
+            { "expr": "histogram_quantile(0.50, sum by (pod, le) (rate(aviron_tick_latency_seconds_bucket{app=\"race-service\"}[5m])))", "legendFormat": "{{pod}} p50", "refId": "B" }
+          ]
+        },
+        {
+          "id": 4, "title": "Duration — roomrelay publish p95", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (pod, subject_kind, le) (rate(aviron_roomrelay_publish_duration_seconds_bucket{app=\"race-service\"}[5m])))", "legendFormat": "{{pod}} ({{subject_kind}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 5, "title": "Duration — roomlocator lookup p95", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (pod, op, le) (rate(aviron_roomlocator_lookup_duration_seconds_bucket{app=\"race-service\"}[5m])))", "legendFormat": "{{pod}} ({{op}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 6, "title": "Active rooms per pod", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "aviron_rooms_active{app=\"race-service\"}", "legendFormat": "{{pod}}", "refId": "A" }
+          ]
+        }
+      ]
+    }
+  ws-gateway-red.json: |
+    {
+      "title": "Aviron - ws-gateway (RED)",
+      "uid": "aviron-ws-gateway-red",
+      "tags": ["aviron", "red"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        {
+          "id": 1, "title": "Rate — roomrelay publish/sec", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum by (pod, subject_kind) (rate(aviron_roomrelay_publish_total{app=\"ws-gateway\"}[5m]))", "legendFormat": "{{pod}} ({{subject_kind}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 2, "title": "Errors — publish + roomlocator lookup errors/sec", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum by (pod, subject_kind) (rate(aviron_roomrelay_publish_errors_total{app=\"ws-gateway\"}[5m]))", "legendFormat": "{{pod}} publish ({{subject_kind}})", "refId": "A" },
+            { "expr": "sum by (pod, op) (rate(aviron_roomlocator_errors_total{app=\"ws-gateway\"}[5m]))", "legendFormat": "{{pod}} locator ({{op}})", "refId": "B" }
+          ]
+        },
+        {
+          "id": 3, "title": "Duration — roomrelay publish p95", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (pod, subject_kind, le) (rate(aviron_roomrelay_publish_duration_seconds_bucket{app=\"ws-gateway\"}[5m])))", "legendFormat": "{{pod}} ({{subject_kind}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 4, "title": "Duration — roomlocator lookup p95", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (pod, op, le) (rate(aviron_roomlocator_lookup_duration_seconds_bucket{app=\"ws-gateway\"}[5m])))", "legendFormat": "{{pod}} ({{op}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 5, "title": "Active WebSocket connections per pod", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "aviron_ws_connections_active{app=\"ws-gateway\"}", "legendFormat": "{{pod}}", "refId": "A" }
+          ]
+        }
+      ]
+    }
+  consumer-red.json: |
+    {
+      "title": "Aviron - consumer (RED)",
+      "uid": "aviron-consumer-red",
+      "tags": ["aviron", "red"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        {
+          "id": 1, "title": "Rate — batch inserts/sec (from histogram _count)", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum by (pod, topic) (rate(aviron_consumer_batch_insert_duration_seconds_count{app=\"consumer\"}[5m]))", "legendFormat": "{{pod}} ({{topic}})", "refId": "A" }
+          ]
+        },
+        {
+          "id": 2, "title": "Errors — batch insert errors/sec + DLQ/sec", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum by (pod, topic) (rate(aviron_consumer_batch_insert_errors_total{app=\"consumer\"}[5m]))", "legendFormat": "{{pod}} errors ({{topic}})", "refId": "A" },
+            { "expr": "sum by (pod, topic) (rate(aviron_consumer_dlq_total{app=\"consumer\"}[5m]))", "legendFormat": "{{pod}} dlq ({{topic}})", "refId": "B" }
+          ]
+        },
+        {
+          "id": 3, "title": "Duration — batch insert p95", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (pod, topic, le) (rate(aviron_consumer_batch_insert_duration_seconds_bucket{app=\"consumer\"}[5m])))", "legendFormat": "{{pod}} ({{topic}})", "refId": "A" }
+          ]
+        }
+      ]
+    }
+  aviron-use-fleet.json: |
+    {
+      "title": "Aviron - Fleet USE + Autoscaling",
+      "uid": "aviron-use-fleet",
+      "tags": ["aviron", "use"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        {
+          "id": 1, "title": "Goroutines per pod (all binaries)", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "go_goroutines{app=~\"race-service|ws-gateway|consumer\"}", "legendFormat": "{{app}}/{{pod}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 2, "title": "Channel buffer usage per pod (race-service)", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "aviron_channel_buffer_used{app=\"race-service\"}", "legendFormat": "{{pod}}/{{channel}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 3, "title": "Kafka consumer lag per topic", "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "aviron_kafka_consumer_lag{app=\"consumer\"}", "legendFormat": "{{pod}}/{{topic}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 4, "title": "HPA replicas overlaid with CPU — a scale event visible alongside the load that triggered it", "type": "timeseries",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"aviron\"}", "legendFormat": "{{horizontalpodautoscaler}} replicas (current)", "refId": "A" },
+            { "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"aviron\"}", "legendFormat": "{{horizontalpodautoscaler}} replicas (desired)", "refId": "B" },
+            { "expr": "sum by (pod, app) (rate(process_cpu_seconds_total{app=~\"race-service|ws-gateway\"}[5m]))", "legendFormat": "{{app}}/{{pod}} CPU cores", "refId": "C" }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": [
+              {
+                "matcher": { "id": "byFrameRefID", "options": "C" },
+                "properties": [
+                  { "id": "unit", "value": "short" },
+                  { "id": "custom.axisPlacement", "value": "right" }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }

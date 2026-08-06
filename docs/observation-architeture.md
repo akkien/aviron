@@ -18,7 +18,7 @@ boundaries (WebSocket → NATS → Redis → Kafka → Postgres).
 | Traces — app code | OpenTelemetry SDK, full depth | **Shipped** | `tracing/instrumentation.md` |
 | Logs — correlation | `trace_id` in `slog` output | **Shipped** | `logging/log-trace-correlation.md` |
 | Logs — backend | EFK (Elasticsearch, Fluent Bit, Kibana) | **Shipped** | `logging/efk-deploy.md` |
-| Dashboards | Grafana (RED + USE, pod-aware) | Not started | `dashboards/grafana-deploy.md` |
+| Dashboards | Grafana (RED + USE, pod-aware) | **Shipped** | `dashboards/grafana-deploy.md` |
 | Alerting — rules | Prometheus alert rules + Alertmanager | Not started | `alerting/alert-rules.md` |
 | Alerting — delivery | `telegram-relay` (new 4th binary) → Telegram | Not started | `alerting/telegram-relay.md` |
 | End-to-end proof | Full walkthrough of every piece together | Not started | `verification/phase-6-verification.md` |
@@ -49,18 +49,18 @@ flowchart TB
         PROM["Prometheus<br/>kubernetes_sd_configs: role: pod<br/>(no static target list)"]
     end
 
-    subgraph tracing["Traces — push-based OTLP — infra SHIPPED, app code not started"]
+    subgraph tracing["Traces — push-based OTLP — SHIPPED"]
         OTEL["OTel Collector<br/>otlp receiver :4317<br/>memory_limiter + batch"]
         TEMPO["Tempo<br/>monolithic mode<br/>local filesystem backend"]
     end
 
-    subgraph logging["Logs — planned"]
+    subgraph logging["Logs — SHIPPED"]
         FB["Fluent Bit<br/>DaemonSet, tails pod stdout"]
         ES["Elasticsearch<br/>index: aviron-logs"]
         KIB["Kibana<br/>full-text log search"]
     end
 
-    subgraph dash["Dashboards — planned"]
+    subgraph dash["Dashboards — SHIPPED"]
         GRAF["Grafana<br/>single pane of glass<br/>RED + USE, per-pod"]
     end
 
@@ -119,7 +119,7 @@ flowchart TD
     D --> E["instrumentation<br/>DONE"]
     E --> F["log-trace-correlation<br/>DONE"]
     F --> C
-    C --> G["grafana-deploy<br/>not started"]
+    C --> G["grafana-deploy<br/>DONE"]
     G --> H["alert-rules<br/>not started"]
     H --> I["telegram-relay<br/>not started"]
     I --> J["phase-6-verification<br/>not started"]
@@ -321,7 +321,8 @@ sequenceDiagram
 | Elasticsearch | Logs | `StatefulSet` | 9200 | `docker.elastic.co/elasticsearch/elasticsearch:8.15.0` | Shipped |
 | Fluent Bit | Logs | `DaemonSet` | n/a (tails `hostPath`) | `fluent/fluent-bit` | Shipped |
 | Kibana | Logs | `Deployment` | 5601 | `docker.elastic.co/kibana/kibana:8.15.0` | Shipped |
-| Grafana | Dashboards | `Deployment` | 3000 | `grafana/grafana:latest` | Not started |
+| Grafana | Dashboards | `Deployment` | 3000 | `grafana/grafana:latest` | Shipped |
+| `kube-state-metrics` | Dashboards (HPA panel) | `Deployment` | 8080 (metrics), 8081 (telemetry) | `registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1` | Shipped |
 | Alertmanager | Alerting | `Deployment` | n/a | `prom/alertmanager` | Not started |
 | `telegram-relay` (new 4th binary) | Alerting | `Deployment` | 8080 (`/alert`, `/metrics`) | `aviron-backend:local` (new `cmd/telegram-relay`) | Not started |
 
