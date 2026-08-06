@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: aviron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      containers:
+        - name: tempo
+          image: grafana/tempo:latest
+          args:
+            - -config.file=/etc/tempo/tempo.yaml
+          ports:
+            - containerPort: 3200
+              name: http
+            - containerPort: 4317
+              name: otlp-grpc
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: traces
+              mountPath: /var/tempo/traces
+            - name: wal
+              mountPath: /var/tempo/wal
+          # Modest — same laptop-kind-cluster scale as every other piece
+          # of Phase 6 infra, not a production trace-retention target.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        # emptyDir, no PersistentVolumeClaim — WAL/block data doesn't
+        # survive a pod restart, the same "laptop kind cluster, not a
+        # real retention target" stance already taken for Prometheus and
+        # Kafka (persistence.enabled: false).
+        - name: traces
+          emptyDir: {}
+        - name: wal
+          emptyDir: {}

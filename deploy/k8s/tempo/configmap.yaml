@@ -1,0 +1,30 @@
+# tracing/otel-collector-tempo-deploy.md — single-binary "monolithic
+# mode", local filesystem backend for both WAL and block storage. Tempo's
+# own Helm chart supports far more (S3/GCS, distributed microservices
+# mode), none of which this laptop kind cluster needs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: aviron
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+    distributor:
+      receivers:
+        # Tempo can receive OTLP directly (any binary could in principle
+        # point straight at this) — the Collector is the architecture's
+        # single fan-out point instead, so every binary only needs to
+        # know one address (otel-collector-tempo-deploy.md's "Tempo").
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal

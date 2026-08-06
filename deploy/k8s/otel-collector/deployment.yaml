@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: aviron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          # Core distribution, not -contrib: this pipeline only needs
+          # otlp/batch/memory_limiter/health_check, all already in the
+          # core image — confirmed against the collector's own
+          # distributions before defaulting to the heavier -contrib image.
+          image: otel/opentelemetry-collector:latest
+          args:
+            - --config=/etc/otel-collector/otel-collector-config.yaml
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 13133
+              name: health
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel-collector
+          # Modest — a single Collector instance batching spans for this
+          # system's own per-telemetry-message volume on a laptop kind
+          # cluster, not a production trace-volume target. The container
+          # limit (256Mi) deliberately sits above memory_limiter's own
+          # limit_mib (200) in the ConfigMap — memory_limiter needs
+          # headroom to gracefully shed data before Kubernetes' hard
+          # cgroup limit would OOM-kill the pod outright.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config

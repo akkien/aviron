@@ -45,8 +45,21 @@ reachable).
 |    Service: prometheus | ServiceAccount + Role (pod watch)   |
 |    scrapes race-service/ws-gateway/consumer's /metrics via    |
 |    kubernetes_sd_configs (role: pod), not a static list       |
+|                                                               |
+| otel-collector (Deployment, 1 replica)                        |
+|    Service: otel-collector (OTLP gRPC :4317)                  |
+|    receives OTLP from all 3 binaries once instrumentation.md  |
+|    lands; today, verified with one manual test span only      |
+|    |                                                          |
+|    v                                                          |
+| tempo (Deployment, 1 replica)                                 |
+|    Service: tempo (query API :3200, OTLP :4317)               |
 +---------------------------------------------------------------+
 ```
+
+See `docs/observation-architeture.md` for the full observability-plane
+picture (metrics/traces/logs/alerting, shipped and planned) with
+diagrams — this doc stays focused on the deploy-and-verify commands.
 
 ## Prerequisites
 
@@ -229,6 +242,32 @@ kubectl port-forward -n aviron svc/prometheus 9090:9090
 # consumer pod should show up, discovered automatically.
 ```
 
+## Deploying the OTel Collector + Tempo
+
+Pure infra, no application code — stands up the single OTLP fan-out point
+(`otel-collector`) and the trace backend behind it (`tempo`, monolithic
+mode) that `tracing/instrumentation.md` needs to exist before it can send
+real spans. See
+`context/features/phase6/tracing/otel-collector-tempo-deploy.md`:
+
+```sh
+kubectl apply -f deploy/k8s/otel-collector/configmap.yaml -f deploy/k8s/otel-collector/deployment.yaml \
+  -f deploy/k8s/otel-collector/service.yaml
+kubectl apply -f deploy/k8s/tempo/configmap.yaml -f deploy/k8s/tempo/deployment.yaml -f deploy/k8s/tempo/service.yaml
+kubectl wait --for=condition=Ready pod -l 'app in (otel-collector,tempo)' -n aviron --timeout=60s
+```
+
+Verify the pipeline works before any application code sends a real span
+— send one manual test span (a tiny Go program using
+`otlptracegrpc.New(..., otlptracegrpc.WithEndpoint("localhost:4317"))`
+against a port-forwarded Collector) and confirm it's queryable via
+Tempo's own search API:
+
+```sh
+kubectl port-forward -n aviron svc/tempo 3200:3200
+curl -s 'http://localhost:3200/api/search?tags=service.name%3D<your-test-service-name>' | jq
+```
+
 ## Components
 
 Quick reference — especially the DNS names, which are exactly what you'd
@@ -244,6 +283,8 @@ need when debugging a connection issue from inside the cluster:
 | `ws-gateway` | `Deployment` (2-5, HPA) | `aviron-backend:local` (`/app/ws-gateway`) | 8080 | `ws-gateway.aviron.svc.cluster.local`; externally `http://localhost/` via `Ingress` | None — stateless |
 | `consumer` | `Deployment` (1) | `aviron-backend:local` (`/app/consumer`) | 8091 (`/metrics`, `/debug/pprof/*` only) | `consumer.aviron.svc.cluster.local` | None |
 | Prometheus | `Deployment` (1) | `prom/prometheus:latest` | 9090 | `prometheus.aviron.svc.cluster.local` | None — `emptyDir`, TSDB doesn't survive a pod restart |
+| OTel Collector | `Deployment` (1) | `otel/opentelemetry-collector:latest` (core, not `-contrib`) | 4317 (OTLP gRPC), 13133 (health) | `otel-collector.aviron.svc.cluster.local` | None — stateless fan-out, nothing to persist |
+| Tempo | `Deployment` (1) | `grafana/tempo:latest` | 3200 (query API), 4317 (OTLP) | `tempo.aviron.svc.cluster.local` | None — `emptyDir` for WAL + blocks, doesn't survive a pod restart |
 
 ## Verifying it's actually working
 

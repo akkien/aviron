@@ -1,0 +1,45 @@
+# tracing/otel-collector-tempo-deploy.md — a single fan-out point every
+# binary pushes OTLP spans to, rather than each of the three binaries
+# hand-rolling its own per-backend exporter wiring. Core (non-contrib)
+# otel/opentelemetry-collector image already ships otlp/batch/
+# memory_limiter/health_check — confirmed against the collector's own
+# distributions.md before picking the image, not assumed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: aviron
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      # A misbehaving instrumented binary must not OOM the Collector —
+      # first in the pipeline so it can shed load before batch even runs.
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 200
+      # Reduces the number of distinct export calls under this system's
+      # per-telemetry-message span volume (phase-6-plan.md Decisions #3).
+      batch:
+        timeout: 5s
+    exporters:
+      otlp:
+        endpoint: tempo.aviron.svc.cluster.local:4317
+        tls:
+          # Same "no internal TLS" stance this whole local cluster already
+          # takes for Postgres/Redis/Kafka/NATS — not a new exception.
+          insecure: true
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp]
