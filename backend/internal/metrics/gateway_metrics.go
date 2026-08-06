@@ -39,6 +39,20 @@ func (m *GatewayMetrics) RegisterConnectionGauge(hubs *wsgateway.RaceHubRegistry
 	}, func() float64 { return float64(hubs.Count()) }))
 }
 
+// RegisterNATSReconnectCounter wires aviron_nats_reconnects_total — see
+// Metrics.RegisterNATSReconnectCounter's identical doc comment for the
+// reasoning; duplicated rather than shared for the same "separate
+// registries, nothing in common beyond the Go/process collectors" reason
+// this type's own doc comment already gives.
+func (m *GatewayMetrics) RegisterNATSReconnectCounter() prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "aviron_nats_reconnects_total",
+		Help: "Number of times this process's NATS connection has reconnected after a disconnect.",
+	})
+	m.reg.MustRegister(c)
+	return c
+}
+
 // Registerer exposes this process's registry so internal/roomrelay and
 // internal/roomlocator can register their own publish/lookup metrics into
 // it — see Metrics.Registerer's identical doc comment for the reasoning.

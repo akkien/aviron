@@ -1,0 +1,63 @@
+# alerting/alert-rules.md — plain Deployment + ConfigMap + Service, same
+# shape as every other piece of Phase 6 infra (Prometheus, OTel Collector,
+# Tempo, EFK, Grafana all did the same — no operator needed at this scale).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: aviron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:latest
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+          ports:
+            - containerPort: 9093
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+            - name: data
+              mountPath: /alertmanager
+          # Modest — same laptop-kind-cluster scale as every other piece
+          # of this phase's infra, not a production alert-volume target.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9093
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9093
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        # emptyDir, no PersistentVolumeClaim — silence/notification-log
+        # state doesn't survive a pod restart, same "laptop kind cluster,
+        # not a real retention target" stance as every other observability
+        # backend in this phase.
+        - name: data
+          emptyDir: {}

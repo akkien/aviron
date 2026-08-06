@@ -26,6 +26,13 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+            # alerting/alert-rules.md — a second ConfigMap volume, not a
+            # second key mounted into the same directory as prometheus.yml:
+            # keeps the rules file independently editable/reloadable from
+            # the scrape config, referenced by prometheus.yml's own
+            # rule_files entry.
+            - name: rules
+              mountPath: /etc/prometheus/rules
             - name: data
               mountPath: /prometheus
           # Modest — a single-node Prometheus scraping ~9 targets every
@@ -55,6 +62,9 @@ spec:
         - name: config
           configMap:
             name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-rules
         # emptyDir, no PersistentVolumeClaim — TSDB data doesn't survive a
         # pod restart, the same "this is a laptop kind cluster, not a real
         # retention target" stance already taken for Kafka

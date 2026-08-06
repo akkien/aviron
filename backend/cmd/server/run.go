@@ -87,6 +87,7 @@ func Run(cfg *config.Config) {
 	}
 
 	m := metrics.NewMetrics()
+	m.RegisterPgPoolGauges(pool)
 
 	redisClient, err := redisclient.NewClient(ctx, cfg.RedisURL)
 	if err != nil {
@@ -98,7 +99,16 @@ func Run(cfg *config.Config) {
 	producer := kafka.NewProducer(strings.Split(cfg.KafkaBrokers, ","), logger)
 	defer producer.Close()
 
-	natsConn, err := nats.Connect(cfg.NATSURL)
+	natsReconnects := m.RegisterNATSReconnectCounter()
+	natsConn, err := nats.Connect(cfg.NATSURL,
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			natsReconnects.Inc()
+			logger.Warn("nats: reconnected", slog.String("url", nc.ConnectedUrl()))
+		}),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			logger.Warn("nats: disconnected", slog.Any("error", err))
+		}),
+	)
 	if err != nil {
 		log.Fatalf("nats: %v", err)
 	}
