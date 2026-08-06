@@ -3,6 +3,7 @@ package wsgateway
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,11 @@ type Config struct {
 	// race-router.md already carried.
 	Backends []string
 	CacheTTL time.Duration
+	// PprofEnabled gates net/http/pprof's /debug/pprof/ endpoints — same
+	// PPROF_ENABLED key internal/config.Config already reads for
+	// race-service, kept as a separate field here since this is a distinct
+	// Config type (metrics/metrics-parity.md).
+	PprofEnabled bool
 }
 
 // LoadConfig reads Config from the environment. RACE_SERVICE_INSTANCES is
@@ -63,6 +69,7 @@ func LoadConfig() (Config, error) {
 		AllowedOrigin: getEnv("CORS_ALLOWED_ORIGIN", "http://localhost:5173"),
 		Backends:      backends,
 		CacheTTL:      getEnvDuration("ROUTING_CACHE_TTL", 30*time.Second),
+		PprofEnabled:  getEnvBool("PPROF_ENABLED", true),
 	}, nil
 }
 
@@ -71,6 +78,14 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v, err := strconv.ParseBool(os.Getenv(key))
+	if err != nil {
+		return fallback
+	}
+	return v
 }
 
 func getEnvDuration(key string, fallback time.Duration) time.Duration {

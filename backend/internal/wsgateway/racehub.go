@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/akkien/aviron/internal/roomrelay"
 )
@@ -29,7 +30,7 @@ const connBufferSize = 8
 // the context.CancelFunc that ends that connection's readLoop/writeLoop
 // (serveConn's own connCtx). Tracked so a raceHub can force-disconnect
 // every local connection it holds on process shutdown
-// (graceful-shutdown.md's raceHubRegistry.Shutdown), not just when the
+// (graceful-shutdown.md's RaceHubRegistry.Shutdown), not just when the
 // room itself ends or a connection detaches on its own.
 type connRegistration struct {
 	ch     chan []byte
@@ -43,12 +44,20 @@ type raceHub struct {
 	shutdown   chan struct{}
 	closed     chan struct{}
 	stopOnce   sync.Once
+	// connCount mirrors conns' length inside run's own single-writer loop
+	// (updated there, alongside the map itself) so Count can be read from a
+	// metrics scrape goroutine without querying through run's select loop
+	// under load — the same atomic.Int64-over-query-through-channel
+	// tradeoff prometheus-metrics.md already reasoned through once for the
+	// original (removed) connection gauge, reused here rather than
+	// re-litigated (metrics/metrics-parity.md).
+	connCount atomic.Int64
 }
 
 // newRaceHub starts fanning out's envelopes out until out closes, a
 // room_closed envelope arrives, or stop is triggered — whichever happens
 // first. onClose runs exactly once, after run's loop exits, so the caller
-// (raceHubRegistry) can forget this hub instead of leaking a map entry.
+// (RaceHubRegistry) can forget this hub instead of leaking a map entry.
 // unsubscribe is called on every exit path, so this gateway never leaves a
 // dangling room.{race_id}.out subscription behind.
 func newRaceHub(raceID string, out <-chan roomrelay.OutboundEnvelope, unsubscribe func(), onClose func(), logger *slog.Logger) *raceHub {
@@ -109,12 +118,14 @@ func (h *raceHub) run(raceID string, out <-chan roomrelay.OutboundEnvelope, unsu
 			}
 		case reg := <-h.register:
 			conns[reg.ch] = reg.cancel
+			h.connCount.Store(int64(len(conns)))
 		case c := <-h.unregister:
 			delete(conns, c)
+			h.connCount.Store(int64(len(conns)))
 		case <-h.shutdown:
 			// Force-disconnects every connection this hub currently holds
 			// — used only when the whole gateway process is shutting down
-			// (graceful-shutdown.md's raceHubRegistry.Shutdown), never as
+			// (graceful-shutdown.md's RaceHubRegistry.Shutdown), never as
 			// part of this hub's own normal per-race lifecycle. Cancelling
 			// a connection's own ctx (not closing h.closed) means its
 			// readLoop takes the same path a real network disconnect
@@ -127,7 +138,7 @@ func (h *raceHub) run(raceID string, out <-chan roomrelay.OutboundEnvelope, unsu
 				cancel()
 			}
 		case <-h.stop:
-			// Triggered by raceHubRegistry once this race's last local
+			// Triggered by RaceHubRegistry once this race's last local
 			// connection detaches — nobody's left to deliver to, so
 			// dropping whatever's still in flight is correct, not a bug
 			// (unlike the room_closed case above, there's no "final
@@ -141,6 +152,14 @@ func (h *raceHub) run(raceID string, out <-chan roomrelay.OutboundEnvelope, unsu
 // than once (e.g. a concurrent detach racing run's own room_closed exit).
 func (h *raceHub) signalStop() {
 	h.stopOnce.Do(func() { close(h.stop) })
+}
+
+// Count returns how many local connections this hub currently holds. Safe
+// to call from any goroutine, including a metrics scrape — reads an atomic
+// updated inline by run's own register/unregister handling, not a query
+// through run's select loop.
+func (h *raceHub) Count() int {
+	return int(h.connCount.Load())
 }
 
 // registerConn attaches c to the fan-out, tracking cancel (serveConn's own
@@ -167,7 +186,7 @@ func (h *raceHub) unregisterConn(c chan []byte) {
 // disconnectAll signals run to force-cancel every locally registered
 // connection's context (graceful-shutdown.md). Fire-and-forget — it
 // doesn't wait for those connections to actually finish closing;
-// raceHubRegistry.Shutdown's own caller doesn't need it to, since
+// RaceHubRegistry.Shutdown's own caller doesn't need it to, since
 // http.Server.Shutdown already waits for each affected ServeHTTP call to
 // return on its own. Same closed-hub guard as registerConn/unregisterConn.
 func (h *raceHub) disconnectAll() {
@@ -193,7 +212,7 @@ type raceHubEntry struct {
 	refCount int
 }
 
-// raceHubRegistry lazily creates one raceHub per race_id this gateway has
+// RaceHubRegistry lazily creates one raceHub per race_id this gateway has
 // at least one local connection for, reference-counted so a subscription
 // is held open only for as long as it's actually needed — new relative to
 // the former hubRegistry (which tied a hub's lifetime solely to the
@@ -201,7 +220,7 @@ type raceHubEntry struct {
 // one process). A gateway process serves many races across many local
 // clients, so it should only hold a room.{race_id}.out subscription open
 // for races it actually has a local connection for right now.
-type raceHubRegistry struct {
+type RaceHubRegistry struct {
 	mu     sync.Mutex
 	hubs   map[string]*raceHubEntry
 	relay  relayBus
@@ -209,12 +228,12 @@ type raceHubRegistry struct {
 	logger *slog.Logger
 }
 
-// NewRaceHubRegistry constructs an empty raceHubRegistry. ctx is the
+// NewRaceHubRegistry constructs an empty RaceHubRegistry. ctx is the
 // gateway process's own root context — deliberately not a per-connection
 // context, since a raceHub's subscription must outlive any single
 // connection that happens to be the first or last to (dis)attach.
-func NewRaceHubRegistry(ctx context.Context, relay relayBus, logger *slog.Logger) *raceHubRegistry {
-	return &raceHubRegistry{hubs: make(map[string]*raceHubEntry), relay: relay, ctx: ctx, logger: logger}
+func NewRaceHubRegistry(ctx context.Context, relay relayBus, logger *slog.Logger) *RaceHubRegistry {
+	return &RaceHubRegistry{hubs: make(map[string]*raceHubEntry), relay: relay, ctx: ctx, logger: logger}
 }
 
 // attach registers one more local connection's interest in raceID. On the
@@ -224,7 +243,7 @@ func NewRaceHubRegistry(ctx context.Context, relay relayBus, logger *slog.Logger
 // reason: NATS Core has no replay, so a broadcast published the instant
 // this gateway's first local connection for a race attaches must not be
 // able to race a subscription that hasn't actually reached the bus yet.
-func (hr *raceHubRegistry) attach(raceID string) (*raceHub, error) {
+func (hr *RaceHubRegistry) attach(raceID string) (*raceHub, error) {
 	hr.mu.Lock()
 	defer hr.mu.Unlock()
 
@@ -253,7 +272,7 @@ func (hr *raceHubRegistry) attach(raceID string) (*raceHub, error) {
 // with no entry (e.g. the room already closed and removed itself first
 // via raceHub's own room_closed path) — a no-op, mirroring
 // room.Registry.Remove's own double-removal tolerance.
-func (hr *raceHubRegistry) detach(raceID string) {
+func (hr *RaceHubRegistry) detach(raceID string) {
 	hr.mu.Lock()
 	defer hr.mu.Unlock()
 
@@ -268,6 +287,23 @@ func (hr *raceHubRegistry) detach(raceID string) {
 	}
 }
 
+// Count sums the number of local connections held across every race this
+// gateway currently has at least one connection for
+// (metrics/metrics-parity.md — aviron_ws_connections_active). Safe to call
+// from a metrics scrape goroutine: takes the same mutex every other
+// read-only method already does, and each hub's own Count is an atomic
+// read, not a query through that hub's run loop.
+func (hr *RaceHubRegistry) Count() int {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+
+	total := 0
+	for _, entry := range hr.hubs {
+		total += entry.hub.Count()
+	}
+	return total
+}
+
 // Shutdown force-disconnects every locally-held connection across every
 // race this gateway currently has at least one connection for
 // (graceful-shutdown.md). Called once, during process shutdown — never
@@ -276,7 +312,7 @@ func (hr *raceHubRegistry) detach(raceID string) {
 // course afterward: as each disconnected connection's serveConn returns,
 // it calls detach exactly like a real disconnect would, tearing the hub
 // down once its last connection is gone.
-func (hr *raceHubRegistry) Shutdown() {
+func (hr *RaceHubRegistry) Shutdown() {
 	hr.mu.Lock()
 	hubs := make([]*raceHub, 0, len(hr.hubs))
 	for _, entry := range hr.hubs {

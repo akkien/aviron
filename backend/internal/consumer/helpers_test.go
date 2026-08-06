@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 
@@ -81,5 +82,27 @@ func (f *fakeCommitter) CommitMessages(ctx context.Context, msgs ...kafkago.Mess
 }
 
 func newTestConsumer(writer WorkoutSampleWriter, reconciler FinishReconciler, dlq DLQPublisher) *Consumer {
-	return NewConsumer([]string{"localhost:9092"}, writer, reconciler, dlq, testLogger)
+	return NewConsumer([]string{"localhost:9092"}, writer, reconciler, dlq, NoopMetricsRecorder{}, testLogger)
+}
+
+type batchInsertCall struct {
+	topic string
+	err   error
+}
+
+type spyMetrics struct {
+	batchInserts []batchInsertCall
+	dlqTopics    []string
+}
+
+func (s *spyMetrics) ObserveBatchInsert(topic string, d time.Duration, err error) {
+	s.batchInserts = append(s.batchInserts, batchInsertCall{topic: topic, err: err})
+}
+
+func (s *spyMetrics) IncDLQ(topic string) {
+	s.dlqTopics = append(s.dlqTopics, topic)
+}
+
+func newTestConsumerWithMetrics(writer WorkoutSampleWriter, reconciler FinishReconciler, dlq DLQPublisher, metrics MetricsRecorder) *Consumer {
+	return NewConsumer([]string{"localhost:9092"}, writer, reconciler, dlq, metrics, testLogger)
 }

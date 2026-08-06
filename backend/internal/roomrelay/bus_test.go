@@ -7,6 +7,7 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // newTestBus spins up an in-process NATS server (the NATS equivalent of
@@ -24,7 +25,7 @@ func newTestBus(t *testing.T) *Bus {
 	}
 	t.Cleanup(nc.Close)
 
-	return NewBus(nc)
+	return NewBus(nc, prometheus.NewRegistry())
 }
 
 func TestBus_PublishIn_DeliversToSubscriber(t *testing.T) {

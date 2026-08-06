@@ -241,7 +241,7 @@ func TestRaceHubRegistry_Detach_OnlyStopsHubWhenRefCountHitsZero(t *testing.T) {
 	_, ok := hr.hubs["race-1"]
 	hr.mu.Unlock()
 	if ok {
-		t.Error("raceHubRegistry still has an entry for race-1 after its last detach")
+		t.Error("RaceHubRegistry still has an entry for race-1 after its last detach")
 	}
 }
 
@@ -280,7 +280,59 @@ func TestRaceHubRegistry_RoomClosed_RemovesEntryIndependentOfRefCount(t *testing
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("raceHubRegistry did not remove race-1's entry after room_closed")
+	t.Fatal("RaceHubRegistry did not remove race-1's entry after room_closed")
+}
+
+// TestRaceHubRegistry_Count_SumsConnectionsAcrossHubs is
+// metrics/metrics-parity.md's own coverage for
+// aviron_ws_connections_active: Count must sum every hub's connection
+// count, not just the most recently attached one.
+func TestRaceHubRegistry_Count_SumsConnectionsAcrossHubs(t *testing.T) {
+	fake := roomrelay.NewFakeBus()
+	hr := NewRaceHubRegistry(context.Background(), fake, testLogger)
+
+	if hr.Count() != 0 {
+		t.Fatalf("Count() = %d, want 0 before any connection registers", hr.Count())
+	}
+
+	h1, err := hr.attach("race-1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	h2, err := hr.attach("race-2")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	connA := make(chan []byte, connBufferSize)
+	connB := make(chan []byte, connBufferSize)
+	connC := make(chan []byte, connBufferSize)
+	h1.registerConn(connA, func() {})
+	h1.registerConn(connB, func() {})
+	h2.registerConn(connC, func() {})
+
+	waitForHubRegistryCount(t, hr, 3)
+
+	h1.unregisterConn(connA)
+	waitForHubRegistryCount(t, hr, 2)
+}
+
+// waitForHubRegistryCount polls Count rather than asserting immediately —
+// registerConn/unregisterConn only block until run's select receives the
+// request, not until run finishes updating connCount afterward.
+func waitForHubRegistryCount(t *testing.T, hr *RaceHubRegistry, want int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		if got := hr.Count(); got == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("Count() never reached %d, got %d", want, hr.Count())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 // TestRaceHubRegistry_ConcurrentAttachDetach is the -race coverage

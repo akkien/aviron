@@ -46,3 +46,10 @@ func TestLoad_PprofEnabledRespectsEnv(t *testing.T) {
 		t.Error("PprofEnabled = true, want false when PPROF_ENABLED=false")
 	}
 }
+
+func TestLoad_ConsumerListenAddrDefaultsTo8091(t *testing.T) {
+	cfg := Load()
+	if cfg.ConsumerListenAddr != ":8091" {
+		t.Errorf("ConsumerListenAddr = %q, want :8091 when CONSUMER_LISTEN_ADDR is unset", cfg.ConsumerListenAddr)
+	}
+}

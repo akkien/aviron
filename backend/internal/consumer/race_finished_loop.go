@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
+
+	"github.com/akkien/aviron/internal/kafka"
 )
 
 // runRaceFinishedLoop has no batching — race.finished volume is orders of
@@ -43,7 +46,10 @@ func (c *Consumer) processRaceFinishedMessage(ctx context.Context, reader commit
 		return
 	}
 
-	if err := c.reconciler.ReconcileParticipantResults(ctx, decoded.RaceID, decoded.Results); err != nil {
+	start := time.Now()
+	err := c.reconciler.ReconcileParticipantResults(ctx, decoded.RaceID, decoded.Results)
+	c.metrics.ObserveBatchInsert(kafka.TopicRaceFinished, time.Since(start), err)
+	if err != nil {
 		if errors.Is(err, ErrPermanentWrite) {
 			c.logger.Warn("dead-lettering race finished message", slog.Any("error", err))
 			c.deadLetter(ctx, raceFinishedDLQTopic, msg)

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
+
+	"github.com/akkien/aviron/internal/kafka"
 )
 
 // committer is the one *kafka.Reader method flushWorkoutSampleBatch
@@ -80,7 +82,9 @@ func (c *Consumer) flushWorkoutSampleBatch(ctx context.Context, reader committer
 		return
 	}
 
+	start := time.Now()
 	err := c.writer.InsertBatch(ctx, batch.samples)
+	c.metrics.ObserveBatchInsert(kafka.TopicWorkoutSample, time.Since(start), err)
 	if err == nil {
 		if cerr := reader.CommitMessages(ctx, batch.messages...); cerr != nil {
 			c.logger.Error("commit workout sample batch failed", slog.Any("error", cerr))

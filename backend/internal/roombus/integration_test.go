@@ -9,6 +9,7 @@ import (
 
 	natsservertest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/room"
@@ -59,13 +60,14 @@ func TestNATSRoomBus_EndToEnd_RealNATSDrivesRoomActorToFinish(t *testing.T) {
 	}
 	t.Cleanup(nc.Close)
 
-	bus := NewNATSRoomBus(roomrelay.NewBus(nc), testLogger)
-	registry := room.NewRegistry(testLogger, metrics.NewMetrics(), room.NoopLocator{}, room.NoopPublisher{}, bus, room.NoopEvictionRecorder{})
+	m := metrics.NewMetrics()
+	bus := NewNATSRoomBus(roomrelay.NewBus(nc, m.Registerer()), testLogger)
+	registry := room.NewRegistry(testLogger, m, room.NoopLocator{}, room.NoopPublisher{}, bus, room.NoopEvictionRecorder{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	gateway := roomrelay.NewBus(nc)
+	gateway := roomrelay.NewBus(nc, prometheus.NewRegistry())
 	out, _, err := gateway.SubscribeOut(ctx, "race-1")
 	if err != nil {
 		t.Fatalf("SubscribeOut: %v", err)

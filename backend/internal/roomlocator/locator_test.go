@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -15,7 +16,7 @@ func newTestLocator(t *testing.T, instanceID string) (*Locator, *miniredis.Minir
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { client.Close() })
-	return NewLocator(client, instanceID), mr
+	return NewLocator(client, instanceID, prometheus.NewRegistry()), mr
 }
 
 func TestLocator_Claim_FirstClaimSucceeds(t *testing.T) {
@@ -40,8 +41,8 @@ func TestLocator_Claim_SecondClaimByDifferentInstanceFails(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { client.Close() })
 
-	a := NewLocator(client, "instance-a")
-	b := NewLocator(client, "instance-b")
+	a := NewLocator(client, "instance-a", prometheus.NewRegistry())
+	b := NewLocator(client, "instance-b", prometheus.NewRegistry())
 
 	claimedA, err := a.Claim(ctx, "race-1")
 	if err != nil || !claimedA {
@@ -197,7 +198,7 @@ func TestLocator_ClaimAndRelease_PublishRoomEvents(t *testing.T) {
 	}
 	ch := sub.Channel()
 
-	l := NewLocator(client, "instance-a")
+	l := NewLocator(client, "instance-a", prometheus.NewRegistry())
 
 	if _, err := l.Claim(ctx, "race-1"); err != nil {
 		t.Fatalf("Claim: %v", err)

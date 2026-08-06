@@ -74,12 +74,14 @@ func Run(cfg *config.Config) {
 		log.Fatalf("migrate: %v", err)
 	}
 
+	m := metrics.NewMetrics()
+
 	redisClient, err := redisclient.NewClient(ctx, cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("redisclient: %v", err)
 	}
 	defer redisClient.Close()
-	locator := roomlocator.NewLocator(redisClient, cfg.InstanceID)
+	locator := roomlocator.NewLocator(redisClient, cfg.InstanceID, m.Registerer())
 
 	producer := kafka.NewProducer(strings.Split(cfg.KafkaBrokers, ","), logger)
 	defer producer.Close()
@@ -89,9 +91,8 @@ func Run(cfg *config.Config) {
 		log.Fatalf("nats: %v", err)
 	}
 	defer natsConn.Close()
-	bus := roombus.NewNATSRoomBus(roomrelay.NewBus(natsConn), logger)
+	bus := roombus.NewNATSRoomBus(roomrelay.NewBus(natsConn, m.Registerer()), logger)
 
-	m := metrics.NewMetrics()
 	registry := room.NewRegistry(logger, m, locator, producer, bus, locator)
 
 	gate := &httpserver.ReadinessGate{}

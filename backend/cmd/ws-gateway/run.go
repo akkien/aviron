@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/redisclient"
 	"github.com/akkien/aviron/internal/roomlocator"
 	"github.com/akkien/aviron/internal/roomrelay"
@@ -49,6 +51,8 @@ func Run(cfg wsgateway.Config) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	m := metrics.NewGatewayMetrics()
+
 	redisClient, err := redisclient.NewClient(ctx, cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("redisclient: %v", err)
@@ -58,14 +62,14 @@ func Run(cfg wsgateway.Config) {
 	// "ws-gateway" is inert here — this process never calls
 	// Claim/Refresh/Release/MarkEvicted (all race-service-only), only
 	// Owner/SubscribeRoomEvents/IsEvicted.
-	locator := roomlocator.NewLocator(redisClient, "ws-gateway")
+	locator := roomlocator.NewLocator(redisClient, "ws-gateway", m.Registerer())
 
 	natsConn, err := nats.Connect(cfg.NATSURL)
 	if err != nil {
 		log.Fatalf("nats: %v", err)
 	}
 	defer natsConn.Close()
-	relay := roomrelay.NewBus(natsConn)
+	relay := roomrelay.NewBus(natsConn, m.Registerer())
 
 	discovery, err := newBackendDiscovery(ctx, cfg, logger)
 	if err != nil {
@@ -76,12 +80,27 @@ func Run(cfg wsgateway.Config) {
 	go gw.WatchRoomEvents(ctx)
 
 	hubs := wsgateway.NewRaceHubRegistry(ctx, relay, logger)
+	m.RegisterConnectionGauge(hubs)
 	wsHandler := wsgateway.NewWSHandler(locator, relay, hubs, cfg.JWTSecret, cfg.AllowedOrigin, logger)
 
 	gate := &wsgateway.ReadinessGate{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", wsgateway.NewHealthzHandler(redisClient, natsConn, discovery, gate))
 	mux.HandleFunc("GET /livez", wsgateway.NewLivezHandler())
+	// Not wrapped in any auth/CORS middleware — a Prometheus scraper
+	// carries no JWT and is never called from a browser, matching
+	// race-service's own GET /metrics precedent.
+	mux.Handle("GET /metrics", m.Handler())
+	if cfg.PprofEnabled {
+		// Same 5 explicit handlers race-service's route.go registers, not a
+		// blank `import _ "net/http/pprof"` — see that file's own comment
+		// for why.
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 	mux.Handle("GET /ws", wsHandler)
 	mux.Handle("/", gw)
 

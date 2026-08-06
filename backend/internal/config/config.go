@@ -34,6 +34,12 @@ type Config struct {
 	// (room-message-bus.md) — a separate transport from RedisURL, which
 	// stays scoped to the room registry.
 	NATSURL string
+	// ConsumerListenAddr is cmd/consumer's own listen address for its
+	// /metrics and /debug/pprof/* server (metrics/metrics-parity.md) — this
+	// binary has no other HTTP surface, and a distinct default from PORT
+	// avoids a collision if it's ever run alongside race-service outside a
+	// container (e.g. two `go run` processes on one host).
+	ConsumerListenAddr string
 }
 
 func Load() *Config {
@@ -42,15 +48,16 @@ func Load() *Config {
 	_ = godotenv.Load()
 
 	return &Config{
-		DatabaseURL:       getEnv("DATABASE_URL", "postgres://aviron:aviron@localhost:5432/aviron?sslmode=disable"),
-		Port:              getEnv("PORT", "8080"),
-		JWTSecret:         getEnv("JWT_SECRET", "dev-only-secret-change-me"),
-		CORSAllowedOrigin: getEnv("CORS_ALLOWED_ORIGIN", "http://localhost:5173"),
-		PprofEnabled:      getEnvBool("PPROF_ENABLED", true),
-		InstanceID:        getEnvInstanceID(),
-		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		KafkaBrokers:      getEnv("KAFKA_BROKERS", "localhost:9092"),
-		NATSURL:           getEnv("NATS_URL", "nats://localhost:4222"),
+		DatabaseURL:        getEnv("DATABASE_URL", "postgres://aviron:aviron@localhost:5432/aviron?sslmode=disable"),
+		Port:               getEnv("PORT", "8080"),
+		JWTSecret:          getEnv("JWT_SECRET", "dev-only-secret-change-me"),
+		CORSAllowedOrigin:  getEnv("CORS_ALLOWED_ORIGIN", "http://localhost:5173"),
+		PprofEnabled:       getEnvBool("PPROF_ENABLED", true),
+		InstanceID:         getEnvInstanceID(),
+		RedisURL:           getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		KafkaBrokers:       getEnv("KAFKA_BROKERS", "localhost:9092"),
+		NATSURL:            getEnv("NATS_URL", "nats://localhost:4222"),
+		ConsumerListenAddr: getEnv("CONSUMER_LISTEN_ADDR", ":8091"),
 	}
 }
 

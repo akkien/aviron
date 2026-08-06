@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
@@ -53,6 +54,30 @@ type DLQPublisher interface {
 	PublishRaw(ctx context.Context, topic string, key, value []byte) error
 }
 
+// MetricsRecorder receives this package's own push-model metrics (batch
+// insert duration/errors, DLQ publishes) without internal/consumer needing
+// to import prometheus directly — the same one-directional shape
+// internal/room's TickObserver already establishes, so internal/metrics can
+// depend on internal/consumer without internal/consumer ever needing to
+// import internal/metrics (metrics/metrics-parity.md). Satisfied by
+// *metrics.ConsumerMetrics.
+type MetricsRecorder interface {
+	// ObserveBatchInsert records one WorkoutSampleWriter.InsertBatch or
+	// FinishReconciler.ReconcileParticipantResults call's duration; err is
+	// nil on success.
+	ObserveBatchInsert(topic string, d time.Duration, err error)
+	// IncDLQ records one DLQPublisher.PublishRaw call, regardless of
+	// whether the publish itself succeeds.
+	IncDLQ(topic string)
+}
+
+// NoopMetricsRecorder discards every observation — the default for tests
+// that don't care about metrics (mirrors internal/room's Noop* collaborators).
+type NoopMetricsRecorder struct{}
+
+func (NoopMetricsRecorder) ObserveBatchInsert(topic string, d time.Duration, err error) {}
+func (NoopMetricsRecorder) IncDLQ(topic string)                                         {}
+
 const (
 	workoutSampleDLQTopic = kafka.TopicWorkoutSample + ".dlq"
 	raceFinishedDLQTopic  = kafka.TopicRaceFinished + ".dlq"
@@ -89,11 +114,22 @@ type Consumer struct {
 	writer     WorkoutSampleWriter
 	reconciler FinishReconciler
 	dlq        DLQPublisher
+	metrics    MetricsRecorder
 	logger     *slog.Logger
+
+	// workoutReader/raceFinishedReader are stored (not kept local to Run's
+	// own goroutines) so Lag can read their Stats() from outside — set once
+	// via atomic.Pointer.Store before each loop's goroutine starts, read via
+	// Load from a metrics scrape goroutine that may run concurrently with
+	// Run itself (metrics/metrics-parity.md). *kafkago.Reader.Stats() is
+	// documented safe for concurrent use alongside the reader's own fetch
+	// loop, but the pointer's own publication still needs synchronizing.
+	workoutReader      atomic.Pointer[kafkago.Reader]
+	raceFinishedReader atomic.Pointer[kafkago.Reader]
 }
 
-func NewConsumer(brokers []string, writer WorkoutSampleWriter, reconciler FinishReconciler, dlq DLQPublisher, logger *slog.Logger) *Consumer {
-	return &Consumer{brokers: brokers, writer: writer, reconciler: reconciler, dlq: dlq, logger: logger}
+func NewConsumer(brokers []string, writer WorkoutSampleWriter, reconciler FinishReconciler, dlq DLQPublisher, metrics MetricsRecorder, logger *slog.Logger) *Consumer {
+	return &Consumer{brokers: brokers, writer: writer, reconciler: reconciler, dlq: dlq, metrics: metrics, logger: logger}
 }
 
 // Run starts both reader loops (one per topic, each its own goroutine and
@@ -104,32 +140,50 @@ func (c *Consumer) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	workoutReader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers: c.brokers,
+		GroupID: workoutSampleGroupID,
+		Topic:   kafka.TopicWorkoutSample,
+	})
+	c.workoutReader.Store(workoutReader)
 	go func() {
 		defer wg.Done()
-		c.runWorkoutSampleLoop(ctx, kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers: c.brokers,
-			GroupID: workoutSampleGroupID,
-			Topic:   kafka.TopicWorkoutSample,
-		}))
+		c.runWorkoutSampleLoop(ctx, workoutReader)
 	}()
 
+	raceFinishedReader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers: c.brokers,
+		GroupID: raceFinishedGroupID,
+		Topic:   kafka.TopicRaceFinished,
+	})
+	c.raceFinishedReader.Store(raceFinishedReader)
 	go func() {
 		defer wg.Done()
-		c.runRaceFinishedLoop(ctx, kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers: c.brokers,
-			GroupID: raceFinishedGroupID,
-			Topic:   kafka.TopicRaceFinished,
-		}))
+		c.runRaceFinishedLoop(ctx, raceFinishedReader)
 	}()
 
 	wg.Wait()
 	return nil
 }
 
+// Lag returns each topic's reader's current consumer-group lag, in
+// messages (aviron_kafka_consumer_lag). Zero before Run's corresponding
+// reader has been constructed yet.
+func (c *Consumer) Lag() (workoutSample, raceFinished int64) {
+	if r := c.workoutReader.Load(); r != nil {
+		workoutSample = r.Stats().Lag
+	}
+	if r := c.raceFinishedReader.Load(); r != nil {
+		raceFinished = r.Stats().Lag
+	}
+	return workoutSample, raceFinished
+}
+
 // deadLetter republishes msg verbatim to dlqTopic, logging (not returning)
 // any publish failure — a DLQ is itself a best-effort safety net; there's
 // no further fallback if publishing to it also fails, only a log line.
 func (c *Consumer) deadLetter(ctx context.Context, dlqTopic string, msg kafkago.Message) {
+	c.metrics.IncDLQ(dlqTopic)
 	if err := c.dlq.PublishRaw(ctx, dlqTopic, msg.Key, msg.Value); err != nil {
 		c.logger.Error("dead-letter publish failed", slog.String("topic", dlqTopic), slog.Any("error", err))
 	}

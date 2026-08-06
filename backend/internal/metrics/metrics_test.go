@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/room"
 )
@@ -83,6 +85,21 @@ func TestMetrics_RegisterRoomGauges_ReflectsRoomCount(t *testing.T) {
 	body := scrape(t, m)
 	if !strings.Contains(body, "aviron_rooms_active 1") {
 		t.Errorf("scrape output missing aviron_rooms_active 1 after Spawn\nfull output:\n%s", body)
+	}
+}
+
+func TestMetrics_Registerer_AllowsExternalRegistration(t *testing.T) {
+	m := metrics.NewMetrics()
+
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_counter"})
+	if err := m.Registerer().Register(c); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	c.Inc()
+
+	body := scrape(t, m)
+	if !strings.Contains(body, "test_counter 1") {
+		t.Errorf("scrape output missing test_counter 1\nfull output:\n%s", body)
 	}
 }
 

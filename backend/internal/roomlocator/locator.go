@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -31,11 +32,46 @@ const claimTTL = 60 * time.Second
 type Locator struct {
 	client     *redis.Client
 	instanceID string
+
+	// lookupDuration/errorsTotal are labeled by op (the method name) —
+	// owned directly by Locator and registered at construction time, for
+	// the same "leaf infrastructure wrapper, not business logic" reasoning
+	// roomrelay.Bus's identical fields carry (see Metrics.Registerer's doc
+	// comment). outcome for lookupDuration is "ok"/"error"/(Owner-only)
+	// "not_found" (metrics/metrics-parity.md).
+	lookupDuration *prometheus.HistogramVec
+	errorsTotal    *prometheus.CounterVec
 }
 
-// NewLocator constructs a Locator for instanceID against client.
-func NewLocator(client *redis.Client, instanceID string) *Locator {
-	return &Locator{client: client, instanceID: instanceID}
+// NewLocator constructs a Locator for instanceID against client,
+// registering its lookup metrics into reg (typically
+// *metrics.Metrics/*metrics.GatewayMetrics's own registry via Registerer()).
+func NewLocator(client *redis.Client, instanceID string, reg prometheus.Registerer) *Locator {
+	lookupDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "aviron_roomlocator_lookup_duration_seconds",
+		Help: "Duration of a single Locator method call against Redis.",
+	}, []string{"op", "outcome"})
+	errorsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "aviron_roomlocator_errors_total",
+		Help: "Locator method calls that returned an error.",
+	}, []string{"op"})
+	reg.MustRegister(lookupDuration, errorsTotal)
+
+	return &Locator{
+		client:         client,
+		instanceID:     instanceID,
+		lookupDuration: lookupDuration,
+		errorsTotal:    errorsTotal,
+	}
+}
+
+// observe is safe for concurrent use: prometheus.Counter/Histogram's own
+// Inc/Observe already are, so no locking of Locator's own is needed.
+func (l *Locator) observe(op string, start time.Time, outcome string) {
+	l.lookupDuration.WithLabelValues(op, outcome).Observe(time.Since(start).Seconds())
+	if outcome == "error" {
+		l.errorsTotal.WithLabelValues(op).Inc()
+	}
 }
 
 // RoomEvent is room:events' wire payload.
@@ -61,17 +97,22 @@ func roomKey(raceID string) string {
 // normal operation (ownership is decided by construction, not contested),
 // but Claim reports it rather than silently overwriting a live claim.
 func (l *Locator) Claim(ctx context.Context, raceID string) (bool, error) {
+	start := time.Now()
 	claimed, err := l.client.SetNX(ctx, roomKey(raceID), "instance:"+l.instanceID, claimTTL).Result()
 	if err != nil {
+		l.observe("claim", start, "error")
 		return false, fmt.Errorf("roomlocator: claim %s: %w", raceID, err)
 	}
 	if !claimed {
+		l.observe("claim", start, "ok")
 		return false, nil
 	}
 
 	if err := l.publish(ctx, RoomEvent{Type: RoomEventCreated, RaceID: raceID, InstanceID: l.instanceID}); err != nil {
+		l.observe("claim", start, "error")
 		return true, err
 	}
+	l.observe("claim", start, "ok")
 	return true, nil
 }
 
@@ -79,23 +120,35 @@ func (l *Locator) Claim(ctx context.Context, raceID string) (bool, error) {
 // owning instance's own heartbeat so the key survives for as long as the
 // room keeps running, well past the initial claimTTL.
 func (l *Locator) Refresh(ctx context.Context, raceID string) error {
+	start := time.Now()
 	stillOwned, err := l.client.Expire(ctx, roomKey(raceID), claimTTL).Result()
 	if err != nil {
+		l.observe("refresh", start, "error")
 		return fmt.Errorf("roomlocator: refresh %s: %w", raceID, err)
 	}
 	if !stillOwned {
+		l.observe("refresh", start, "error")
 		return fmt.Errorf("roomlocator: refresh %s: claim expired before heartbeat", raceID)
 	}
+	l.observe("refresh", start, "ok")
 	return nil
 }
 
 // Release deletes raceID's ownership record and publishes a "removed"
 // room:events notification.
 func (l *Locator) Release(ctx context.Context, raceID string) error {
+	start := time.Now()
 	if err := l.client.Del(ctx, roomKey(raceID)).Err(); err != nil {
+		l.observe("release", start, "error")
 		return fmt.Errorf("roomlocator: release %s: %w", raceID, err)
 	}
-	return l.publish(ctx, RoomEvent{Type: RoomEventRemoved, RaceID: raceID, InstanceID: l.instanceID})
+	err := l.publish(ctx, RoomEvent{Type: RoomEventRemoved, RaceID: raceID, InstanceID: l.instanceID})
+	if err != nil {
+		l.observe("release", start, "error")
+		return err
+	}
+	l.observe("release", start, "ok")
+	return nil
 }
 
 // evictedKey is the Redis set ws-gateway.md's evicted-reconnect check reads
@@ -116,32 +169,42 @@ func evictedKey(raceID string) string {
 // manage" call this project already made for other small, self-limited
 // Redis state.
 func (l *Locator) MarkEvicted(ctx context.Context, raceID, userID string) error {
+	start := time.Now()
 	if err := l.client.SAdd(ctx, evictedKey(raceID), userID).Err(); err != nil {
+		l.observe("mark_evicted", start, "error")
 		return fmt.Errorf("roomlocator: mark evicted %s/%s: %w", raceID, userID, err)
 	}
+	l.observe("mark_evicted", start, "ok")
 	return nil
 }
 
 // IsEvicted reports whether userID was previously marked evicted from
 // raceID — ws-gateway.md's own synchronous connection-time check.
 func (l *Locator) IsEvicted(ctx context.Context, raceID, userID string) (bool, error) {
+	start := time.Now()
 	evicted, err := l.client.SIsMember(ctx, evictedKey(raceID), userID).Result()
 	if err != nil {
+		l.observe("is_evicted", start, "error")
 		return false, fmt.Errorf("roomlocator: is evicted %s/%s: %w", raceID, userID, err)
 	}
+	l.observe("is_evicted", start, "ok")
 	return evicted, nil
 }
 
 // Owner returns the instance id currently owning raceID, and false if no
 // instance does (never claimed, or the claim expired/was released).
 func (l *Locator) Owner(ctx context.Context, raceID string) (string, bool, error) {
+	start := time.Now()
 	val, err := l.client.Get(ctx, roomKey(raceID)).Result()
 	if errors.Is(err, redis.Nil) {
+		l.observe("owner", start, "not_found")
 		return "", false, nil
 	}
 	if err != nil {
+		l.observe("owner", start, "error")
 		return "", false, fmt.Errorf("roomlocator: owner %s: %w", raceID, err)
 	}
+	l.observe("owner", start, "ok")
 	return strings.TrimPrefix(val, "instance:"), true, nil
 }
 

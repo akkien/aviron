@@ -38,7 +38,7 @@ type wsConn interface {
 type WSHandler struct {
 	locator       RoomLocator
 	relay         relayBus
-	hubs          *raceHubRegistry
+	hubs          *RaceHubRegistry
 	jwtSecret     []byte
 	allowedOrigin string
 	logger        *slog.Logger
@@ -48,10 +48,9 @@ type WSHandler struct {
 // same config value the REST CORS middleware already uses — without it,
 // coder/websocket's default same-origin check would reject the frontend's
 // cross-origin WebSocket handshake in local dev. hubs is shared with
-// whatever else in this process needs raceHubRegistry (nothing else does
-// today, but constructing it here keeps WSHandler's own lifecycle
-// self-contained).
-func NewWSHandler(locator RoomLocator, relay relayBus, hubs *raceHubRegistry, jwtSecret []byte, allowedOrigin string, logger *slog.Logger) *WSHandler {
+// whatever else in this process needs RaceHubRegistry — today that's
+// GatewayMetrics.RegisterConnectionGauge as well (metrics/metrics-parity.md).
+func NewWSHandler(locator RoomLocator, relay relayBus, hubs *RaceHubRegistry, jwtSecret []byte, allowedOrigin string, logger *slog.Logger) *WSHandler {
 	return &WSHandler{
 		locator:       locator,
 		relay:         relay,

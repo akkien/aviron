@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // subscriptionBuffer bounds how many not-yet-decoded messages a single
@@ -22,21 +24,71 @@ const subscriptionBuffer = 64
 // needs no locking of its own.
 type Bus struct {
 	nc *nats.Conn
+
+	// publishTotal/publishErrors/publishDuration are labeled by
+	// subject_kind ("in"/"out"), never race_id, matching this project's
+	// existing cardinality discipline (metrics/metrics-parity.md). Owned
+	// directly by Bus and registered at construction time — roomrelay is
+	// already a leaf wrapper directly around *nats.Conn, not business
+	// logic with the transport-free layering concern room-actor-core.md
+	// raised for internal/room, so a direct prometheus/client_golang
+	// import here doesn't compromise anything that reasoning protects; see
+	// Metrics.Registerer's doc comment for the full comparison.
+	publishTotal    *prometheus.CounterVec
+	publishErrors   *prometheus.CounterVec
+	publishDuration *prometheus.HistogramVec
 }
 
-// NewBus constructs a Bus around nc.
-func NewBus(nc *nats.Conn) *Bus {
-	return &Bus{nc: nc}
+// NewBus constructs a Bus around nc, registering its publish metrics into
+// reg (typically *metrics.Metrics/*metrics.GatewayMetrics's own registry
+// via Registerer()).
+func NewBus(nc *nats.Conn, reg prometheus.Registerer) *Bus {
+	publishTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "aviron_roomrelay_publish_total",
+		Help: "Publish attempts on a room's NATS subjects.",
+	}, []string{"subject_kind"})
+	publishErrors := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "aviron_roomrelay_publish_errors_total",
+		Help: "Publish attempts on a room's NATS subjects that returned an error.",
+	}, []string{"subject_kind"})
+	publishDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "aviron_roomrelay_publish_duration_seconds",
+		Help: "Duration of a single publish call on a room's NATS subjects.",
+	}, []string{"subject_kind"})
+	reg.MustRegister(publishTotal, publishErrors, publishDuration)
+
+	return &Bus{
+		nc:              nc,
+		publishTotal:    publishTotal,
+		publishErrors:   publishErrors,
+		publishDuration: publishDuration,
+	}
 }
 
 // PublishIn publishes env on raceID's inbound subject.
 func (b *Bus) PublishIn(ctx context.Context, raceID string, env InboundEnvelope) error {
-	return publish(ctx, b.nc, inSubject(raceID), env)
+	start := time.Now()
+	err := publish(ctx, b.nc, inSubject(raceID), env)
+	b.observePublish("in", start, err)
+	return err
 }
 
 // PublishOut publishes env on raceID's outbound subject.
 func (b *Bus) PublishOut(ctx context.Context, raceID string, env OutboundEnvelope) error {
-	return publish(ctx, b.nc, outSubject(raceID), env)
+	start := time.Now()
+	err := publish(ctx, b.nc, outSubject(raceID), env)
+	b.observePublish("out", start, err)
+	return err
+}
+
+// observePublish is safe for concurrent use: prometheus.Counter/Histogram's
+// own Inc/Observe already are, so no locking of Bus's own is needed.
+func (b *Bus) observePublish(subjectKind string, start time.Time, err error) {
+	b.publishTotal.WithLabelValues(subjectKind).Inc()
+	b.publishDuration.WithLabelValues(subjectKind).Observe(time.Since(start).Seconds())
+	if err != nil {
+		b.publishErrors.WithLabelValues(subjectKind).Inc()
+	}
 }
 
 // SubscribeIn subscribes to raceID's inbound subject. The returned channel

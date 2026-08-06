@@ -175,6 +175,9 @@ services:
     environment:
       DATABASE_URL: postgres://aviron:aviron@postgres:5432/aviron?sslmode=disable
       KAFKA_BROKERS: kafka:29092
+      CONSUMER_LISTEN_ADDR: :8091
+    ports:
+      - "8091:8091"
     depends_on:
       postgres:
         condition: service_healthy

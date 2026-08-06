@@ -92,3 +92,17 @@ func (m *Metrics) RegisterRoomGauges(registry *room.Registry) {
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
+
+// Registerer exposes this process's single prometheus.Registry so leaf
+// infrastructure packages (internal/roomrelay, internal/roomlocator) can
+// register their own metrics into it at construction time
+// (metrics/metrics-parity.md), without either package needing to import
+// internal/metrics itself — the same one-directional shape TickObserver
+// already establishes for internal/room, just via prometheus.Registerer
+// (a third-party interface) rather than a package-local one, since Bus and
+// Locator are already leaf wrappers directly around nats.Conn/redis.Client
+// with none of the transport-free layering concern room-actor-core.md
+// raised for internal/room's own business logic.
+func (m *Metrics) Registerer() prometheus.Registerer {
+	return m.reg
+}
