@@ -1,0 +1,54 @@
+# logging/efk-deploy.md — no Ingress: kubectl port-forward only, matching
+# this project's "no external exposure of internal tooling" stance
+# (pgAdmin's own docker-compose.yml entry is the closest precedent).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: aviron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.15.0
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: http://elasticsearch.aviron.svc.cluster.local:9200
+          ports:
+            - containerPort: 5601
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          # Kibana's own plugin-init boot (/api/status returning 503
+          # until it's done) regularly runs past 60s on modest CPU
+          # requests — observed causing kubelet to kill a genuinely
+          # still-booting container with a too-short liveness delay.
+          # failureThreshold gives each probe room for transient slow
+          # responses too, not just a longer fixed delay.
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            failureThreshold: 5

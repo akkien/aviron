@@ -1,0 +1,32 @@
+# logging/efk-deploy.md — the kubernetes filter's own pod-metadata
+# lookups need read access to this namespace's Pod objects, same shape as
+# prometheus/rbac.yaml's own Role for the same reason.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: aviron
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fluent-bit-pod-reader
+  namespace: aviron
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fluent-bit-pod-reader
+  namespace: aviron
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: aviron
+roleRef:
+  kind: Role
+  name: fluent-bit-pod-reader
+  apiGroup: rbac.authorization.k8s.io

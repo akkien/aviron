@@ -15,9 +15,9 @@ boundaries (WebSocket → NATS → Redis → Kafka → Postgres).
 | --- | --- | --- | --- |
 | Metrics | Prometheus (pull-based) | **Shipped** | `metrics/metrics-parity.md`, `metrics/prometheus-deploy.md` |
 | Traces — infra | OTel Collector + Tempo | **Shipped** | `tracing/otel-collector-tempo-deploy.md` |
-| Traces — app code | OpenTelemetry SDK, full depth | Not started | `tracing/instrumentation.md` |
-| Logs — correlation | `trace_id` in `slog` output | Not started | `logging/log-trace-correlation.md` |
-| Logs — backend | EFK (Elasticsearch, Fluent Bit, Kibana) | Not started | `logging/efk-deploy.md` |
+| Traces — app code | OpenTelemetry SDK, full depth | **Shipped** | `tracing/instrumentation.md` |
+| Logs — correlation | `trace_id` in `slog` output | **Shipped** | `logging/log-trace-correlation.md` |
+| Logs — backend | EFK (Elasticsearch, Fluent Bit, Kibana) | **Shipped** | `logging/efk-deploy.md` |
 | Dashboards | Grafana (RED + USE, pod-aware) | Not started | `dashboards/grafana-deploy.md` |
 | Alerting — rules | Prometheus alert rules + Alertmanager | Not started | `alerting/alert-rules.md` |
 | Alerting — delivery | `telegram-relay` (new 4th binary) → Telegram | Not started | `alerting/telegram-relay.md` |
@@ -115,9 +115,9 @@ neither has a real code/data dependency on the other yet:
 flowchart TD
     A["metrics-parity<br/>DONE"] --> B["prometheus-deploy<br/>DONE"]
     B --> D["otel-collector-tempo-deploy<br/>DONE"]
-    C["efk-deploy<br/>not started"] -.parallel with tracing track.-> D
-    D --> E["instrumentation<br/>not started"]
-    E --> F["log-trace-correlation<br/>not started"]
+    C["efk-deploy<br/>DONE"] -.parallel with tracing track.-> D
+    D --> E["instrumentation<br/>DONE"]
+    E --> F["log-trace-correlation<br/>DONE"]
     F --> C
     C --> G["grafana-deploy<br/>not started"]
     G --> H["alert-rules<br/>not started"]
@@ -316,11 +316,11 @@ sequenceDiagram
 | `race-service`/`ws-gateway`/`consumer` `/metrics` | Metrics | (existing) | 8080 / 8080 / 8091 | `aviron-backend:local` | Shipped |
 | OTel Collector | Traces | `Deployment` | 4317 (OTLP gRPC), 13133 (health) | `otel/opentelemetry-collector:latest` (core, not `-contrib`) | Shipped |
 | Tempo | Traces | `Deployment` | 3200 (query), 4317 (OTLP) | `grafana/tempo:latest` | Shipped |
-| OTel SDK instrumentation | Traces | (app code) | n/a | `go.opentelemetry.io/otel` | Not started |
-| `trace_id` in `slog` | Logs | (app code) | n/a | n/a | Not started |
-| Elasticsearch | Logs | `StatefulSet` | 9200 | `docker.elastic.co/elasticsearch/elasticsearch:8.15.0` | Not started |
-| Fluent Bit | Logs | `DaemonSet` | n/a (tails `hostPath`) | `fluent/fluent-bit` | Not started |
-| Kibana | Logs | `Deployment` | 5601 | `docker.elastic.co/kibana/kibana:8.15.0` | Not started |
+| OTel SDK instrumentation | Traces | (app code) | n/a | `go.opentelemetry.io/otel` | Shipped |
+| `trace_id` in `slog` | Logs | (app code) | n/a | n/a | Shipped |
+| Elasticsearch | Logs | `StatefulSet` | 9200 | `docker.elastic.co/elasticsearch/elasticsearch:8.15.0` | Shipped |
+| Fluent Bit | Logs | `DaemonSet` | n/a (tails `hostPath`) | `fluent/fluent-bit` | Shipped |
+| Kibana | Logs | `Deployment` | 5601 | `docker.elastic.co/kibana/kibana:8.15.0` | Shipped |
 | Grafana | Dashboards | `Deployment` | 3000 | `grafana/grafana:latest` | Not started |
 | Alertmanager | Alerting | `Deployment` | n/a | `prom/alertmanager` | Not started |
 | `telegram-relay` (new 4th binary) | Alerting | `Deployment` | 8080 (`/alert`, `/metrics`) | `aviron-backend:local` (new `cmd/telegram-relay`) | Not started |
