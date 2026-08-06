@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/akkien/aviron/internal/metrics"
@@ -100,6 +101,50 @@ func TestMetrics_Registerer_AllowsExternalRegistration(t *testing.T) {
 	body := scrape(t, m)
 	if !strings.Contains(body, "test_counter 1") {
 		t.Errorf("scrape output missing test_counter 1\nfull output:\n%s", body)
+	}
+}
+
+// TestMetrics_RegisterPgPoolGauges_ExposesAcquiredAndMaxConns doesn't need
+// a reachable Postgres: pgxpool.New doesn't eagerly connect (same pattern
+// internal/httpserver's own metrics/healthz tests already rely on), and
+// Stat() reports pool-internal counters that are valid before any
+// connection is ever made.
+func TestMetrics_RegisterPgPoolGauges_ExposesAcquiredAndMaxConns(t *testing.T) {
+	dsn := "postgres://aviron:aviron@localhost:1/aviron?sslmode=disable&connect_timeout=1"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	defer pool.Close()
+
+	m := metrics.NewMetrics()
+	m.RegisterPgPoolGauges(pool)
+
+	body := scrape(t, m)
+	wantSubstrings := []string{
+		"aviron_pg_pool_acquired_conns 0",
+		"aviron_pg_pool_max_conns ",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape output missing %q\nfull output:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetrics_RegisterNATSReconnectCounter_IncrementsAndScrapes(t *testing.T) {
+	m := metrics.NewMetrics()
+	c := m.RegisterNATSReconnectCounter()
+
+	c.Inc()
+	c.Inc()
+
+	body := scrape(t, m)
+	if !strings.Contains(body, "aviron_nats_reconnects_total 2") {
+		t.Errorf("scrape output missing aviron_nats_reconnects_total 2\nfull output:\n%s", body)
 	}
 }
 

@@ -10,8 +10,33 @@ metadata:
   namespace: aviron
 data:
   prometheus.yml: |
+    # alerting/alert-rules.md — rules live in a second ConfigMap
+    # (configmap-rules.yaml), mounted at /etc/prometheus/rules by
+    # deployment.yaml, independent of this scrape config.
+    rule_files:
+      - /etc/prometheus/rules/aviron-alerts.yml
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager.aviron.svc.cluster.local:9093"]
+
     scrape_configs:
       - job_name: aviron-pods
+        # kube-state-metrics (dashboards/grafana-deploy.md) exposes its
+        # own native pod/namespace labels identifying the *target* object
+        # each metric describes (e.g. kube_pod_container_status_restarts_
+        # total{pod="race-service-0",...}) — without honor_labels, the
+        # relabel_configs' own target_label: pod below (meant for the
+        # *scraped* pod's identity) would silently clobber that, renaming
+        # the real value to exported_pod instead and leaving every
+        # kube-state-metrics-sourced $labels.pod (alerting/alert-rules.md's
+        # PodRestartLooping annotation, for one) equal to
+        # "kube-state-metrics-xxxxx" — found via live verification of that
+        # exact alert, not assumed. Safe for every other target in this
+        # job: race-service/ws-gateway/consumer never emit their own
+        # pod/app labels, so there's no collision to honor there.
+        honor_labels: true
         kubernetes_sd_configs:
           - role: pod
             namespaces:

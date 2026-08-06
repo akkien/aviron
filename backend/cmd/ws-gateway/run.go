@@ -75,7 +75,16 @@ func Run(cfg wsgateway.Config) {
 	// Owner/SubscribeRoomEvents/IsEvicted.
 	locator := roomlocator.NewLocator(redisClient, "ws-gateway", m.Registerer())
 
-	natsConn, err := nats.Connect(cfg.NATSURL)
+	natsReconnects := m.RegisterNATSReconnectCounter()
+	natsConn, err := nats.Connect(cfg.NATSURL,
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			natsReconnects.Inc()
+			logger.Warn("nats: reconnected", slog.String("url", nc.ConnectedUrl()))
+		}),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			logger.Warn("nats: disconnected", slog.Any("error", err))
+		}),
+	)
 	if err != nil {
 		log.Fatalf("nats: %v", err)
 	}

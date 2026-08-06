@@ -46,6 +46,19 @@ func TestGatewayMetrics_RegisterConnectionGauge_ReflectsHubCount(t *testing.T) {
 	}
 }
 
+func TestGatewayMetrics_RegisterNATSReconnectCounter_IncrementsAndScrapes(t *testing.T) {
+	m := metrics.NewGatewayMetrics()
+	c := m.RegisterNATSReconnectCounter()
+
+	c.Inc()
+	c.Inc()
+
+	body := scrapeGateway(t, m)
+	if !strings.Contains(body, "aviron_nats_reconnects_total 2") {
+		t.Errorf("scrape output missing aviron_nats_reconnects_total 2\nfull output:\n%s", body)
+	}
+}
+
 func TestGatewayMetrics_Registerer_AllowsExternalRegistration(t *testing.T) {
 	m := metrics.NewGatewayMetrics()
 

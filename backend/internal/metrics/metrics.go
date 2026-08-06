@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -84,6 +85,37 @@ func (m *Metrics) RegisterRoomGauges(registry *room.Registry) {
 		Help:        "Messages currently queued in a channel, summed across every live room/connection.",
 		ConstLabels: prometheus.Labels{"channel": "broadcast"},
 	}, func() float64 { return float64(registry.BroadcastBufferUsage()) }))
+}
+
+// RegisterPgPoolGauges wires aviron_pg_pool_acquired_conns/_max_conns
+// (alerting/alert-rules.md's PostgresPoolSaturation rule) — race-service
+// only, the one binary running pgxpool. Computed at scrape time
+// (GaugeFunc) from pool.Stat(), which is itself safe for concurrent use
+// alongside the pool's own query traffic.
+func (m *Metrics) RegisterPgPoolGauges(pool *pgxpool.Pool) {
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "aviron_pg_pool_acquired_conns",
+		Help: "Postgres connection pool: connections currently acquired.",
+	}, func() float64 { return float64(pool.Stat().AcquiredConns()) }))
+
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "aviron_pg_pool_max_conns",
+		Help: "Postgres connection pool: configured maximum connections.",
+	}, func() float64 { return float64(pool.Stat().MaxConns()) }))
+}
+
+// RegisterNATSReconnectCounter wires aviron_nats_reconnects_total
+// (alerting/alert-rules.md's NATSReconnectStorm rule) — a plain Counter
+// the caller Incs from nats.ReconnectHandler, making a *pattern* of
+// reconnects visible rather than nats.go's own internal, silent retry
+// loop (this project's NATS Core setup, no JetStream).
+func (m *Metrics) RegisterNATSReconnectCounter() prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "aviron_nats_reconnects_total",
+		Help: "Number of times this process's NATS connection has reconnected after a disconnect.",
+	})
+	m.reg.MustRegister(c)
+	return c
 }
 
 // Handler serves the Prometheus text-format exposition of this registry —

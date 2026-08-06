@@ -1,0 +1,24 @@
+# alerting/alert-rules.md — single receiver routing every alert toward
+# alerting/telegram-relay.md's webhook. That binary doesn't exist yet at
+# the time this manifest is written — referenced by its eventual Service
+# DNS name regardless of build order, since Kubernetes DNS resolves
+# lazily (no error until an alert actually tries to fire against a
+# not-yet-existing Service).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: aviron
+data:
+  alertmanager.yml: |
+    route:
+      receiver: telegram-relay
+      group_by: ["alertname", "app"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+    receivers:
+      - name: telegram-relay
+        webhook_configs:
+          - url: http://telegram-relay.aviron.svc.cluster.local:8080/alert
+            send_resolved: true

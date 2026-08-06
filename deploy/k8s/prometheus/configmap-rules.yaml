@@ -1,0 +1,78 @@
+# alerting/alert-rules.md — 8 alert rules tied to this project's real
+# failure modes (phase-6-plan.md Decisions #4), not a generic textbook
+# set. Picked up by Prometheus via a second ConfigMap volume (see
+# deployment.yaml) and the prometheus.yml rule_files entry (configmap.yaml)
+# — kept in its own file/ConfigMap rather than folded into
+# prometheus-config so the rules can be iterated on independently of the
+# scrape config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: aviron
+data:
+  aviron-alerts.yml: |
+    groups:
+      - name: aviron
+        rules:
+          - alert: ElevatedErrorRate
+            expr: |
+              sum by (app) (rate(aviron_roomlocator_errors_total[5m]))
+                / sum by (app) (rate(aviron_roomrelay_publish_total[5m])) > 0.05
+            for: 5m
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.app }} error rate above 5% over 5m"
+
+          - alert: TickLatencySLOBurn
+            expr: |
+              histogram_quantile(0.99, rate(aviron_tick_latency_seconds_bucket[5m])) > 0.2
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "race-service tick latency p99 above 200ms for 10m"
+
+          - alert: GoroutineCountTrendingUp
+            expr: |
+              predict_linear(go_goroutines{namespace="aviron"}[30m], 3600) > 100000
+            for: 15m
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.app }} goroutine count on a leak trajectory"
+
+          - alert: PodRestartLooping
+            expr: |
+              increase(kube_pod_container_status_restarts_total{namespace="aviron"}[15m]) > 3
+            labels: { severity: critical }
+            annotations:
+              summary: "{{ $labels.pod }} restarted more than 3 times in 15m"
+
+          - alert: HPAStuckAtMaxReplicas
+            expr: |
+              kube_horizontalpodautoscaler_status_current_replicas{namespace="aviron"}
+                == kube_horizontalpodautoscaler_spec_max_replicas{namespace="aviron"}
+            for: 15m
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.horizontalpodautoscaler }} pinned at maxReplicas for 15m — real capacity ceiling, not a transient burst"
+
+          - alert: KafkaConsumerLagHigh
+            expr: aviron_kafka_consumer_lag > 2000
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "consumer lag on {{ $labels.topic }} exceeds 2000 messages (10x flushBatchSize) for 10m"
+
+          - alert: NATSReconnectStorm
+            expr: increase(aviron_nats_reconnects_total[15m]) > 3
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.app }} reconnected to NATS more than 3 times in 15m"
+
+          - alert: PostgresPoolSaturation
+            expr: |
+              aviron_pg_pool_acquired_conns / aviron_pg_pool_max_conns > 0.8
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: "race-service Postgres pool above 80% acquired for 5m — the k8s-hpa.md maxReplicas:5 risk, now with a real signal"
