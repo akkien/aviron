@@ -54,6 +54,16 @@ reachable).
 |    v                                                          |
 | tempo (Deployment, 1 replica)                                 |
 |    Service: tempo (query API :3200, OTLP :4317)               |
+|                                                                |
+| elasticsearch-0 (StatefulSet, 1 replica, emptyDir)             |
+|    Service: elasticsearch (index: aviron-logs)                |
+|    ^                                                          |
+|    | ships parsed JSON log lines                              |
+| fluent-bit (DaemonSet, 1 per node)                             |
+|    ServiceAccount + Role (pod watch, for k8s metadata)        |
+|                                                                |
+| kibana (Deployment, 1 replica)                                 |
+|    Service: kibana — no Ingress, port-forward only            |
 +---------------------------------------------------------------+
 ```
 
@@ -268,6 +278,45 @@ kubectl port-forward -n aviron svc/tempo 3200:3200
 curl -s 'http://localhost:3200/api/search?tags=service.name%3D<your-test-service-name>' | jq
 ```
 
+## Deploying EFK (Elasticsearch, Fluent Bit, Kibana)
+
+Centralizes the structured `slog` JSON every binary already writes to
+stdout — today readable only via `kubectl logs` against whichever replica
+happened to handle a given request. See
+`context/features/phase6/logging/efk-deploy.md`:
+
+```sh
+kubectl apply -f deploy/k8s/elasticsearch/statefulset.yaml -f deploy/k8s/elasticsearch/service.yaml
+kubectl apply -f deploy/k8s/fluent-bit/rbac.yaml -f deploy/k8s/fluent-bit/configmap.yaml \
+  -f deploy/k8s/fluent-bit/daemonset.yaml
+kubectl apply -f deploy/k8s/kibana/deployment.yaml -f deploy/k8s/kibana/service.yaml
+kubectl wait --for=condition=Ready pod -l 'app in (elasticsearch,fluent-bit,kibana)' -n aviron --timeout=300s
+```
+
+Verify logs are actually landing and their structured fields are
+individually queryable, not just one opaque blob:
+
+```sh
+kubectl exec -n aviron elasticsearch-0 -c elasticsearch -- \
+  curl -s 'http://localhost:9200/aviron-logs/_count'
+
+# a field-only filter (no full-text match) proving Merge_Log actually
+# parsed the JSON body into real fields
+kubectl exec -n aviron elasticsearch-0 -c elasticsearch -- \
+  curl -s -X POST 'http://localhost:9200/aviron-logs/_search?pretty' \
+  -H 'Content-Type: application/json' \
+  -d '{"size":0,"query":{"term":{"path.keyword":"/healthz"}}}'
+```
+
+Kibana has no `Ingress` — reach it via port-forward, then create the
+`aviron-logs` data view (Stack Management → Data Views, timestamp field
+`@timestamp`) before using Discover:
+
+```sh
+kubectl port-forward -n aviron svc/kibana 5601:5601
+# then open http://localhost:5601
+```
+
 ## Components
 
 Quick reference — especially the DNS names, which are exactly what you'd
@@ -285,6 +334,9 @@ need when debugging a connection issue from inside the cluster:
 | Prometheus | `Deployment` (1) | `prom/prometheus:latest` | 9090 | `prometheus.aviron.svc.cluster.local` | None — `emptyDir`, TSDB doesn't survive a pod restart |
 | OTel Collector | `Deployment` (1) | `otel/opentelemetry-collector:latest` (core, not `-contrib`) | 4317 (OTLP gRPC), 13133 (health) | `otel-collector.aviron.svc.cluster.local` | None — stateless fan-out, nothing to persist |
 | Tempo | `Deployment` (1) | `grafana/tempo:latest` | 3200 (query API), 4317 (OTLP) | `tempo.aviron.svc.cluster.local` | None — `emptyDir` for WAL + blocks, doesn't survive a pod restart |
+| Elasticsearch | `StatefulSet` (1) | `docker.elastic.co/elasticsearch/elasticsearch:8.15.0` | 9200 | `elasticsearch.aviron.svc.cluster.local` | None — `emptyDir`, index data doesn't survive a pod restart |
+| Fluent Bit | `DaemonSet` (1 per node) | `fluent/fluent-bit:latest` | n/a (tails `hostPath`) | n/a — no Service, ships to Elasticsearch | None — stateless log shipper |
+| Kibana | `Deployment` (1) | `docker.elastic.co/kibana/kibana:8.15.0` | 5601 | `kibana.aviron.svc.cluster.local`; reached via `kubectl port-forward` only, no `Ingress` | None — stateless |
 
 ## Verifying it's actually working
 

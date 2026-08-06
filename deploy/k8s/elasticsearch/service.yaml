@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: aviron
+spec:
+  # Plain ClusterIP — Fluent Bit's es output and Kibana's
+  # ELASTICSEARCH_HOSTS both address it by this Service name, same as
+  # every other single-node backend in this phase (tempo, prometheus).
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http

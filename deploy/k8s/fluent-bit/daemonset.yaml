@@ -1,0 +1,60 @@
+# logging/efk-deploy.md — DaemonSet, not a Deployment: container log
+# files live on each node's own filesystem (hostPath), not somewhere a
+# single centrally-scheduled pod could reach.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: aviron
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      # fluent-bit/rbac.yaml — get/list/watch on pods, needed by the
+      # kubernetes filter's own pod-metadata lookups.
+      serviceAccountName: fluent-bit
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:latest
+          ports:
+            - containerPort: 2020
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/fluent-bit.conf
+              subPath: fluent-bit.conf
+            - name: config
+              mountPath: /fluent-bit/etc/parsers.conf
+              subPath: parsers.conf
+            # /var/log/containers holds per-container symlinks; kind's
+            # containerd runtime writes the real log files under
+            # /var/log/pods, which those symlinks point at — both must be
+            # mounted or the symlinks dangle and tail reads nothing.
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-config
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods

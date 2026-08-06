@@ -1,0 +1,69 @@
+# logging/efk-deploy.md — ships every container's stdout JSON into
+# Elasticsearch. Path filtered to *_aviron_*.log (the kubelet-generated
+# filename embeds "<pod>_<namespace>_<container>", so this matches only
+# this project's own namespace) — same opt-in-by-filtering reasoning as
+# metrics/prometheus-deploy.md's own annotation-based scrape opt-in:
+# avoid shipping noise from infra pods never meant to be shipped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: aviron
+data:
+  # A [PARSER] section isn't valid inside the main config file itself in
+  # this Fluent Bit version ("Sections 'multiline_parser' and 'parser'
+  # are not valid in the main configuration file" — a hard startup
+  # error, not a warning) — it must live in the file named by
+  # Parsers_File, so cri-log below is a second ConfigMap key, not a
+  # second stanza in fluent-bit.conf.
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Daemon        Off
+        Log_Level     info
+        Parsers_File  parsers.conf
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*_aviron_*.log
+        # kind's node runtime is containerd (CRI), not dockershim, so
+        # kubelet writes the CRI log format ("<ts> <stream> <flags>
+        # <msg>"), not Docker's own per-line JSON — cri-log (below)
+        # matches that, not the image's built-in "docker" parser.
+        Parser            cri-log
+        Tag               kube.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     10MB
+        Skip_Long_Lines   On
+
+    [FILTER]
+        Name              kubernetes
+        Match             kube.*
+        Kube_Tag_Prefix   kube.var.log.containers.
+        Merge_Log         On
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+
+    [OUTPUT]
+        Name              es
+        Match             *
+        Host              elasticsearch.aviron.svc.cluster.local
+        Port              9200
+        Index             aviron-logs
+        # Elasticsearch 8 dropped mapping types entirely — the es output
+        # otherwise still tries to send a _type field, which ES8 rejects.
+        Suppress_Type_Name On
+        Retry_Limit       False
+  # Deliberately NOT the image's own built-in "cri" parser: that one
+  # names its message capture group "message", but the FILTER kubernetes
+  # stanza's Merge_Log above only ever merges a field literally named
+  # "log" — with the built-in parser, Merge_Log silently does nothing
+  # and every log ships as one opaque string instead of individually
+  # queryable fields. This is otherwise identical, just renamed.
+  parsers.conf: |
+    [PARSER]
+        Name          cri-log
+        Format        regex
+        Regex         ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key      time
+        Time_Format   %Y-%m-%dT%H:%M:%S.%L%z

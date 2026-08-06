@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: aviron
+spec:
+  # Plain ClusterIP — reached only via kubectl port-forward, no Ingress.
+  selector:
+    app: kibana
+  ports:
+    - port: 5601
+      targetPort: 5601
+      name: http

@@ -1,0 +1,79 @@
+# logging/efk-deploy.md — single-node Elasticsearch backing Fluent Bit's
+# shipped logs and Kibana's search UI. StatefulSet (not Deployment) only
+# for the stable identity/ordered-startup semantics; single replica means
+# no per-pod DNS is actually needed, so it's paired with a plain ClusterIP
+# Service (elasticsearch/service.yaml), same shape as tempo/prometheus.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: aviron
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      # Elasticsearch refuses to start below vm.max_map_count=262144 (its
+      # own bootstrap check) — most Docker Desktop/Linux hosts default
+      # well under that, so this must be raised on the node before the ES
+      # container starts. Runs once per pod start; scoped to this one
+      # sysctl, not a general privileged sidecar.
+      initContainers:
+        - name: sysctl
+          image: busybox:1.36
+          securityContext:
+            privileged: true
+          command: ["sysctl", "-w", "vm.max_map_count=262144"]
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+          env:
+            # Single-node "quorum-less" mode — no cluster formation, no
+            # multi-node discovery needed at this project's scale.
+            - name: discovery.type
+              value: single-node
+            # Same "no internal TLS/auth" stance this whole local cluster
+            # already takes for Postgres/Redis/Kafka/NATS — not a new
+            # exception, an extension of it. Never appropriate on a real
+            # cluster, accepted here for the same reasons already
+            # documented elsewhere (kind-specific, laptop-demo-only).
+            - name: xpack.security.enabled
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          ports:
+            - containerPort: 9200
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1.5Gi
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?wait_for_status=yellow&timeout=1s
+              port: 9200
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      # emptyDir — no PersistentVolumeClaim, same "data doesn't survive a
+      # pod restart" tradeoff already accepted for Prometheus and Tempo.
+      volumes:
+        - name: data
+          emptyDir: {}
