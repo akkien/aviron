@@ -8,10 +8,20 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/roomrelay"
 	"github.com/akkien/aviron/internal/ws"
 )
+
+// tracer is this package's own OpenTelemetry tracer (tracing/instrumentation.md)
+// — a direct otel import here, same "leaf wrapper, not business logic"
+// reasoning roomrelay.Bus's own direct prometheus/client_golang import
+// already carries (see that package's own comment).
+var tracer = otel.Tracer("github.com/akkien/aviron/internal/wsgateway")
 
 // writeTimeout bounds a single frame write so one hung client can't leave a
 // writer goroutine (and the http.Handler it's tied to) blocked forever.
@@ -65,11 +75,26 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raceID := r.URL.Query().Get("race_id")
 	sessionToken := r.URL.Query().Get("session_token")
 
+	// join_race is one span for the handshake itself (auth, routing lookups,
+	// upgrade) — not the connection's whole lifetime, which doesn't fit
+	// OpenTelemetry's request/response span shape (tracing/instrumentation.md).
+	// A browser client sends no inbound traceparent today, but Extract is the
+	// hook for a future service-to-service caller, same as otelhttp's REST
+	// middleware.
+	ctx, span := tracer.Start(
+		otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header)),
+		"ws.join_race",
+		trace.WithAttributes(attribute.String("race_id", raceID)),
+	)
+	defer span.End()
+
 	userID, tokenRaceID, err := verifySessionToken(sessionToken, h.jwtSecret)
 	if err != nil || tokenRaceID != raceID {
+		span.RecordError(err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	span.SetAttributes(attribute.String("user_id", userID))
 
 	// A genuine miss, mirroring Gateway.ServeHTTP's own REST-routing check
 	// (via the same RoomLocator) — not part of ws-gateway.md's own numbered
@@ -77,7 +102,8 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// a race that doesn't exist and simply never receive anything, since
 	// there's no race-service subscriber on room.{race_id}.in/.out to
 	// notice or report the mismatch.
-	if _, found, err := h.locator.Owner(r.Context(), raceID); err != nil {
+	if _, found, err := h.locator.Owner(ctx, raceID); err != nil {
+		span.RecordError(err)
 		h.logger.Error("wsgateway: owner lookup failed", slog.String("race_id", raceID), slog.Any("error", err))
 		http.Error(w, "routing lookup failed", http.StatusServiceUnavailable)
 		return
@@ -92,7 +118,8 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// synchronous, bypassing internal/roomrelay entirely
 	// (room-message-bus.md's "Evicted-reconnect checks bypass the bus
 	// entirely").
-	if evicted, err := h.locator.IsEvicted(r.Context(), raceID, userID); err != nil {
+	if evicted, err := h.locator.IsEvicted(ctx, raceID, userID); err != nil {
+		span.RecordError(err)
 		h.logger.Error("wsgateway: evicted check failed", slog.String("race_id", raceID), slog.Any("error", err))
 		http.Error(w, "routing lookup failed", http.StatusServiceUnavailable)
 		return
@@ -105,9 +132,20 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns: []string{h.allowedOrigin},
 	})
 	if err != nil {
+		span.RecordError(err)
 		// Accept has already written an appropriate HTTP error response.
 		return
 	}
+
+	// End the span here, on the success path, rather than relying on the
+	// deferred End above: ServeHTTP calls serveConn synchronously below, and
+	// serveConn doesn't return until the connection itself closes (possibly
+	// minutes later) — without this, ws.join_race would report a duration
+	// spanning the whole connection lifetime instead of just the handshake.
+	// The deferred End() above still fires afterward too, but End is
+	// documented idempotent (a no-op once a span has already ended), so
+	// that's harmless.
+	span.End()
 
 	// displayName falls back to userID: the session token only carries
 	// race_id/user_id (internal/race/service.go's JoinRace), and looking up
@@ -197,7 +235,7 @@ func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay
 			// same class of bug room-service-adapter.md's
 			// drainBroadcast/cleanupWhenDone already had to guard against
 			// on the publishing side.
-			if pubErr := relay.PublishIn(context.Background(), raceID, roomrelay.InboundEnvelope{
+			if pubErr := publishInboundTraced(context.Background(), relay, raceID, userID, string(roomrelay.InboundKindDisconnected), roomrelay.InboundEnvelope{
 				Kind: roomrelay.InboundKindDisconnected, RaceID: raceID, UserID: userID, DisplayName: displayName,
 			}); pubErr != nil {
 				logger.Error("wsgateway: publish disconnected failed", slog.Any("error", pubErr))
@@ -213,7 +251,16 @@ func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay
 			continue
 		}
 
-		if err := relay.PublishIn(ctx, raceID, roomrelay.InboundEnvelope{
+		// One span per decoded client frame (tracing/instrumentation.md's
+		// "per-telemetry-message spans"), tagged with the frame's own type —
+		// not scoped to telemetry alone, since join_race/leave_race frames
+		// ride the same relay.PublishIn path and are just as worth tracing
+		// through the NATS hop. Root span (no inbound traceparent exists over
+		// this project's own WS wire protocol), but its context is what
+		// propagates into roomrelay.publish's NATS header injection below, so
+		// this span and race-service's corresponding roomrelay.receive span
+		// land in the same trace.
+		if err := publishInboundTraced(ctx, relay, raceID, userID, msg.Type, roomrelay.InboundEnvelope{
 			Kind: roomrelay.InboundKindMessage, RaceID: raceID, UserID: userID, DisplayName: displayName, Message: data,
 		}); err != nil {
 			logger.Error("wsgateway: publish message failed", slog.Any("error", err))
@@ -229,6 +276,25 @@ func readLoop(ctx context.Context, hubClosed <-chan struct{}, conn wsConn, relay
 			return
 		}
 	}
+}
+
+// publishInboundTraced wraps relay.PublishIn in a span (ws.frame), tagged
+// with the frame kind — used by readLoop for both a decoded client message
+// and the synthesized disconnect notification, so every InboundEnvelope this
+// gateway ever publishes gets one, not just telemetry.
+func publishInboundTraced(ctx context.Context, relay relayBus, raceID, userID, kind string, env roomrelay.InboundEnvelope) error {
+	spanCtx, span := tracer.Start(ctx, "ws.frame", trace.WithAttributes(
+		attribute.String("race_id", raceID),
+		attribute.String("user_id", userID),
+		attribute.String("message_type", kind),
+	))
+	defer span.End()
+
+	err := relay.PublishIn(spanCtx, raceID, env)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
 }
 
 // writeLoop owns connCh, this connection's slice of the race's fan-out (see

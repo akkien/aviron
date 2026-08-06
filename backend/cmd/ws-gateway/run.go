@@ -22,6 +22,7 @@ import (
 	"github.com/akkien/aviron/internal/redisclient"
 	"github.com/akkien/aviron/internal/roomlocator"
 	"github.com/akkien/aviron/internal/roomrelay"
+	"github.com/akkien/aviron/internal/tracing"
 	"github.com/akkien/aviron/internal/wsgateway"
 )
 
@@ -50,6 +51,16 @@ const connFlushWindow = 500 * time.Millisecond
 func Run(cfg wsgateway.Config) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	shutdownTracing, err := tracing.Init(ctx, "ws-gateway", cfg.OTelExporterEndpoint)
+	if err != nil {
+		log.Fatalf("tracing: %v", err)
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			logger.Error("tracing shutdown did not complete cleanly", slog.Any("error", err))
+		}
+	}()
 
 	m := metrics.NewGatewayMetrics()
 

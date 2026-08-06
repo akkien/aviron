@@ -40,6 +40,10 @@ type Config struct {
 	// avoids a collision if it's ever run alongside race-service outside a
 	// container (e.g. two `go run` processes on one host).
 	ConsumerListenAddr string
+	// OTelExporterEndpoint is where every binary's OTLP/gRPC span exporter
+	// sends spans (tracing/instrumentation.md) — the OpenTelemetry Collector
+	// tracing/otel-collector-tempo-deploy.md stands up.
+	OTelExporterEndpoint string
 }
 
 func Load() *Config {
@@ -57,7 +61,8 @@ func Load() *Config {
 		RedisURL:           getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		KafkaBrokers:       getEnv("KAFKA_BROKERS", "localhost:9092"),
 		NATSURL:            getEnv("NATS_URL", "nats://localhost:4222"),
-		ConsumerListenAddr: getEnv("CONSUMER_LISTEN_ADDR", ":8091"),
+		ConsumerListenAddr:   getEnv("CONSUMER_LISTEN_ADDR", ":8091"),
+		OTelExporterEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.aviron.svc.cluster.local:4317"),
 	}
 }
 

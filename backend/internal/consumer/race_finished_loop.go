@@ -7,6 +7,9 @@ import (
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/kafka"
 )
@@ -36,8 +39,21 @@ func (c *Consumer) runRaceFinishedLoop(ctx context.Context, reader *kafkago.Read
 // loop so it's unit-testable against a fake committer/reconciler/dlq,
 // without a real Kafka broker.
 func (c *Consumer) processRaceFinishedMessage(ctx context.Context, reader committer, msg kafkago.Message) {
+	// kafka.consume lands in the same trace as the publisher's kafka.produce
+	// span (RoomActor.finishRace's PublishRaceFinished) — race.finished has
+	// no batching (one message per race), so unlike workout.sample this span
+	// covers the whole decode/reconcile/commit path, not just decode
+	// (tracing/instrumentation.md).
+	msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), kafka.HeaderCarrier{Headers: &msg.Headers})
+	ctx, span := tracer.Start(msgCtx, "kafka.consume", trace.WithAttributes(
+		attribute.String("topic", kafka.TopicRaceFinished),
+		attribute.String("group_id", raceFinishedGroupID),
+	))
+	defer span.End()
+
 	decoded, decodeErr := decodeRaceFinished(msg.Value)
 	if decodeErr != nil {
+		span.RecordError(decodeErr)
 		c.logger.Warn("dropping malformed race finished message", slog.Any("error", decodeErr))
 		c.deadLetter(ctx, raceFinishedDLQTopic, msg)
 		if cerr := reader.CommitMessages(ctx, msg); cerr != nil {
@@ -50,6 +66,7 @@ func (c *Consumer) processRaceFinishedMessage(ctx context.Context, reader commit
 	err := c.reconciler.ReconcileParticipantResults(ctx, decoded.RaceID, decoded.Results)
 	c.metrics.ObserveBatchInsert(kafka.TopicRaceFinished, time.Since(start), err)
 	if err != nil {
+		span.RecordError(err)
 		if errors.Is(err, ErrPermanentWrite) {
 			c.logger.Warn("dead-lettering race finished message", slog.Any("error", err))
 			c.deadLetter(ctx, raceFinishedDLQTopic, msg)

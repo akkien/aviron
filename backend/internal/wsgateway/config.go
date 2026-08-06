@@ -44,6 +44,11 @@ type Config struct {
 	// race-service, kept as a separate field here since this is a distinct
 	// Config type (metrics/metrics-parity.md).
 	PprofEnabled bool
+	// OTelExporterEndpoint is where this process's OTLP/gRPC span exporter
+	// sends spans (tracing/instrumentation.md) — same key and default
+	// internal/config.Config reads, kept as a separate field here since this
+	// is a distinct Config type.
+	OTelExporterEndpoint string
 }
 
 // LoadConfig reads Config from the environment. RACE_SERVICE_INSTANCES is
@@ -68,8 +73,9 @@ func LoadConfig() (Config, error) {
 		// frontend origin, one shared setting.
 		AllowedOrigin: getEnv("CORS_ALLOWED_ORIGIN", "http://localhost:5173"),
 		Backends:      backends,
-		CacheTTL:      getEnvDuration("ROUTING_CACHE_TTL", 30*time.Second),
-		PprofEnabled:  getEnvBool("PPROF_ENABLED", true),
+		CacheTTL:             getEnvDuration("ROUTING_CACHE_TTL", 30*time.Second),
+		PprofEnabled:         getEnvBool("PPROF_ENABLED", true),
+		OTelExporterEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector.aviron.svc.cluster.local:4317"),
 	}, nil
 }
 

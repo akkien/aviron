@@ -18,6 +18,7 @@ import (
 	"github.com/akkien/aviron/internal/kafka"
 	"github.com/akkien/aviron/internal/metrics"
 	"github.com/akkien/aviron/internal/postgres"
+	"github.com/akkien/aviron/internal/tracing"
 )
 
 func Run(cfg *config.Config) {
@@ -28,6 +29,16 @@ func Run(cfg *config.Config) {
 	defer stop()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	shutdownTracing, err := tracing.Init(ctx, "consumer", cfg.OTelExporterEndpoint)
+	if err != nil {
+		log.Fatalf("tracing: %v", err)
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			logger.Error("tracing shutdown did not complete cleanly", slog.Any("error", err))
+		}
+	}()
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {

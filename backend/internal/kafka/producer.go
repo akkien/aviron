@@ -8,9 +8,52 @@ import (
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/room"
 )
+
+// tracer is this package's own OpenTelemetry tracer (tracing/instrumentation.md).
+var tracer = otel.Tracer("github.com/akkien/aviron/internal/kafka")
+
+// HeaderCarrier adapts a *[]kafkago.Header to propagation.TextMapCarrier, so
+// the current span's trace context can ride in a kafkago.Message's own
+// Headers field — unlike NATS, no structural change to the message type
+// itself was needed, kafkago.Message already carries Headers. Shared with
+// internal/consumer's own extraction on the receiving side, so both ends of
+// this hop agree on the same header encoding without duplicating it.
+type HeaderCarrier struct {
+	Headers *[]kafkago.Header
+}
+
+func (c HeaderCarrier) Get(key string) string {
+	for _, h := range *c.Headers {
+		if h.Key == key {
+			return string(h.Value)
+		}
+	}
+	return ""
+}
+
+func (c HeaderCarrier) Set(key, value string) {
+	for i, h := range *c.Headers {
+		if h.Key == key {
+			(*c.Headers)[i].Value = []byte(value)
+			return
+		}
+	}
+	*c.Headers = append(*c.Headers, kafkago.Header{Key: key, Value: []byte(value)})
+}
+
+func (c HeaderCarrier) Keys() []string {
+	keys := make([]string, len(*c.Headers))
+	for i, h := range *c.Headers {
+		keys[i] = h.Key
+	}
+	return keys
+}
 
 // Topic names exactly as project-overview.md §6 specifies.
 const (
@@ -61,6 +104,12 @@ type workoutSamplePayload struct {
 }
 
 func (p *Producer) PublishWorkoutSample(ctx context.Context, raceID, userID string, ts time.Time, wordsCorrect int, paceWatt float64) error {
+	ctx, span := tracer.Start(ctx, "kafka.produce", trace.WithAttributes(
+		attribute.String("topic", TopicWorkoutSample),
+		attribute.String("race_id", raceID),
+	))
+	defer span.End()
+
 	value, err := json.Marshal(workoutSamplePayload{
 		RaceID:    raceID,
 		UserID:    userID,
@@ -69,14 +118,23 @@ func (p *Producer) PublishWorkoutSample(ctx context.Context, raceID, userID stri
 		PaceWatt:  paceWatt,
 	})
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("kafka: marshal workout sample: %w", err)
 	}
-	return p.writer.WriteMessages(ctx, kafkago.Message{
-		Topic: TopicWorkoutSample,
-		Key:   []byte(raceID),
-		Value: value,
-		Time:  ts,
-	})
+
+	var headers []kafkago.Header
+	otel.GetTextMapPropagator().Inject(ctx, HeaderCarrier{Headers: &headers})
+	if err := p.writer.WriteMessages(ctx, kafkago.Message{
+		Topic:   TopicWorkoutSample,
+		Key:     []byte(raceID),
+		Value:   value,
+		Time:    ts,
+		Headers: headers,
+	}); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	return nil
 }
 
 type raceFinishedPayload struct {
@@ -85,6 +143,12 @@ type raceFinishedPayload struct {
 }
 
 func (p *Producer) PublishRaceFinished(ctx context.Context, raceID string, results []room.ParticipantResult) error {
+	ctx, span := tracer.Start(ctx, "kafka.produce", trace.WithAttributes(
+		attribute.String("topic", TopicRaceFinished),
+		attribute.String("race_id", raceID),
+	))
+	defer span.End()
+
 	resultsJSON := make([]room.RaceResultJSON, len(results))
 	for i, res := range results {
 		resultsJSON[i] = room.RaceResultJSON{
@@ -96,13 +160,22 @@ func (p *Producer) PublishRaceFinished(ctx context.Context, raceID string, resul
 	}
 	value, err := json.Marshal(raceFinishedPayload{RaceID: raceID, Results: resultsJSON})
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("kafka: marshal race finished: %w", err)
 	}
-	return p.writer.WriteMessages(ctx, kafkago.Message{
-		Topic: TopicRaceFinished,
-		Key:   []byte(raceID),
-		Value: value,
-	})
+
+	var headers []kafkago.Header
+	otel.GetTextMapPropagator().Inject(ctx, HeaderCarrier{Headers: &headers})
+	if err := p.writer.WriteMessages(ctx, kafkago.Message{
+		Topic:   TopicRaceFinished,
+		Key:     []byte(raceID),
+		Value:   value,
+		Headers: headers,
+	}); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	return nil
 }
 
 // PublishRaw republishes an already-encoded message verbatim to topic,

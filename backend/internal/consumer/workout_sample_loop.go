@@ -7,9 +7,15 @@ import (
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/akkien/aviron/internal/kafka"
 )
+
+// tracer is this package's own OpenTelemetry tracer (tracing/instrumentation.md).
+var tracer = otel.Tracer("github.com/akkien/aviron/internal/consumer")
 
 // committer is the one *kafka.Reader method flushWorkoutSampleBatch
 // actually needs — narrowed to an interface so the flush/DLQ-routing
@@ -42,8 +48,26 @@ func (c *Consumer) runWorkoutSampleLoop(ctx context.Context, reader *kafkago.Rea
 
 		switch {
 		case err == nil:
+			// kafka.consume lands in the same trace as the publisher's
+			// kafka.produce span (RoomActor.applyEvent's
+			// PublishWorkoutSample), extracted from the headers that side's
+			// Inject wrote — this gap can be minutes wide under real
+			// consumer lag, which the trace should make visible, not hide
+			// (tracing/instrumentation.md). Ends here, at decode/batch-add
+			// time, not carried into the eventual flush: flushWorkoutSampleBatch
+			// writes many messages' worth of samples in one call, a
+			// many-to-one aggregation this one message's trace shouldn't
+			// pretend to own alone.
+			msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), kafka.HeaderCarrier{Headers: &msg.Headers})
+			_, span := tracer.Start(msgCtx, "kafka.consume", trace.WithAttributes(
+				attribute.String("topic", kafka.TopicWorkoutSample),
+				attribute.String("group_id", workoutSampleGroupID),
+			))
+
 			sample, decodeErr := decodeWorkoutSample(msg.Value)
 			if decodeErr != nil {
+				span.RecordError(decodeErr)
+				span.End()
 				// A malformed message will never become parseable by
 				// retrying it — dead-letter it and commit immediately so
 				// it doesn't crash-loop the consumer on the same offset.
@@ -54,6 +78,7 @@ func (c *Consumer) runWorkoutSampleLoop(ctx context.Context, reader *kafkago.Rea
 				}
 				continue
 			}
+			span.End()
 			batch.add(sample, msg, time.Now())
 		case errors.Is(err, context.DeadlineExceeded):
 			// No message within this poll window — fall through to the

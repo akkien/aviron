@@ -15,7 +15,15 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracer is this package's own OpenTelemetry tracer (tracing/instrumentation.md)
+// — same "leaf wrapper, not business logic" reasoning Locator's own direct
+// prometheus/client_golang import already carries.
+var tracer = otel.Tracer("github.com/akkien/aviron/internal/roomlocator")
 
 // roomEventsChannel is the single shared pub/sub channel every instance
 // publishes room ownership changes to — ws-gateway.md's routing cache is
@@ -65,6 +73,16 @@ func NewLocator(client *redis.Client, instanceID string, reg prometheus.Register
 	}
 }
 
+// startSpan opens a span for one Locator method call against Redis, tagged
+// race_id (tracing/instrumentation.md) — a Redis call is request/response
+// within one process, not a message handed to another process later, so
+// unlike roomrelay/kafka there's no cross-process context to propagate here,
+// just a span per method call at the same wrapping point observe already
+// uses for metrics.
+func (l *Locator) startSpan(ctx context.Context, op, raceID string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "roomlocator."+op, trace.WithAttributes(attribute.String("race_id", raceID)))
+}
+
 // observe is safe for concurrent use: prometheus.Counter/Histogram's own
 // Inc/Observe already are, so no locking of Locator's own is needed.
 func (l *Locator) observe(op string, start time.Time, outcome string) {
@@ -97,10 +115,14 @@ func roomKey(raceID string) string {
 // normal operation (ownership is decided by construction, not contested),
 // but Claim reports it rather than silently overwriting a live claim.
 func (l *Locator) Claim(ctx context.Context, raceID string) (bool, error) {
+	ctx, span := l.startSpan(ctx, "claim", raceID)
+	defer span.End()
+
 	start := time.Now()
 	claimed, err := l.client.SetNX(ctx, roomKey(raceID), "instance:"+l.instanceID, claimTTL).Result()
 	if err != nil {
 		l.observe("claim", start, "error")
+		span.RecordError(err)
 		return false, fmt.Errorf("roomlocator: claim %s: %w", raceID, err)
 	}
 	if !claimed {
@@ -110,6 +132,7 @@ func (l *Locator) Claim(ctx context.Context, raceID string) (bool, error) {
 
 	if err := l.publish(ctx, RoomEvent{Type: RoomEventCreated, RaceID: raceID, InstanceID: l.instanceID}); err != nil {
 		l.observe("claim", start, "error")
+		span.RecordError(err)
 		return true, err
 	}
 	l.observe("claim", start, "ok")
@@ -120,15 +143,21 @@ func (l *Locator) Claim(ctx context.Context, raceID string) (bool, error) {
 // owning instance's own heartbeat so the key survives for as long as the
 // room keeps running, well past the initial claimTTL.
 func (l *Locator) Refresh(ctx context.Context, raceID string) error {
+	ctx, span := l.startSpan(ctx, "refresh", raceID)
+	defer span.End()
+
 	start := time.Now()
 	stillOwned, err := l.client.Expire(ctx, roomKey(raceID), claimTTL).Result()
 	if err != nil {
 		l.observe("refresh", start, "error")
+		span.RecordError(err)
 		return fmt.Errorf("roomlocator: refresh %s: %w", raceID, err)
 	}
 	if !stillOwned {
 		l.observe("refresh", start, "error")
-		return fmt.Errorf("roomlocator: refresh %s: claim expired before heartbeat", raceID)
+		err := fmt.Errorf("roomlocator: refresh %s: claim expired before heartbeat", raceID)
+		span.RecordError(err)
+		return err
 	}
 	l.observe("refresh", start, "ok")
 	return nil
@@ -137,14 +166,19 @@ func (l *Locator) Refresh(ctx context.Context, raceID string) error {
 // Release deletes raceID's ownership record and publishes a "removed"
 // room:events notification.
 func (l *Locator) Release(ctx context.Context, raceID string) error {
+	ctx, span := l.startSpan(ctx, "release", raceID)
+	defer span.End()
+
 	start := time.Now()
 	if err := l.client.Del(ctx, roomKey(raceID)).Err(); err != nil {
 		l.observe("release", start, "error")
+		span.RecordError(err)
 		return fmt.Errorf("roomlocator: release %s: %w", raceID, err)
 	}
 	err := l.publish(ctx, RoomEvent{Type: RoomEventRemoved, RaceID: raceID, InstanceID: l.instanceID})
 	if err != nil {
 		l.observe("release", start, "error")
+		span.RecordError(err)
 		return err
 	}
 	l.observe("release", start, "ok")
@@ -169,9 +203,13 @@ func evictedKey(raceID string) string {
 // manage" call this project already made for other small, self-limited
 // Redis state.
 func (l *Locator) MarkEvicted(ctx context.Context, raceID, userID string) error {
+	ctx, span := l.startSpan(ctx, "mark_evicted", raceID)
+	defer span.End()
+
 	start := time.Now()
 	if err := l.client.SAdd(ctx, evictedKey(raceID), userID).Err(); err != nil {
 		l.observe("mark_evicted", start, "error")
+		span.RecordError(err)
 		return fmt.Errorf("roomlocator: mark evicted %s/%s: %w", raceID, userID, err)
 	}
 	l.observe("mark_evicted", start, "ok")
@@ -181,10 +219,14 @@ func (l *Locator) MarkEvicted(ctx context.Context, raceID, userID string) error 
 // IsEvicted reports whether userID was previously marked evicted from
 // raceID — ws-gateway.md's own synchronous connection-time check.
 func (l *Locator) IsEvicted(ctx context.Context, raceID, userID string) (bool, error) {
+	ctx, span := l.startSpan(ctx, "is_evicted", raceID)
+	defer span.End()
+
 	start := time.Now()
 	evicted, err := l.client.SIsMember(ctx, evictedKey(raceID), userID).Result()
 	if err != nil {
 		l.observe("is_evicted", start, "error")
+		span.RecordError(err)
 		return false, fmt.Errorf("roomlocator: is evicted %s/%s: %w", raceID, userID, err)
 	}
 	l.observe("is_evicted", start, "ok")
@@ -194,14 +236,19 @@ func (l *Locator) IsEvicted(ctx context.Context, raceID, userID string) (bool, e
 // Owner returns the instance id currently owning raceID, and false if no
 // instance does (never claimed, or the claim expired/was released).
 func (l *Locator) Owner(ctx context.Context, raceID string) (string, bool, error) {
+	ctx, span := l.startSpan(ctx, "owner", raceID)
+	defer span.End()
+
 	start := time.Now()
 	val, err := l.client.Get(ctx, roomKey(raceID)).Result()
 	if errors.Is(err, redis.Nil) {
 		l.observe("owner", start, "not_found")
+		span.SetAttributes(attribute.String("outcome", "not_found"))
 		return "", false, nil
 	}
 	if err != nil {
 		l.observe("owner", start, "error")
+		span.RecordError(err)
 		return "", false, fmt.Errorf("roomlocator: owner %s: %w", raceID, err)
 	}
 	l.observe("owner", start, "ok")
@@ -215,8 +262,17 @@ func (l *Locator) Owner(ctx context.Context, raceID string) (string, bool, error
 // channel closes once ctx is done or the underlying subscription ends;
 // malformed payloads are skipped, not treated as fatal.
 func (l *Locator) SubscribeRoomEvents(ctx context.Context) (<-chan RoomEvent, error) {
+	// A span for the subscribe handshake itself, not this subscription's
+	// whole lifetime (same "not one span for a connection's entire
+	// lifetime" reasoning ws.join_race applies to the WS handshake) — there's
+	// no single race_id this call is scoped to, unlike every other Locator
+	// method.
+	_, span := tracer.Start(ctx, "roomlocator.subscribe_room_events")
+	defer span.End()
+
 	sub := l.client.Subscribe(ctx, roomEventsChannel)
 	if _, err := sub.Receive(ctx); err != nil {
+		span.RecordError(err)
 		sub.Close()
 		return nil, fmt.Errorf("roomlocator: subscribe room events: %w", err)
 	}

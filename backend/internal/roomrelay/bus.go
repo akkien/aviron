@@ -9,7 +9,44 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracer is this package's own OpenTelemetry tracer (tracing/instrumentation.md)
+// — same "leaf wrapper, not business logic" reasoning Bus's own direct
+// prometheus/client_golang import above already carries.
+var tracer = otel.Tracer("github.com/akkien/aviron/internal/roomrelay")
+
+// natsHeaderCarrier adapts nats.Header (a map[string][]string, like
+// http.Header) to propagation.TextMapCarrier, so the current span's trace
+// context can ride across the NATS process boundary the same way it already
+// does over an HTTP header (tracing/instrumentation.md). The only new type
+// this feature's NATS hop needs — nats.Msg.Header already exists (NATS 2.2+,
+// true of this project's nats-server/v2 v2.14.3), unlike Kafka's Producer/
+// Consumer, which needed no equivalent structural change.
+type natsHeaderCarrier nats.Header
+
+func (c natsHeaderCarrier) Get(key string) string {
+	values := c[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func (c natsHeaderCarrier) Set(key, value string) {
+	c[key] = []string{value}
+}
+
+func (c natsHeaderCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // subscriptionBuffer bounds how many not-yet-decoded messages a single
 // subscription's internal nats.Msg channel holds before nats.go itself
@@ -119,11 +156,27 @@ func publish[T any](ctx context.Context, nc *nats.Conn, subject string, env T) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	ctx, span := tracer.Start(ctx, "roomrelay.publish", trace.WithAttributes(
+		attribute.String("subject", subject),
+	))
+	defer span.End()
+
 	payload, err := json.Marshal(env)
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("roomrelay: marshal envelope: %w", err)
 	}
-	if err := nc.Publish(subject, payload); err != nil {
+
+	// PublishMsg (not the plain Publish this used before) is the real code
+	// change tracing/instrumentation.md calls for here: nats.Msg.Header is
+	// the only carrier available to inject the current span's trace context
+	// onto, so the subscriber side below can extract it back out and land in
+	// the same trace.
+	header := make(nats.Header)
+	otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(header))
+	if err := nc.PublishMsg(&nats.Msg{Subject: subject, Data: payload, Header: header}); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("roomrelay: publish %s: %w", subject, err)
 	}
 	return nil
@@ -149,10 +202,29 @@ func subscribe[T any](ctx context.Context, nc *nats.Conn, subject string, out ch
 				if !ok {
 					return
 				}
+
+				// roomrelay.receive lands in the same trace as the
+				// publisher's roomrelay.publish span, extracted from the
+				// header that side's Inject wrote — the second half of this
+				// hop's cross-process propagation (tracing/instrumentation.md).
+				// Deliberately ends here rather than being threaded further
+				// into out: T carries no context of its own, and every
+				// consumer of out (natsRoomBus, wsgateway's raceHub) is
+				// itself a many-messages-in/one-broadcast-out aggregation
+				// point past this one, not a 1:1 continuation of a single
+				// publisher's trace.
+				msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
+				_, span := tracer.Start(msgCtx, "roomrelay.receive", trace.WithAttributes(
+					attribute.String("subject", subject),
+				))
+
 				var env T
 				if err := json.Unmarshal(msg.Data, &env); err != nil {
+					span.RecordError(err)
+					span.End()
 					continue
 				}
+				span.End()
 				select {
 				case out <- env:
 				case <-ctx.Done():
