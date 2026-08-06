@@ -119,13 +119,14 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Halved from 100m/128Mi requests, 500m/256Mi limits.
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 50m
+              memory: 64Mi
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: 250m
+              memory: 128Mi
   # No volumeClaimTemplates: this StatefulSet is purely for the stable
   # per-pod network identity the headless Service below needs, not for
   # per-pod storage — race-service holds no state that must survive a

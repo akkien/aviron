@@ -85,10 +85,11 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Halved from 100m/64Mi requests, 500m/128Mi limits.
           resources:
             requests:
-              cpu: 100m
-              memory: 64Mi
+              cpu: 50m
+              memory: 32Mi
             limits:
-              cpu: 500m
-              memory: 128Mi
+              cpu: 250m
+              memory: 64Mi

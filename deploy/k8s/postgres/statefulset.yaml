@@ -49,13 +49,14 @@ spec:
               command: ["pg_isready", "-U", "aviron"]
             initialDelaySeconds: 10
             periodSeconds: 10
+          # Halved from 100m/256Mi requests, 500m/512Mi limits.
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: 50m
+              memory: 128Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: 250m
+              memory: 256Mi
   # volumeClaimTemplates, not a separately hand-written PVC — a StatefulSet
   # provisions and binds one PVC per replica from this template
   # automatically (named pgdata-postgres-0), and kind's default

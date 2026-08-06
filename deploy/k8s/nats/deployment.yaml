@@ -41,10 +41,11 @@ spec:
               port: 8222
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Halved from 50m/64Mi requests, 200m/128Mi limits.
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 25m
+              memory: 32Mi
             limits:
-              cpu: 200m
-              memory: 128Mi
+              cpu: 100m
+              memory: 64Mi
