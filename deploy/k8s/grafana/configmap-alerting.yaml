@@ -66,3 +66,9 @@ data:
     policies:
       - orgId: 1
         receiver: telegram-relay
+        # Without an explicit group_by, groupLabels ends up empty on the
+        # webhook payload telegram-relay decodes — its message title reads
+        # w.GroupLabels["alertname"], so an empty group produces a bare
+        # "FIRING:" with nothing after it. Matches alerting/alert-rules.md's
+        # Alertmanager route, which sets the same group_by explicitly.
+        group_by: ["alertname"]
