@@ -10,6 +10,7 @@ COPY . .
 RUN go build -o /out/server ./cmd/server
 RUN go build -o /out/ws-gateway ./cmd/ws-gateway
 RUN go build -o /out/consumer ./cmd/consumer
+RUN go build -o /out/telegram-relay ./cmd/telegram-relay
 
 FROM alpine:latest
 
@@ -18,6 +19,7 @@ WORKDIR /app
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/ws-gateway /app/ws-gateway
 COPY --from=builder /out/consumer /app/consumer
+COPY --from=builder /out/telegram-relay /app/telegram-relay
 COPY migrations /app/migrations
 
 CMD ["/app/server"]

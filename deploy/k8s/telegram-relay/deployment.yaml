@@ -1,0 +1,67 @@
+# alerting/telegram-relay.md — same Deployment+Service shape as
+# consumer's (metrics/metrics-parity.md): stateless, low-volume, no
+# horizontal-scaling story needed, replicas: 1.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-relay
+  namespace: aviron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telegram-relay
+  template:
+    metadata:
+      labels:
+        app: telegram-relay
+      # Scraped by Prometheus's kubernetes_sd_configs role: pod discovery
+      # (metrics/prometheus-deploy.md).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # No http.Server.Shutdown-blocking work beyond the one in-flight
+      # /alert call this process might be mid-handling — tighter than
+      # race-service's/ws-gateway's 30s, same as consumer's 15s.
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: telegram-relay
+          image: aviron-backend:local
+          imagePullPolicy: IfNotPresent
+          # The shared image's own CMD defaults to /app/server — override
+          # to run the telegram-relay binary instead, same as
+          # docker-compose.yml's own `command: ["/app/consumer"]` pattern.
+          command: ["/app/telegram-relay"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: TELEGRAM_RELAY_LISTEN_ADDR
+              value: ":8080"
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-secret
+                  key: TELEGRAM_BOT_TOKEN
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-secret
+                  key: TELEGRAM_CHAT_ID
+          # Same modest sizing as consumer's — low-volume webhook relay,
+          # not a production alert-volume target.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 125m
+              memory: 64Mi
+          # No readinessProbe/livenessProbe: this binary's only HTTP
+          # surface is /alert (an internal Alertmanager/Grafana-only
+          # caller) and /metrics — a Prometheus scrape failing simply
+          # shows the target down, it's not user-facing traffic a
+          # readiness gate needs to protect. Same call consumer's own
+          # deployment.yaml already made.

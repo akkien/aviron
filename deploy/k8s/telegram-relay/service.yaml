@@ -1,0 +1,15 @@
+# alerting/telegram-relay.md — plain ClusterIP, no Ingress: Alertmanager
+# (alerting/alert-rules.md) and Grafana's Unified Alerting (alerting/
+# log-alert-rules.md) are this Service's only callers, both in-cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-relay
+  namespace: aviron
+spec:
+  selector:
+    app: telegram-relay
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

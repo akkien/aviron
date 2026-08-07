@@ -195,6 +195,25 @@ services:
     # No healthcheck of its own — a Kafka consumer group has no HTTP
     # surface to poll.
 
+  telegram-relay:
+    build:
+      context: ./backend
+    image: aviron-backend:local
+    command: ["/app/telegram-relay"]
+    environment:
+      TELEGRAM_RELAY_LISTEN_ADDR: :8080
+      # Real values are a one-time manual @BotFather/getUpdates step
+      # (alerting/telegram-relay.md's Notes) — left blank here, same
+      # "soft fallback, not a hard requirement" LoadConfig already
+      # accepts; Notify's own sendMessage calls simply fail (logged,
+      # counted) until real values are set.
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_CHAT_ID: ""
+    ports:
+      - "8092:8080"
+    # No healthcheck of its own — same "no HTTP surface beyond /alert and
+    # /metrics to poll" stance as consumer.
+
   pgadmin:
     image: dpage/pgadmin4:latest
     environment:
