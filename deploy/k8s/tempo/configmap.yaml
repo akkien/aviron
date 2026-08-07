@@ -28,3 +28,23 @@ data:
           path: /var/tempo/traces
         wal:
           path: /var/tempo/wal
+    # trace-alert-rules.md — derives Prometheus-shaped RED metrics from
+    # every span Tempo already receives (span-metrics processor) and
+    # remote-writes them into Prometheus, so trace data can be alerted on
+    # through the existing Alertmanager pipeline instead of a separate
+    # trace-querying engine.
+    overrides:
+      defaults:
+        metrics_generator:
+          processors: [span-metrics]
+    metrics_generator:
+      storage:
+        path: /var/tempo/generator-wal
+        # remote_write is a storage-level field in Tempo's own config
+        # schema, not a sibling of storage/registry.
+        remote_write:
+          - url: http://prometheus.aviron.svc.cluster.local:9090/api/v1/write
+            send_exemplars: true
+      registry:
+        external_labels:
+          cluster: aviron-kind

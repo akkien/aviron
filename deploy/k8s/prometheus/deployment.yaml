@@ -20,6 +20,11 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
+            # trace-alert-rules.md — the one deliberate exception to this
+            # project's pull-only metrics stance (phase-6-plan.md
+            # Decisions #5), scoped narrowly to Tempo's metrics-generator
+            # remote-write path, not a general policy change.
+            - --web.enable-remote-write-receiver
           ports:
             - containerPort: 9090
               name: http

@@ -30,6 +30,8 @@ spec:
               mountPath: /var/tempo/traces
             - name: wal
               mountPath: /var/tempo/wal
+            - name: generator-wal
+              mountPath: /var/tempo/generator-wal
           # Modest — same laptop-kind-cluster scale as every other piece
           # of Phase 6 infra, not a production trace-retention target.
           resources:
@@ -62,4 +64,6 @@ spec:
         - name: traces
           emptyDir: {}
         - name: wal
+          emptyDir: {}
+        - name: generator-wal
           emptyDir: {}

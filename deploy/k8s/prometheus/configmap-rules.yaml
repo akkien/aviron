@@ -76,3 +76,12 @@ data:
             labels: { severity: critical }
             annotations:
               summary: "race-service Postgres pool above 80% acquired for 5m — the k8s-hpa.md maxReplicas:5 risk, now with a real signal"
+
+          - alert: SpanErrorRateHigh
+            expr: |
+              sum by (service) (rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+                / sum by (service) (rate(traces_spanmetrics_calls_total[5m])) > 0.1
+            for: 2m
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.service }} span error rate above 10% over 5m"
