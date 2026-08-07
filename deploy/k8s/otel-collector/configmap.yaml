@@ -24,8 +24,16 @@ data:
         limit_mib: 200
       # Reduces the number of distinct export calls under this system's
       # per-telemetry-message span volume (phase-6-plan.md Decisions #3).
+      # send_batch_size/send_batch_max_size cap each export call's size —
+      # the default send_batch_size (8192) alone isn't enough: under real
+      # multi-race load a single 5s batch's serialized byte size can
+      # exceed gRPC's 4MiB default max message size, which Tempo's OTLP
+      # receiver rejects outright (non-retryable, spans permanently
+      # dropped) rather than partially accepting.
       batch:
         timeout: 5s
+        send_batch_size: 2000
+        send_batch_max_size: 3000
     exporters:
       otlp:
         endpoint: tempo.aviron.svc.cluster.local:4317

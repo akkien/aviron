@@ -531,6 +531,81 @@ waiting on the stabilization window. Watch its logs for the sequence
 `shutdown complete`, only after the room actually finishes — not cut off
 mid-race.
 
+## Observability
+
+Metrics, traces, and logs are unified in Grafana as one correlation
+layer, with two independent alerting paths both terminating at the same
+Telegram chat. `context/features/phase6/verification/phase-6-verification.md`
+is the full walkthrough this section summarizes — a real k6 race,
+followed end to end through every pillar plus all three alert types,
+against this exact cluster.
+
+**Reaching each UI** (none but `ws-gateway` have an `Ingress` — everything
+else is `kubectl port-forward` only):
+
+```sh
+kubectl port-forward -n aviron svc/grafana 3000:3000       # http://localhost:3000, admin/admin
+kubectl port-forward -n aviron svc/kibana 5601:5601         # http://localhost:5601
+kubectl port-forward -n aviron svc/prometheus 9090:9090     # http://localhost:9090
+kubectl port-forward -n aviron svc/tempo 3200:3200          # http://localhost:3200 (query API, no UI of its own — use Grafana Explore)
+kubectl port-forward -n aviron svc/alertmanager 9093:9093   # http://localhost:9093
+```
+
+**Following one request across all three pillars** (Grafana Explore,
+Tempo data source): pick any trace, click a span, then "Explore the logs
+for this" — opens a split view with an Elasticsearch query for that exact
+`trace_id` already filled in. Confirmed live: a `ws-gateway` `ws.frame`
+span parents `roomrelay.publish`, which parents `race-service`'s
+`roomrelay.receive` — one connected trace crossing the NATS boundary, not
+two disjoint ones. The *outbound* half (room broadcast → WS fan-out) will
+never appear in that same trace — `RoomActor`'s tick-based broadcast
+(§4.2) is deliberately decoupled from any single inbound message, so
+there's no one event a broadcast's span could parent to. That's an
+architectural characteristic, not a missing span to go add.
+
+**Reading the alert-to-Telegram chain** — two independent engines, same
+destination:
+
+- **Metrics and trace-derived rules** (`alerting/alert-rules.md`'s 8
+  rules plus `alerting/trace-alert-rules.md`'s `SpanErrorRateHigh`, 9
+  total): Prometheus evaluates → fires to Alertmanager
+  (`kubectl port-forward -n aviron svc/alertmanager 9093:9093`, check
+  `/api/v2/alerts`) → Alertmanager's webhook receiver POSTs to
+  `telegram-relay`'s `/alert` → Telegram Bot API. `SpanErrorRateHigh` is
+  the one rule in this group that isn't Prometheus-native — Tempo's
+  metrics-generator derives `traces_spanmetrics_calls_total` from real
+  spans and remote-writes it into Prometheus first, so from Alertmanager's
+  point of view it's an ordinary rule.
+- **Log-based rules** (`alerting/log-alert-rules.md`'s `LogErrorRateHigh`,
+  the only rule in this group): evaluated entirely inside Grafana's own
+  Unified Alerting (`/alerting/list` in the UI, or
+  `/api/prometheus/grafana/api/v1/rules`) — Alertmanager is never
+  involved, since it can't query Elasticsearch at all. Grafana's own
+  notifier POSTs to the same `telegram-relay` `/alert` endpoint.
+- Either path: `telegram-relay`'s handler always responds `200` and only
+  logs on failure — `kubectl logs -n aviron deployment/telegram-relay`
+  staying quiet plus `aviron_telegram_relay_errors_total` staying flat
+  (`kubectl port-forward -n aviron deployment/telegram-relay 8081:8080`,
+  then `curl localhost:8081/metrics`) is the actual success signal, not
+  an absence of proof.
+
+**Two real capacity lessons, confirmed under actual multi-race load
+combined with a mid-load rolling restart** (not caught by any
+lighter-load check) — both already fixed in the manifests, recorded here
+so the next time this project scales up its load-testing, whoever's
+reading knows why these numbers are what they are:
+
+- `otel-collector`'s batch processor
+  (`deploy/k8s/otel-collector/configmap.yaml`) caps `send_batch_size`/
+  `send_batch_max_size` (2000/3000) — the un-capped default let a single
+  5-second batch grow past gRPC's 4MiB default message size under real
+  load, which Tempo rejected outright (permanent span loss, not a retry).
+- Tempo's memory limit (`deploy/k8s/tempo/deployment.yaml`) is
+  256Mi request / 512Mi limit, not the original 128Mi/256Mi — the
+  original pair predates `trace-alert-rules.md`'s metrics-generator and
+  was too small for its added footprint, confirmed via a real `OOMKilled`
+  (exit 137) under load.
+
 ## Maintaining the cluster
 
 - **Status at a glance**: `kubectl get pods -n aviron -o wide`.

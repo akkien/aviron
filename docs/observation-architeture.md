@@ -19,16 +19,22 @@ boundaries (WebSocket → NATS → Redis → Kafka → Postgres).
 | Logs — correlation | `trace_id` in `slog` output | **Shipped** | `logging/log-trace-correlation.md` |
 | Logs — backend | EFK (Elasticsearch, Fluent Bit, Kibana) | **Shipped** | `logging/efk-deploy.md` |
 | Dashboards | Grafana (RED + USE, pod-aware) | **Shipped** | `dashboards/grafana-deploy.md` |
-| Alerting — rules | Prometheus alert rules + Alertmanager | Not started | `alerting/alert-rules.md` |
-| Alerting — delivery | `telegram-relay` (new 4th binary) → Telegram | Not started | `alerting/telegram-relay.md` |
-| End-to-end proof | Full walkthrough of every piece together | Not started | `verification/phase-6-verification.md` |
+| Alerting — rules | Prometheus alert rules + Alertmanager | **Shipped** | `alerting/alert-rules.md` |
+| Alerting — delivery | `telegram-relay` (4th binary) → Telegram | **Shipped** | `alerting/telegram-relay.md` |
+| Alerting — logs | Grafana Unified Alerting on Elasticsearch | **Shipped** | `alerting/log-alert-rules.md` |
+| Alerting — traces | Tempo metrics-generator → Prometheus rule | **Shipped** | `alerting/trace-alert-rules.md` |
+| End-to-end proof | Full walkthrough of every piece together | **Shipped** | `verification/phase-6-verification.md` |
 
-The diagrams below show the *target* architecture — as of this writing,
-Metrics and the tracing infra (Collector + Tempo) are actually deployed
-and verified against the live cluster (a manual test span round-tripped
-through the Collector and was queryable via Tempo's `/api/search`); no
-application binary sends a real span yet (`tracing/instrumentation.md`),
-and nothing past that row exists in the cluster.
+Phase 6 is complete — every pillar above is deployed, instrumented, and
+verified end to end against the live cluster by
+`verification/phase-6-verification.md`'s own 12-step pass: a real k6 race
+followed through metrics, traces, and logs, plus all three alert types
+(metrics-based, log-based, trace-based) each confirmed reaching a real
+Telegram message. That pass also surfaced two real capacity bugs under
+combined heavy load — `otel-collector`'s batch size and Tempo's memory
+limit — both fixed and re-verified; see "Two real capacity lessons" under
+Pillar 4 below and `docs/k8s-deployment.md`'s Observability section for
+the operational detail.
 
 ## The whole picture
 
@@ -64,9 +70,10 @@ flowchart TB
         GRAF["Grafana<br/>single pane of glass<br/>RED + USE, per-pod"]
     end
 
-    subgraph alert["Alerting — planned"]
-        AM["Alertmanager<br/>SLO-driven rules"]
-        TG["telegram-relay<br/>new 4th binary"]
+    subgraph alert["Alerting — SHIPPED — two independent engines"]
+        AM["Alertmanager<br/>9 rules: 8 metric + 1 trace-derived"]
+        GA["Grafana Unified Alerting<br/>1 rule: LogErrorRateHigh"]
+        TG["telegram-relay<br/>4th binary — POST /alert"]
         TGAPI["Telegram Bot API"]
     end
 
@@ -78,6 +85,7 @@ flowchart TB
     WG -->|"OTLP gRPC :4317"| OTEL
     CO -->|"OTLP gRPC :4317"| OTEL
     OTEL --> TEMPO
+    TEMPO -->|"metrics-generator<br/>remote_write (spanmetrics)"| PROM
 
     RS -.->|"stdout JSON (slog)"| FB
     WG -.->|"stdout JSON"| FB
@@ -91,10 +99,12 @@ flowchart TB
 
     PROM -->|"alert rules firing"| AM
     AM -->|"webhook POST /alert"| TG
+    ES -->|"queried directly<br/>(Alertmanager can't)"| GA
+    GA -->|"webhook POST /alert"| TG
     TG -->|"sendMessage"| TGAPI
 ```
 
-Two deliberate asymmetries worth noticing in that diagram, both decided
+Three deliberate asymmetries worth noticing in that diagram, all decided
 directly with the user (`phase-6-plan.md`'s "Decisions"):
 
 - **Metrics stay pull-based** (Prometheus scrapes `/metrics` directly)
@@ -105,11 +115,21 @@ directly with the user (`phase-6-plan.md`'s "Decisions"):
   stdout directly via the node's `kubelet`, which is the standard
   Kubernetes-native path and needs no application-side change. Routing
   logs through OTLP too would just be a second path to the same data.
+- **Alerting is two independent engines, not one.** Alertmanager only
+  speaks PromQL against Prometheus — it structurally can't query
+  Elasticsearch, so `LogErrorRateHigh` (log *content*) lives in Grafana's
+  own built-in Unified Alerting instead, which can alert on any
+  provisioned data source. Trace data gets the opposite treatment: rather
+  than a third alerting engine, Tempo's metrics-generator derives
+  Prometheus-shaped RED metrics from real spans and remote-writes them
+  into Prometheus, so `SpanErrorRateHigh` is an ordinary Alertmanager
+  rule. Both engines terminate at the same `telegram-relay` webhook.
 
 ## Build order
 
-Almost linear — only two pairs can build in parallel, both because
-neither has a real code/data dependency on the other yet:
+Almost linear — only a few pairs could build in parallel, both because
+neither had a real code/data dependency on the other. All 13 specs are
+now shipped, in this order:
 
 ```mermaid
 flowchart TD
@@ -120,14 +140,20 @@ flowchart TD
     E --> F["log-trace-correlation<br/>DONE"]
     F --> C
     C --> G["grafana-deploy<br/>DONE"]
-    G --> H["alert-rules<br/>not started"]
-    H --> I["telegram-relay<br/>not started"]
-    I --> J["phase-6-verification<br/>not started"]
+    G --> H["alert-rules<br/>DONE"]
+    H --> I["telegram-relay<br/>DONE"]
+    I --> K["log-alert-rules<br/>DONE"]
+    I --> L["trace-alert-rules<br/>DONE"]
+    K --> J["phase-6-verification<br/>DONE"]
+    L --> J
 ```
 
-`prometheus-deploy` and `otel-collector-tempo-deploy` have no dependency
+`prometheus-deploy` and `otel-collector-tempo-deploy` had no dependency
 on each other either (both are pure infra) — they just happen to be drawn
 sequentially above because `prometheus-deploy` shipped first in practice.
+`log-alert-rules` and `trace-alert-rules` likewise had no dependency on
+each other — both only needed `telegram-relay`'s webhook live, and each
+plugs into a different alerting engine (Grafana's own vs. Alertmanager's).
 
 ## Pillar 1 — Metrics (shipped)
 
@@ -164,42 +190,65 @@ actually sits on top of, not just generic process stats:
 | `ws-gateway` | `aviron_ws_connections_active` |
 | `consumer` | `aviron_kafka_consumer_lag`, `aviron_consumer_batch_insert_*`, `aviron_consumer_dlq_total` |
 
-## Pillar 2 — Traces (infra shipped, app instrumentation not started)
+## Pillar 2 — Traces (shipped)
 
 Full depth, deliberately including a span per `telemetry` message (one
 per correctly-typed word) — the hot path this whole project exists to
 practice, naturally bounded by human typing speed (~0.4-2s/message per
-player). This is the diagram that shows why tracing matters here: a
-single WebSocket message's "did it get slow" question can only be
-answered by following it across two processes and a message broker.
+player). Real span names, confirmed against the code and against a live
+trace pulled from Tempo during `phase-6-verification.md`'s own pass
+(`04d554ee6224cb9d5675c0e421f0c3f1`):
 
 ```mermaid
 sequenceDiagram
     participant FE as Browser
-    participant WG as ws-gateway (WSHandler)
+    participant WG as ws-gateway
     participant NATS
     participant RS as race-service (RoomActor)
     participant OTel as OTel Collector
 
-    Note over FE,RS: One correctly-typed word → one telemetry message
+    Note over FE,RS: One correctly-typed word → one telemetry message — a real, connected trace, verified live
     FE->>WG: WS frame: telemetry, seq=N
-    WG->>WG: span ws.recv (root)
+    WG->>WG: span ws.frame (root)
     WG->>NATS: publish room.<id>.in (traceparent header)
-    WG--)OTel: export span (async, batched)
+    WG--)OTel: export span ws.frame
     NATS->>RS: deliver
-    RS->>RS: span room.applyEvent (child span)
-    RS->>RS: mutate WordsCorrect/LastSeq — no I/O
-    RS->>NATS: publish room.<id>.out
-    RS--)OTel: export span
-    NATS->>WG: deliver
-    WG->>FE: WS frame: race_state broadcast
-    WG--)OTel: export span — closes the trace
+    RS->>RS: span roomrelay.receive (child of ws.frame)
+    RS->>RS: RoomActor.applyEvent mutates WordsCorrect/LastSeq — no span of its own
+    RS--)OTel: export span roomrelay.receive — trace ends here
 ```
 
-Note what's *not* in that diagram: Prometheus doesn't scrape per message
-— it polls `/metrics` independently every ~15s and reads whatever
-`aviron_tick_latency_seconds` accumulated since the last scrape. Traces
-are per-event; metrics are aggregate. Same event, two different
+**The broadcast leg back to the browser is a *separate*, disconnected
+trace — this is a real architectural characteristic, not a missing
+span.** `RoomActor`'s tick fires every 250ms regardless of how many
+telemetry messages arrived since the last one (§4.2's own ingest/
+broadcast decoupling), so there is no single inbound message a broadcast
+could unambiguously parent to: `RoomEvent` implementations carry no
+`context.Context` at all, `RoomActor.applyEvent`/`broadcastSnapshot` have
+zero spans, and `broadcastSnapshot` doesn't even call the NATS publish
+itself — it writes to an in-process channel a separate goroutine drains
+on the tick:
+
+```mermaid
+sequenceDiagram
+    participant RS as race-service (RoomActor)
+    participant NATS
+    participant WG as ws-gateway (raceHub)
+    participant FE as Browser
+    participant OTel as OTel Collector
+
+    Note over RS,FE: Every 250ms tick — its own fresh trace, not a continuation of any inbound message
+    RS->>RS: ticker fires — broadcastSnapshot() batches whatever accumulated since the last tick
+    RS->>NATS: publish room.<id>.out
+    RS--)OTel: export span roomrelay.publish (new root — no parent)
+    NATS->>WG: deliver
+    WG->>FE: WS frame: race_state broadcast — raceHub.run has no span at all
+```
+
+Note what's *not* in either diagram: Prometheus doesn't scrape per
+message — it polls `/metrics` independently every ~15s and reads
+whatever `aviron_tick_latency_seconds` accumulated since the last scrape.
+Traces are per-event; metrics are aggregate. Same event, two different
 resolutions.
 
 The other real cross-process flow this project has — a race finishing —
@@ -228,20 +277,24 @@ sequenceDiagram
     end
 ```
 
-Every hop in both diagrams above (NATS publish/consume, Redis
-`roomlocator` lookups, Kafka produce/consume, `pgx` queries) gets its own
-span once `tracing/instrumentation.md` ships — `internal/roomlocator` in
-particular sits on the critical path of every room-scoped request, so its
-spans matter even though Redis itself has no cross-process trace
-propagation to carry.
+Every hop in both diagrams above (NATS publish/consume via
+`roomrelay.publish`/`roomrelay.receive`, Redis `roomlocator` lookups via
+`roomlocator.<op>`, Kafka produce/consume via `kafka.produce`/
+`kafka.consume`, `pgx` queries via `otelpgx`'s auto-instrumented tracer)
+gets its own span — `internal/roomlocator` in particular sits on the
+critical path of every room-scoped request, so its spans matter even
+though Redis itself has no cross-process trace propagation to carry.
 
-## Pillar 3 — Logs (not started)
+## Pillar 3 — Logs (shipped)
 
 No application code changes beyond adding `trace_id`/`span_id` to
-existing `slog` JSON lines once tracing exists — every binary already
-logs structured JSON tagged with `race_id`/`user_id`/`request_id`
-(Phase 3), so this pillar is "centralize what already exists," not
-"build logging from scratch."
+existing `slog` JSON lines — every binary already logged structured JSON
+tagged with `race_id`/`user_id`/`request_id` (Phase 3), so this pillar
+was "centralize what already exists," not "build logging from scratch."
+Confirmed live end to end in `phase-6-verification.md`'s own pass: a real
+log line's `trace_id`/`span_id` matched exactly the `ws.frame` span's IDs
+from Pillar 2 above, found both by direct Elasticsearch query and by
+clicking "Trace to logs" in Grafana's UI.
 
 ```mermaid
 flowchart LR
@@ -261,26 +314,51 @@ flowchart LR
     ES --> KIB
 ```
 
-## Pillar 4 — Alerting (not started)
+## Pillar 4 — Alerting (shipped)
 
 Real SLO-driven rules, not a generic textbook list — each one is tied to
 a failure mode this exact system can actually hit (goroutine leak, HPA
 stuck at `maxReplicas`, Kafka consumer lag, Postgres pool saturation as
 `race-service` scales toward 5 replicas each opening its own `pgxpool`).
+Two independent engines, both terminating at the same `telegram-relay`
+webhook — see the third asymmetry noted earlier for why alerting isn't
+one pipeline:
 
 ```mermaid
 flowchart LR
-    PROM["Prometheus<br/>evaluates alert rules"]
+    PROM["Prometheus<br/>9 rules: 8 metric-based<br/>+ SpanErrorRateHigh (trace-derived)"]
     AM["Alertmanager<br/>group_by: alertname, app<br/>group_wait: 30s"]
-    TG["telegram-relay<br/>new 4th binary<br/>POST /alert"]
+    GA["Grafana Unified Alerting<br/>1 rule: LogErrorRateHigh<br/>group_by: alertname"]
+    ES["Elasticsearch<br/>aviron-logs index"]
+    TG["telegram-relay<br/>4th binary<br/>POST /alert"]
     API["Telegram Bot API<br/>sendMessage"]
     Phone["Your phone"]
 
     PROM -->|"rule firing"| AM
     AM -->|"webhook JSON"| TG
+    ES -->|"queried directly<br/>Alertmanager can't"| GA
+    GA -->|"webhook JSON"| TG
     TG -->|"sendMessage"| API
     API --> Phone
 ```
+
+`SpanErrorRateHigh` is the one Alertmanager rule that isn't
+Prometheus-native — see Pillar 1's flowchart for how Tempo's
+metrics-generator bridges `traces_spanmetrics_calls_total` into
+Prometheus first, turning "alert on traces" into an ordinary rule rather
+than a third alerting engine.
+
+**`telegram-relay`'s handler always responds `200` and only logs on
+failure** (`internal/telegramrelay.NewAlertHandler`) — so from either
+engine, silence in its logs plus a flat `aviron_telegram_relay_errors_total`
+*is* the success signal, not an absence of proof. Confirmed live for all
+9 + 1 rules during `phase-6-verification.md`'s own pass, including
+closing a gap `alert-rules.md`'s own verification had left deliberately
+deferred: `PodRestartLooping` had never actually fired anywhere before
+this — forced 4 real container restarts via `crictl stop` on the `kind`
+node (`kubectl exec ... kill -9 1` doesn't work; a container's PID 1 is
+immune to signals originating from inside its own PID namespace) and
+confirmed it fired, reached Alertmanager, and reached Telegram for real.
 
 ## Correlation — the actual payoff
 
@@ -302,7 +380,7 @@ sequenceDiagram
     Graf->>Prom: PromQL (already the open dashboard)
     Op->>Graf: click exemplar → pivot to trace
     Graf->>Tempo: fetch trace by trace_id
-    Tempo-->>Graf: full span tree — ws-gateway → NATS → race-service → Redis → Kafka → pgx
+    Tempo-->>Graf: span tree — ws-gateway → NATS → race-service (see Pillar 2 for the real shape)
     Op->>Graf: click "Trace to logs"
     Graf->>Kib: query Elasticsearch for trace_id
     Kib-->>Graf: matching log lines, across every pod/replica that touched the request
@@ -315,16 +393,16 @@ sequenceDiagram
 | Prometheus | Metrics | `Deployment` | 9090 | `prom/prometheus` | Shipped |
 | `race-service`/`ws-gateway`/`consumer` `/metrics` | Metrics | (existing) | 8080 / 8080 / 8091 | `aviron-backend:local` | Shipped |
 | OTel Collector | Traces | `Deployment` | 4317 (OTLP gRPC), 13133 (health) | `otel/opentelemetry-collector:latest` (core, not `-contrib`) | Shipped |
-| Tempo | Traces | `Deployment` | 3200 (query), 4317 (OTLP) | `grafana/tempo:latest` | Shipped |
+| Tempo | Traces + trace-derived alerting | `Deployment` | 3200 (query), 4317 (OTLP) | `grafana/tempo:latest` | Shipped — metrics-generator (span-metrics processor) feeds `SpanErrorRateHigh` |
 | OTel SDK instrumentation | Traces | (app code) | n/a | `go.opentelemetry.io/otel` | Shipped |
 | `trace_id` in `slog` | Logs | (app code) | n/a | n/a | Shipped |
 | Elasticsearch | Logs | `StatefulSet` | 9200 | `docker.elastic.co/elasticsearch/elasticsearch:8.15.0` | Shipped |
 | Fluent Bit | Logs | `DaemonSet` | n/a (tails `hostPath`) | `fluent/fluent-bit` | Shipped |
 | Kibana | Logs | `Deployment` | 5601 | `docker.elastic.co/kibana/kibana:8.15.0` | Shipped |
-| Grafana | Dashboards | `Deployment` | 3000 | `grafana/grafana:latest` | Shipped |
+| Grafana | Dashboards + log-based alerting | `Deployment` | 3000 | `grafana/grafana:latest` | Shipped — Unified Alerting provisioned with `LogErrorRateHigh` |
 | `kube-state-metrics` | Dashboards (HPA panel) | `Deployment` | 8080 (metrics), 8081 (telemetry) | `registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1` | Shipped |
-| Alertmanager | Alerting | `Deployment` | n/a | `prom/alertmanager` | Not started |
-| `telegram-relay` (new 4th binary) | Alerting | `Deployment` | 8080 (`/alert`, `/metrics`) | `aviron-backend:local` (new `cmd/telegram-relay`) | Not started |
+| Alertmanager | Alerting | `Deployment` | 9093 | `prom/alertmanager` | Shipped |
+| `telegram-relay` (4th binary) | Alerting | `Deployment` | 8080 (`/alert`, `/metrics`) | `aviron-backend:local` (`cmd/telegram-relay`) | Shipped |
 
 ## Further reading
 
@@ -334,7 +412,9 @@ sequenceDiagram
 - `docs/observability.md` — general industry background on how large
   companies run observability platforms (Uber, Netflix, Google, Meta).
 - `docs/k8s-deployment.md` — the application-plane deployment this
-  observability plane sits alongside.
+  observability plane sits alongside; its `## Observability` section has
+  the actual `kubectl port-forward` commands for every UI here, plus how
+  to read the alert-to-Telegram chain for both engines.
 - `docs/knowledge-summary.md` — Phase 3's single-instance observability
   (`slog` + Prometheus + `pprof` + k6), the smaller-scale predecessor this
-  phase replaces once it ships.
+  phase replaced.

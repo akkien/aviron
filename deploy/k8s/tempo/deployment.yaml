@@ -34,13 +34,18 @@ spec:
               mountPath: /var/tempo/generator-wal
           # Modest — same laptop-kind-cluster scale as every other piece
           # of Phase 6 infra, not a production trace-retention target.
+          # Memory sized for the metrics-generator's added footprint
+          # (trace-alert-rules.md) on top of trace ingestion/storage —
+          # the original 128Mi/256Mi pair (set before metrics-generator
+          # existed) OOMKilled under real multi-race load, confirmed live
+          # (exit 137, resting usage already ~198Mi before the bump).
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 250m
-              memory: 256Mi
+              memory: 512Mi
           readinessProbe:
             httpGet:
               path: /ready

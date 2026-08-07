@@ -33,6 +33,11 @@ export const options = {
       maxDuration: '5m',
     },
   },
+  // setup() registers/logs in every VU's user sequentially (see its own
+  // comment on why) — each call costs real bcrypt time plus a real
+  // network round trip through ws-gateway to race-service, so the default
+  // 60s budget doesn't hold once TOTAL_VUS climbs past a handful.
+  setupTimeout: '3m',
 };
 
 // setup() runs once, single-threaded, before any VU executes — the only
