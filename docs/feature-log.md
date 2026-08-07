@@ -1668,3 +1668,435 @@ Phase 5's final two specs, loaded and built together since the verification scri
   3. The verification script's own rolling-update assertion was wrong for the `ws-gateway` pass specifically — it expected `race_finished` on the same connection, but `ws-gateway` correctly force-disconnects local connections instead of keeping them alive. Fixed by checking session duration instead of reusing `race-service`'s own success criterion.
 
 - Verified against the real cluster: `workout_samples`/`race_participants` both land correctly after a completed race; killing the consumer pod mid-batch (`kubectl delete pod`) produced exactly the right row set afterward — no duplicates, no gaps; a full 6-repeat run plus both rolling-update passes all pass. **This closes out Phase 5** — every dependency, and every one of this project's own binaries, now runs and has been verified on a real `kind` cluster, not just designed on paper
+
+## Dynamic Backend Discovery
+
+`ws-gateway` learns which `race-service` pods currently exist by watching Kubernetes directly, instead of trusting a fixed instance list that goes stale the moment `race-service` scales.
+
+### Goals (Dynamic Backend Discovery)
+
+- Room-less REST requests (e.g. `POST /races`) round-robin across whatever `race-service` pods currently exist, discovered live
+- No behavior change for local `go run`/`docker-compose` dev, which never scales `race-service` beyond a fixed set anyway
+
+### Explain (Dynamic Backend Discovery)
+
+- A `BackendDiscovery` interface has two implementations: `StaticBackends` (a plain `[]string`, what local dev keeps using via `RACE_SERVICE_INSTANCES`) and `K8sBackendDiscovery` (a `client-go` informer watching `EndpointSlice` objects for the `race-service` headless `Service`) — `ws-gateway`'s room-less routing code depends only on the interface, not on which implementation is live
+- `K8sBackendDiscovery` never blocks a request to compute the pool: `recompute()` runs only from the informer's own event handlers (`AddFunc`/`UpdateFunc`/`DeleteFunc`) and stores the result behind `atomic.Pointer[[]string]`, so `Backends()` is always a single atomic load
+
+  ```go
+  type BackendDiscovery interface {
+      // Backends returns the current backend pool. Called on every
+      // room-less request — must be cheap and non-blocking.
+      Backends() []string
+  }
+
+  func (d *K8sBackendDiscovery) Backends() []string {
+      return *d.backends.Load()
+  }
+  ```
+
+- `recompute()` keeps only `Ready` endpoints — a pod still starting, or mid-`terminationGracePeriodSeconds` graceful shutdown, must not receive fresh room-less traffic. This reuses the exact readiness signal `graceful-shutdown.md` already produces (kubelet only marks an `EndpointSlice` entry `Ready` once `/healthz` passes) rather than inventing a second liveness check
+- Room-scoped requests never consult this at all — they resolve via `RoomLocator.Owner` instead (Redis), which already reflects a changing `race-service` pod set on its own
+
+## Kubernetes `HorizontalPodAutoscaler`
+
+`race-service` and `ws-gateway` both scale 2-5 replicas on CPU utilization — the real prerequisite everything from `dynamic-backend-discovery.md` onward exists to make safe.
+
+### Goals (Kubernetes HorizontalPodAutoscaler)
+
+- Both services scale automatically between 2 and 5 replicas, triggered at 70% average CPU utilization
+- `metrics-server` installed as a one-time `kind`-specific prerequisite (not part of a plain `kind` cluster by default)
+
+### Explain (Kubernetes HorizontalPodAutoscaler)
+
+- Same shape for both, just a different `scaleTargetRef` kind — `race-service` targets its `StatefulSet` (`autoscaling/v2` scales anything exposing a `/scale` subresource), `ws-gateway` targets its `Deployment`:
+
+  | | `race-service` | `ws-gateway` |
+  | --- | --- | --- |
+  | `scaleTargetRef.kind` | `StatefulSet` | `Deployment` |
+  | `minReplicas` / `maxReplicas` | 2 / 5 | 2 / 5 |
+  | Metric | CPU, 70% average utilization | CPU, 70% average utilization |
+  | What actually drives it under real load | Room actor ticking + broadcast fan-out (CPU-heavy) | Thin REST proxy — needs its own dedicated burst to cross 70%, stays cheap under a normal race workload |
+
+- Only safe because `ws-gateway` already discovers `race-service` pods dynamically (`dynamic-backend-discovery.md`) — a static instance list would leave a newly-scaled `race-service` pod an unreachable, silent routing dead end
+- `kind` needs a one-time patch for `metrics-server` to work at all: kubelet's serving certs on a `kind` node aren't signed by a CA `metrics-server` trusts by default, so without `--kubelet-insecure-tls` it stays permanently unable to scrape and every HPA shows `<unknown>` instead of a real percentage
+- Verified live: `NUM_RACES=5 VUS_PER_RACE=8` via k6 crosses 70% CPU on `race-service`; a raw `ab`/REST-proxy burst crosses it on `ws-gateway`; both climb from 2 to 5 replicas and settle back down after the load stops (subject to `autoscaling/v2`'s own 5-minute default `scaleDown.stabilizationWindowSeconds`, by design — avoids flapping on a brief lull)
+
+## Metrics Parity — `ws-gateway` + `consumer`
+
+The first Phase 6 spec: closes the gap where `race-service` had `internal/metrics` and Prometheus wiring but `ws-gateway`/`consumer` had neither `/metrics` nor `/debug/pprof/*` at all.
+
+### Goals (Metrics Parity)
+
+- `ws-gateway` and `consumer` both expose `GET /metrics` (Prometheus text format) and `/debug/pprof/*`
+- Metrics tied to what each binary actually depends on cross-process — not just generic process/goroutine stats
+
+### Explain (Metrics Parity)
+
+- Each binary gets its own `prometheus.Registry` (`GatewayMetrics`, `ConsumerMetrics`) rather than sharing `race-service`'s `Metrics` type — the three processes have nothing in common to register beyond the standard Go/process collectors
+
+  | Binary | New metric | Type | What it measures |
+  | --- | --- | --- | --- |
+  | `ws-gateway` | `aviron_ws_connections_active` | `GaugeFunc` | Local WebSocket connections this instance holds, summed across every `raceHub` |
+  | `ws-gateway`/`race-service` (shared pkgs) | `aviron_roomrelay_publish_total`/`_errors_total`/`_duration_seconds` | Counter/Histogram | NATS publish rate/errors/latency, both directions |
+  | `ws-gateway`/`race-service` (shared pkgs) | `aviron_roomlocator_lookup_duration_seconds` | Histogram | Redis room-ownership lookup latency — on the critical path of every room-scoped request |
+  | `consumer` | `aviron_consumer_batch_insert_duration_seconds{topic}` | HistogramVec | Postgres batch-write duration per Kafka topic |
+  | `consumer` | `aviron_consumer_dlq_total{topic}` | CounterVec | Messages republished to a dead-letter topic |
+  | `consumer` | `aviron_kafka_consumer_lag{topic}` | `GaugeFunc` | Consumer-group lag, read from `kafka-go`'s own `*Reader.Stats()` at scrape time — no separate polling goroutine needed, `Stats()` is already safe for concurrent use |
+
+- `consumer`'s batch-insert/DLQ metrics are observed through a `MetricsRecorder` interface `ConsumerMetrics` satisfies structurally — `internal/consumer` itself never imports `prometheus`, the same seam `internal/room`'s `TickObserver` already established for `race-service`
+- No `Service`/probes needed for these — they ride on each binary's existing HTTP surface (`ws-gateway`'s admin port, `consumer`'s only HTTP surface at all)
+
+## Halve `kind` Cluster Resource Requests/Limits
+
+A small, explicitly-requested tuning pass, not tied to any spec — `kubectl top` showed every service reserving far more CPU/memory than it actually used on a laptop-sized cluster.
+
+### Goals (Halve kind Cluster Resource Requests/Limits)
+
+- Cut CPU/memory requests and limits roughly in half across `race-service`, `ws-gateway`, `redis`, `nats`, `postgres`, `consumer` — without risking an `OOMKilled` crash loop on any of them
+
+### Explain (Halve kind Cluster Resource Requests/Limits)
+
+- A strict 50% cut, not "cut down to measured usage" — the first attempt did the latter and got reverted by the user for being too aggressive; the 50% floor was set directly by the user afterward
+
+  | Service | CPU request (before → after) | Memory request (before → after) |
+  | --- | --- | --- |
+  | `ws-gateway` | 100m → 50m | 64Mi → 32Mi |
+  | (others) | halved the same way | halved the same way |
+  | Kafka | **untouched** | **untouched** |
+
+- Kafka was deliberately excluded: its ~465Mi actual usage already sits close to what a 50%-cut *limit* would allow (768Mi → 384Mi), and cutting it risked a real `OOMKilled` crash loop rather than just running leaner — flagged to the user via a direct question instead of applied silently, since this was a functional risk, not a style choice. The user's answer generalized to a standing rule: "scale down only when possible, otherwise leave untouched," applied consistently to every later resource-limit decision this project made (e.g. Tempo's memory bump in `phase-6-verification.md`, the opposite direction, for the same reason)
+- Applied live, not just edited on disk: all six pods rolled cleanly with zero `OOMKilled` restarts; node-level allocated requests dropped from 57% to 49% of the `kind` node's capacity, limits from 100% to 60%
+
+## OpenTelemetry Collector + Tempo Deployment
+
+Pure infra, no application code — stands up the single OTLP fan-out point every binary later pushes spans to, and the trace backend behind it.
+
+### Goals (OTel Collector + Tempo Deployment)
+
+- One OTel Collector `Deployment` (core distribution, not `-contrib`) receiving OTLP/gRPC on `:4317`
+- Tempo running in monolithic mode, local filesystem backend — no distributed microservices mode, this is a laptop cluster
+- A manual test span round-trips through the Collector and is queryable via Tempo's own search API before any real binary sends one
+
+### Explain (OTel Collector + Tempo Deployment)
+
+- The Collector's pipeline is deliberately minimal: `memory_limiter` first (so a misbehaving instrumented binary sheds load before `batch` even runs, protecting the Collector itself from OOM), then `batch` (fewer, larger export calls under this system's per-`telemetry`-message span volume), then the single `otlp` exporter to Tempo
+- Tempo receives OTLP directly on `:4317` too, in principle — but the Collector stays the architecture's single fan-out point on purpose, so every binary only needs to know one address rather than each hand-rolling its own per-backend exporter wiring
+- No `PersistentVolumeClaim` on either — `emptyDir` for Tempo's WAL/blocks, the same "laptop `kind` cluster, not a real retention target" stance this whole phase takes; a pod restart loses trace history, which is an accepted tradeoff, not an oversight
+
+  ```mermaid
+  flowchart LR
+      APP["race-service / ws-gateway / consumer"]
+      OTEL["OTel Collector<br/>memory_limiter -> batch -> otlp exporter"]
+      TEMPO["Tempo<br/>monolithic mode, local filesystem"]
+
+      APP -->|"OTLP gRPC :4317"| OTEL
+      OTEL -->|"OTLP gRPC :4317"| TEMPO
+  ```
+
+- Verified before any application code existed to generate real spans: a tiny Go program using `otlptracegrpc.New(..., otlptracegrpc.WithEndpoint("localhost:4317"))` against a port-forwarded Collector, then confirmed queryable via `curl 'http://localhost:3200/api/search?tags=service.name%3D<test-name>'`
+
+## Prometheus Deployment
+
+Scrapes all three binaries' `/metrics`, discovered dynamically rather than from a static target list.
+
+### Goals (Prometheus Deployment)
+
+- Prometheus scrapes `race-service`/`ws-gateway`/`consumer` automatically, without a fixed target list that would go stale the moment any of them scales
+- `/targets` shows every currently-running pod discovered, not a config-time snapshot
+
+### Explain (Prometheus Deployment)
+
+- `kubernetes_sd_configs` with `role: pod`, filtered to pods annotated `prometheus.io/scrape: "true"` — the exact same "annotation opt-in over static list" reasoning `dynamic-backend-discovery.md` already established for `ws-gateway`'s own routing, applied here to scraping instead
+
+  ```yaml
+  scrape_configs:
+    - job_name: aviron-pods
+      honor_labels: true
+      kubernetes_sd_configs:
+        - role: pod
+  ```
+
+- `honor_labels: true` turned out to matter for a real reason, found only once `kube-state-metrics` (`grafana-deploy.md`) started emitting its own native `pod`/`namespace` labels identifying the *target* object a metric describes (e.g. which pod actually restarted) — without it, this scrape job's own `relabel_configs` (meant to identify the *scraped* pod) silently clobbered those into `exported_pod`, making `PodRestartLooping`'s `{{ $labels.pod }}` always read `kube-state-metrics-xxxxx` instead of the real pod. Safe for every other target in this job since `race-service`/`ws-gateway`/`consumer` never emit their own `pod`/`app` labels natively — no collision to honor for them
+- Alertmanager wiring (`alerting.alertmanagers`) and the rule file mount (`rule_files`) both live in this same `prometheus.yml`, added later by `alert-rules.md` without touching the scrape config itself — the two concerns stay independently editable
+
+## Distributed Tracing — Instrumentation
+
+Full depth: REST/WebSocket entry points (including a span per `telemetry` message), NATS, Redis, Kafka, and `pgx` all get real spans — not just the infra to receive them.
+
+### Goals (Distributed Tracing — Instrumentation)
+
+- One shared `tracing.Init` bootstrap all three binaries call, tagged with their own `service.name`
+- A single `telemetry` message's trace crosses the `ws-gateway` → NATS → `race-service` process boundary as one connected trace
+- Every cross-process hop (NATS, Redis `roomlocator`, Kafka, `pgx`) carries its own span
+
+### Explain (Distributed Tracing — Instrumentation)
+
+- `internal/tracing.Init` wires an OTLP/gRPC exporter, a batching `TracerProvider`, and the W3C `TraceContext` propagator every cross-process hop needs to actually carry `traceparent` across a process boundary (NATS headers, Kafka headers, `otelhttp`) — one function all three `cmd/*/run.go` call the same way
+- A single correctly-typed word produces one connected, real trace — confirmed live against Tempo, not just designed: `ws-gateway`'s `ws.frame` span (the WS entry point) parents `roomrelay.publish`, which in turn parents `race-service`'s `roomrelay.receive`
+
+  ```mermaid
+  sequenceDiagram
+      participant FE as Browser
+      participant WG as ws-gateway
+      participant NATS
+      participant RS as race-service
+
+      FE->>WG: WS frame: telemetry, seq=N
+      WG->>WG: span ws.frame (root)
+      WG->>NATS: publish room.<id>.in (traceparent header)
+      NATS->>RS: deliver
+      RS->>RS: span roomrelay.receive (child of ws.frame)
+  ```
+
+- `pgx` queries get spans for free via `otelpgx.NewTracer()` wired into the connection pool's own `Tracer` field — no per-query code change anywhere `internal/db` is already used
+- **A real, deliberate limit found later by `phase-6-verification.md`, not a bug in this spec**: the outbound broadcast leg (room state → WS fan-out) never joins that same trace, and structurally can't — `RoomActor`'s tick fires every 250ms regardless of how many `telemetry` messages arrived since the last one, so there's no single inbound message a batched broadcast could unambiguously parent to. This spec's own scope only ever promised per-hop spans, not a connected round-trip
+
+## Log/Trace Correlation
+
+No new logging pipeline — every binary already logged structured JSON tagged with `race_id`/`user_id`/`request_id`. This spec adds exactly one more pair of fields.
+
+### Goals (Log/Trace Correlation)
+
+- Every `slog` line emitted from inside an active span carries that span's `trace_id`/`span_id`
+- Clicking a span in Grafana's Tempo view can jump straight to the matching log lines by `trace_id`
+
+### Explain (Log/Trace Correlation)
+
+- One small helper reads the active span off the request's `context.Context` and returns it as `slog` attributes — called wherever a log line already has a `ctx` in scope:
+
+  ```go
+  // LogAttrs returns trace_id/span_id slog attributes for ctx's active span
+  func LogAttrs(ctx context.Context) []slog.Attr {
+      sc := trace.SpanContextFromContext(ctx)
+      if !sc.IsValid() {
+          return nil
+      }
+      return []slog.Attr{
+          slog.String("trace_id", sc.TraceID().String()),
+          slog.String("span_id", sc.SpanID().String()),
+      }
+  }
+  ```
+
+- If `ctx` carries no active span (e.g. a log line outside any request), `LogAttrs` returns nil rather than emitting empty/zero-value IDs — a log line with no trace context stays exactly as it was before this spec, not polluted with a fake `trace_id`
+- Confirmed live, both directions: a real log line's `trace_id`/`span_id` matched exactly a real span's IDs pulled from Tempo, found both by direct Elasticsearch query and by clicking "Trace to logs" in Grafana's UI (`phase-6-verification.md`)
+
+## EFK Deployment
+
+Elasticsearch, Fluent Bit, and Kibana — the log storage/shipping/search backend behind the `trace_id`-tagged JSON every binary already emits.
+
+### Goals (EFK Deployment)
+
+- Fluent Bit tails every `aviron` pod's stdout and ships parsed JSON fields (not one opaque string) into Elasticsearch
+- Kibana gives full-text search over the result
+
+### Explain (EFK Deployment)
+
+- Fluent Bit runs as a `DaemonSet`, one per node, tailing container log files directly via the node's `kubelet` — the standard Kubernetes-native path, no application-side change needed
+- Two config details that look interchangeable but aren't, both found by real startup failures rather than assumed from the docs:
+
+  ```text
+  [INPUT]
+      Name              tail
+      Path              /var/log/containers/*_aviron_*.log
+      Parser            cri-log      # kind's runtime is containerd (CRI format), not Docker's own per-line JSON
+
+  [FILTER]
+      Name              kubernetes
+      Match             kube.*
+      Merge_Log         On           # only merges a field literally named "log" —
+                                      # the image's built-in "cri" parser names it "message" instead,
+                                      # which silently no-ops Merge_Log and ships one opaque string per line
+  ```
+
+- Path filtered to `*_aviron_*.log` (the kubelet-generated filename embeds `<pod>_<namespace>_<container>`) — the same "opt in by filtering" reasoning `prometheus-deploy.md`'s own annotation-based scrape opt-in already established, avoiding noise from infra pods never meant to ship
+- `Suppress_Type_Name On` on the `es` output — Elasticsearch 8 dropped mapping types entirely, and without this the `es` output plugin still tries to send a `_type` field that ES8 rejects outright
+
+## Grafana Deployment
+
+The single pane of glass tying Prometheus, Tempo, and Elasticsearch together — plus the pod-aware RED/USE dashboards this whole phase's dashboards exist to prove.
+
+### Goals (Grafana Deployment)
+
+- All three data sources (Prometheus, Tempo, Elasticsearch) provisioned and reachable, with bidirectional trace↔log correlation wired
+- RED dashboards per binary, aggregated by `pod` — not collapsed into one averaged line across 2-5 replicas
+- An HPA panel showing replica count overlaid with the CPU metric that triggered a scale event
+
+### Explain (Grafana Deployment)
+
+- All three data sources get an explicit `uid` (not Grafana's auto-generated one) — `tracesToLogsV2.datasourceUid`/`derivedFields.datasourceUid` both need a UID they can resolve deterministically for the correlation features to work at all
+- Every panel query aggregates `by (pod, ...)`, on purpose — this is what actually proves the dashboards are fleet-aware rather than just decorative:
+
+  ```json
+  {
+    "title": "Rate — roomrelay publish/sec",
+    "expr": "sum by (pod, subject_kind) (rate(aviron_roomrelay_publish_total{app=\"race-service\"}[5m]))",
+    "legendFormat": "{{pod}} ({{subject_kind}})"
+  }
+  ```
+
+- `kube-state-metrics` is a real, additional prerequisite for the HPA panel specifically — `kube_horizontalpodautoscaler_*` metrics come from it, not from any of this project's own `/metrics` endpoints, and it's scraped automatically by Prometheus's existing pod-discovery mechanism, no separate scrape job needed
+- Verified live, not just configured: ran a real k6 race and confirmed the RED dashboards populate with non-zero, correctly `pod`-labeled series for every replica that actually handled traffic; clicked a span in Tempo's Explore view and confirmed "Trace to logs" opens the exact matching Elasticsearch lines
+
+## Prometheus Alert Rules + Alertmanager Deployment
+
+Real SLO-driven rules tied to this system's actual failure modes, not a generic textbook list — the first Phase 6 spec to touch application Go code again since the tracing track.
+
+### Goals (Prometheus Alert Rules + Alertmanager Deployment)
+
+- 8 alert rules, each tied to a failure mode this exact system can actually hit
+- Alertmanager deployed, routing every firing alert toward a webhook (the not-yet-built `telegram-relay`)
+
+### Explain (Prometheus Alert Rules + Alertmanager Deployment)
+
+| Rule | Condition | Severity |
+| --- | --- | --- |
+| `ElevatedErrorRate` | Error rate > 5% over 5m | warning |
+| `TickLatencySLOBurn` | Room broadcast tick p99 > 200ms for 10m | warning |
+| `GoroutineCountTrendingUp` | Linear projection crosses 100k goroutines within 1h | warning |
+| `PodRestartLooping` | > 3 container restarts in 15m | critical |
+| `HPAStuckAtMaxReplicas` | Current replicas == max for 15m | warning |
+| `KafkaConsumerLagHigh` | Consumer lag > 2000 messages for 10m | warning |
+| `NATSReconnectStorm` | > 3 reconnects in 15m | warning |
+| `PostgresPoolSaturation` | Pool > 80% acquired for 5m | critical |
+
+- Two new metrics landed specifically to make `NATSReconnectStorm`/`PostgresPoolSaturation` possible: `aviron_nats_reconnects_total` (wired via `nats.ReconnectHandler`/`nats.DisconnectErrHandler` on both binaries' existing `nats.Connect` calls) and `aviron_pg_pool_acquired_conns`/`_max_conns` (`race-service`-only, reading `pgxpool.Pool.Stat()` at scrape time)
+- Alertmanager's route groups by `alertname`/`app` explicitly (`group_by: ["alertname", "app"]`) — this turned out to matter later: `log-alert-rules.md`'s own Grafana-side notification policy initially omitted it, and without a `group_by`, the webhook payload's `groupLabels` comes through empty, breaking the Telegram message's title
+- **A real, non-obvious bug found only through live verification**: forcing `PodRestartLooping` for real (`kubectl exec ... kill -9 1`) turned out to be a no-op — a container's PID 1 is immune to any signal, including `SIGKILL`, originating from inside its own PID namespace (`pid_namespaces(7)`'s own documented behavior). The working fix was `crictl stop` run on the `kind` node itself, outside the pod's PID namespace entirely (`docker exec aviron-control-plane crictl stop <containerID>`)
+
+## Telegram Relay
+
+The fourth binary — a small, purpose-built adapter translating Alertmanager's (and, later, Grafana's) webhook format into a real Telegram message.
+
+### Goals (Telegram Relay)
+
+- `POST /alert` accepts an Alertmanager-shaped webhook and forwards one formatted message per call to the Telegram Bot API
+- Never retry-storms a bad bot token — a failed Telegram send is logged and counted, not surfaced as a webhook failure the caller would retry
+
+### Explain (Telegram Relay)
+
+- The handler always responds `200`, regardless of whether the Telegram call itself succeeded — retrying a webhook won't fix a bad bot token, so a `Notify` failure is logged and counted (`aviron_telegram_relay_errors_total`) instead of surfaced as a non-2xx response the caller would retry forever:
+
+  ```json
+  // POST /alert (from Alertmanager or Grafana's Unified Alerting)
+  {
+    "status": "firing",
+    "groupLabels": {"alertname": "PodRestartLooping"},
+    "alerts": [{"status": "firing", "labels": {...}, "annotations": {"summary": "race-service-0 restarted more than 3 times in 15m"}}]
+  }
+  ```
+
+  ```text
+  -> HTTP/1.1 200 OK   (always, even if the Telegram send below failed)
+  ```
+
+- One Telegram message per webhook call, not per alert — every alert in one call already shares the same `alertname`/`app` (the caller's own `group_by`), so the formatted message's header appears once and each alert's own `summary` annotation becomes its own line underneath
+- A dedicated `telegram-secret` rather than two extra keys on the shared `aviron-secret` — a deliberate blast-radius choice confirmed directly with the user: rotating or viewing the bot token should never touch `JWT_SECRET`/`POSTGRES_PASSWORD`
+- Since silence is this handler's success signal (it only logs on failure), verification meant watching for the *absence* of an error line plus a flat `aviron_telegram_relay_errors_total`, confirmed alongside a real message actually landing in the configured Telegram chat — not inferring success from a lack of visible feedback alone
+
+## Log-Based Alert Rule — Grafana Alerting on Elasticsearch
+
+A second, parallel alerting path for the one thing Alertmanager structurally can't reach: log *content*.
+
+### Goals (Log-Based Alert Rule)
+
+- One rule, `LogErrorRateHigh`: count of `level:ERROR` documents in the `aviron-logs` index over 5m, threshold `>10`
+- Routes through the same `telegram-relay` webhook, no new adapter
+
+### Explain (Log-Based Alert Rule)
+
+- Alertmanager only ever speaks PromQL against Prometheus — it has no way to query Elasticsearch at all, so this rule lives entirely inside Grafana's own built-in Unified Alerting instead, provisioned as config on the already-running Grafana `Deployment` (no new pod, no new `Service`)
+- **A real bug in the spec's own sketch, caught only by a live evaluation**: a `threshold` expression can't operate directly on a `date_histogram`-bucketed query's time-series output — Grafana rejects it outright (`"looks like time series data, only reduced data can be alerted on"`). Fixed by inserting a `reduce` step in between:
+
+  ```yaml
+  data:
+    - refId: A
+      datasourceUid: elasticsearch
+      model:
+        query: "level:ERROR"
+        bucketAggs: [{ type: date_histogram, id: "2", field: "@timestamp" }]
+    - refId: B   # <- the missing piece: date_histogram's time series has no
+      datasourceUid: __expr__ #    single scalar value a threshold can compare
+      model:
+        type: reduce
+        expression: A
+        reducer: sum
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        type: threshold
+        expression: B   # not A
+        conditions: [{ evaluator: { type: gt, params: [10] } }]
+  ```
+
+- A second real bug, found only once the actual Telegram message text was inspected rather than just confirming delivery: the notification policy's missing `group_by` meant `groupLabels` came through empty on the webhook payload, so `telegram-relay`'s title read a bare "FIRING:" with nothing after it. Fixed by adding `group_by: ["alertname"]` to match `alert-rules.md`'s own Alertmanager route
+- Triggered for real: scaling `race-service` to 0 and bursting a room-less REST route crosses the threshold via `ws-gateway`'s own `"no backends available"` ERROR logs almost immediately — confirmed firing in Grafana's UI and a real message landing in Telegram
+
+## Trace-Based Alert Rule — Tempo Metrics-Generator
+
+The trace-data counterpart to the log-based rule above — but deliberately *not* a third alerting engine.
+
+### Goals (Trace-Based Alert Rule)
+
+- One rule, `SpanErrorRateHigh`: a service's span error ratio (`STATUS_CODE_ERROR` / total calls) above 10% over 5m
+- Appended to the same Alertmanager pipeline `alert-rules.md` already owns — no new receiver, no new `ConfigMap`
+
+### Explain (Trace-Based Alert Rule)
+
+- Tempo has no native "count over a threshold" query interface the way Elasticsearch does, so the standard mechanism is different: Tempo's own metrics-generator derives Prometheus-shaped RED metrics (`traces_spanmetrics_calls_total`) from every span it already receives and remote-writes them into Prometheus — turning "alert on traces" into one more ordinary Prometheus rule instead of a second log-alerting-style engine
+- **A real bug in the spec's own sketch, confirmed after it crashed the pod**: `remote_write` is a `storage`-level field in Tempo's config schema, not a sibling of `storage`/`registry` as the spec assumed — the literal sketch failed to parse (`field remote_write not found in type generator.Config`):
+
+  ```yaml
+  metrics_generator:
+    storage:
+      path: /var/tempo/generator-wal
+      remote_write:              # nested under storage, not top-level
+        - url: http://prometheus.aviron.svc.cluster.local:9090/api/v1/write
+    registry:
+      external_labels:
+        cluster: aviron-kind
+  ```
+
+- Prometheus needed one new flag to accept the push, `--web.enable-remote-write-receiver` — the one deliberate exception to this project's otherwise pull-only metrics stance, scoped narrowly to this single path
+- **The spec's own trigger method doesn't actually work against this codebase**: scaling `postgres` to 0 makes `race-service`'s `/healthz` readiness probe fail (it checks Postgres), which pulls the pod out of `ws-gateway`'s routing entirely before any request — and thus any span — is ever produced. Triggered instead by port-forwarding directly to the `race-service` pod, bypassing the readiness gate, to get a real `500` inside a live span
+- Confirmed live: `traces_spanmetrics_calls_total` flowing into Prometheus with exactly the labels the rule expects (`service`, `status_code`); the rule fired at a real ratio of `0.606`; reached Alertmanager and Telegram
+
+## Phase 6 Verification
+
+The last spec: not new features, but the one pass that generates a real race and follows it through every pillar plus all three alert types as a single connected story — proving the pieces work *together*, not just in isolation.
+
+### Goals (Phase 6 Verification)
+
+- 12 concrete pass/fail checks, from "every pod is Running" through a real `go test ./... -race` run
+- Whatever small fixes the steps surface get made — not pre-built, scoped to what a real run actually shows
+
+### Explain (Phase 6 Verification)
+
+| Step | What it proved | Real finding |
+| --- | --- | --- |
+| 1-3 | All pods healthy; real k6 race generates traffic; RED dashboards show non-collapsed per-`pod` series | HPA scaled `race-service` to 5 replicas live during the run |
+| 4 | A `telemetry` trace crosses `ws-gateway` → NATS → `race-service` | The outbound broadcast leg can never join that trace — documented as architectural, not fixed (`tracing/instrumentation.md`'s entry above) |
+| 5 | Collector/Tempo keep up under load | 18,216 spans, zero drops — ~137/sec, well past the original 5-25/sec estimate |
+| 6 | "Trace to logs" lands on the matching document | Same Elasticsearch doc ID confirmed both by direct query and by the UI click-through |
+| 7 | A real metrics-based alert reaches Telegram | Closed `alert-rules.md`'s own deferred gap — `PodRestartLooping` had never actually fired anywhere before this |
+| 8-9 | `LogErrorRateHigh`/`SpanErrorRateHigh` still reach Telegram as part of one coherent pass | Confirmed alongside everything else, not re-litigated in isolation |
+| 10 | HPA panel shows replicas overlaid with CPU | Visually confirmed 2→5 climbing in lockstep with the metric that triggered it |
+| 11 | Mid-load rolling restart doesn't break the pipeline | Two real capacity bugs found (below), one open gap left documented |
+| 12 | `go build`/`go test ./... -race` | Clean, forced non-cached run |
+
+- Two real capacity bugs, found only by combining heavy load (a real k6 race plus a 60k-request `ab` burst together) with a mid-load rolling restart — neither ever surfaced by any earlier, lighter-load step:
+
+  ```yaml
+  # otel-collector: the un-capped default (send_batch_size: 8192) let a single
+  # 5s batch exceed gRPC's 4MiB default message size — Tempo rejected it as
+  # non-retryable, permanently dropping thousands of spans per event
+  batch:
+    timeout: 5s
+    send_batch_size: 2000
+    send_batch_max_size: 3000
+  ```
+
+  Tempo itself got `OOMKilled` under the same load — its `256Mi` memory limit predated `trace-alert-rules.md`'s metrics-generator and was too small for the added footprint; bumped to `256Mi request / 512Mi limit`. Both re-verified fixed under the identical load that broke them
+- One finding left genuinely open, confirmed with the user rather than guessed at: a handful of Fluent Bit chunks got stuck in growing retry backoffs against Elasticsearch despite its write thread pool showing zero rejections — root-causing it needs debug-level Fluent Bit logging this pass didn't apply
+- The rolling restart itself, otherwise, was clean: all 40 WebSocket sessions/iterations completed with zero interrupted iterations — in-progress races survived real pod churn uncorrupted. **This closes out Phase 6 entirely.**
