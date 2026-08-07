@@ -1,0 +1,68 @@
+# alerting/log-alert-rules.md — Grafana's own Unified Alerting, not
+# Alertmanager: the only engine in this stack that can query Elasticsearch
+# log content directly, since Alertmanager only speaks PromQL against
+# Prometheus. A second, parallel alerting path terminating at the same
+# telegram-relay webhook as alerting/alert-rules.md's Alertmanager rules.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting
+  namespace: aviron
+data:
+  rules.yaml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: aviron-log-alerts
+        folder: aviron
+        interval: 1m
+        rules:
+          - uid: log-error-rate-high
+            title: LogErrorRateHigh
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "aviron-logs: more than 10 ERROR-level log lines in the last 5m"
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: elasticsearch
+                relativeTimeRange: { from: 300, to: 0 }
+                model:
+                  query: "level:ERROR"
+                  timeField: "@timestamp"
+                  metrics: [{ type: count, id: "1" }]
+                  bucketAggs: [{ type: date_histogram, id: "2", field: "@timestamp" }]
+              # A's date_histogram bucketing returns a time series; the
+              # threshold expression below only accepts reduced (scalar)
+              # data, hence this sum-reduce step in between.
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: sum
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator: { type: gt, params: [10] }
+  contactpoints.yaml: |
+    apiVersion: 1
+    contactPoints:
+      - orgId: 1
+        name: telegram-relay
+        receivers:
+          - uid: telegram-relay-webhook
+            type: webhook
+            settings:
+              url: http://telegram-relay.aviron.svc.cluster.local:8080/alert
+              httpMethod: POST
+  policies.yaml: |
+    apiVersion: 1
+    policies:
+      - orgId: 1
+        receiver: telegram-relay

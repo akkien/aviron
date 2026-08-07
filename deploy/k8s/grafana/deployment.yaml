@@ -31,6 +31,8 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards
             - name: dashboards
               mountPath: /var/lib/grafana/dashboards
+            - name: alerting
+              mountPath: /etc/grafana/provisioning/alerting
           resources:
             requests:
               cpu: 50m
@@ -60,3 +62,6 @@ spec:
         - name: dashboards
           configMap:
             name: grafana-dashboards
+        - name: alerting
+          configMap:
+            name: grafana-alerting
