@@ -10,11 +10,11 @@
 
 ## Explain
 
-<!-- Populated by `load` -->
+<!-- Explain the feature/spec (populated by `load`) -->
 
 ## Plan
 
-<!-- Detailed implementation plan, architecture/design notes, tradeoffs -->
+<!-- Detailed plan for implementation, including any notes on architecture, design, tradeoffs. Call out anything that diverges from the design in context/project-overview.md and why. -->
 
 ## Notes
 
