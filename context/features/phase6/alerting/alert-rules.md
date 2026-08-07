@@ -166,3 +166,7 @@ not a new Prometheus deployment.
   actually tries to fire against a not-yet-existing Service).
 - No PagerDuty/Opsgenie receiver — `phase-6-plan.md`'s "Explicitly still
   out of scope" already covers why.
+- `alerting/trace-alert-rules.md` later appends a 9th rule
+  (`SpanErrorRateHigh`) to this same rule `ConfigMap`/group and reuses
+  this spec's Alertmanager `route`/`receivers` block unchanged — no
+  second Alertmanager, no second `ConfigMap`.

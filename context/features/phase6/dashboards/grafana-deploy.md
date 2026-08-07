@@ -157,3 +157,7 @@ that only lives in one person's browser session" stance.
 - Depends on `metrics/prometheus-deploy.md`, `tracing/otel-collector-
   tempo-deploy.md`, and `logging/efk-deploy.md` all already deployed —
   the last spec in the "wire up the four pillars" chain before alerting.
+- `alerting/log-alert-rules.md` later mounts a fourth provisioning
+  `ConfigMap` onto this same `Deployment`
+  (`/etc/grafana/provisioning/alerting`) — not this spec's concern, just
+  flagged here since it touches the `Deployment` this spec owns.

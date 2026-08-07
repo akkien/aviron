@@ -137,3 +137,12 @@ type AlertmanagerWebhook struct {
 - `verification/phase-6-verification.md` is where a real alert actually
   reaches a real Telegram chat, proving the whole chain rather than just
   this service's own unit-level behavior.
+- This `/alert` endpoint ends up with two callers, not one:
+  Alertmanager (`alerting/alert-rules.md`, and later `alerting/trace-
+  alert-rules.md`'s rule through the same Alertmanager) and, separately,
+  Grafana's own Unified Alerting (`alerting/log-alert-rules.md`) via a
+  webhook contact point. Grafana's webhook payload is expected to be
+  structurally close enough to Alertmanager's classic format that
+  `AlertmanagerWebhook` decodes both without a format-specific branch —
+  `log-alert-rules.md` flags confirming that against a real Grafana
+  instance as an open item, not assumed here.

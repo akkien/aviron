@@ -206,6 +206,26 @@ Decided directly with the user:
    (pod, ...)`) so a dashboard can show both the fleet-wide picture and
    which specific replica is the outlier, not just a number that
    silently averages 2-5 pods together.
+8. **Log-based alerting: Grafana's own Unified Alerting, not
+   Alertmanager. Trace-based alerting stays on the existing Alertmanager
+   pipeline instead of a third alerting path.** Alertmanager only
+   evaluates PromQL against Prometheus — it has no way to query
+   Elasticsearch, so a rule that alerts on log *content*
+   (`alerting/log-alert-rules.md`) lives in Grafana's built-in Unified
+   Alerting engine, which can alert on any provisioned datasource
+   (including the Elasticsearch datasource `dashboards/grafana-
+   deploy.md` already wires up) and route through a webhook contact
+   point — no new Deployment, just provisioning config on the Grafana
+   pod that already exists. Traces get the opposite treatment: Tempo
+   isn't a "count over a threshold" query source the way Elasticsearch
+   is, so the standard mechanism is Tempo's own metrics-generator
+   deriving RED metrics from spans and remote-writing them into
+   Prometheus (`alerting/trace-alert-rules.md`) — turning "alert on
+   traces" into one more Prometheus rule rather than standing up a
+   second alerting engine for it. Net result: two alerting engines
+   total (Alertmanager for metrics and trace-derived metrics, Grafana
+   Alerting for logs), both terminating at the same `telegram-relay`
+   webhook.
 
 ## Explicitly still out of scope, even at this ambition level
 
@@ -248,6 +268,8 @@ context/features/phase6/
     alert-rules.md              # Prometheus alert rules (see Decisions #4 for the concrete
                                  # rule list) + Alertmanager deployment
     telegram-relay.md           # new adapter service + Alertmanager webhook wiring
+    log-alert-rules.md          # Grafana Alerting rule on Elasticsearch logs (Decisions #8)
+    trace-alert-rules.md        # Tempo metrics-generator -> Prometheus rule (Decisions #8)
   verification/
     phase-6-verification.md     # full walkthrough, see "Next" below
 ```
@@ -285,6 +307,14 @@ alerting/alert-rules              (needs Prometheus already deployed and scrapin
 alerting/telegram-relay           (needs Alertmanager already deployed to webhook into)
         |
         v
+alerting/log-alert-rules           (needs dashboards/grafana-deploy's Elasticsearch
+        |                          datasource and alerting/telegram-relay's webhook live)
+        v
+alerting/trace-alert-rules         (needs tracing/instrumentation's spans flowing,
+        |                          metrics/prometheus-deploy to add the remote-write-receiver
+        |                          flag, and alerting/alert-rules' rule file to append to —
+        |                          no dependency on log-alert-rules, could build in parallel)
+        v
 verification/phase-6-verification
 ```
 
@@ -292,7 +322,10 @@ verification/phase-6-verification
 no dependency on each other and could be built in either order or in
 parallel; `logging/efk-deploy` similarly has no hard dependency on the
 tracing track beyond wanting `trace_id` already flowing before the
-correlation view is worth demoing. The rest is close to linear.
+correlation view is worth demoing. `alerting/log-alert-rules` and
+`alerting/trace-alert-rules` likewise have no dependency on each other —
+shown sequentially here only for readability. The rest is close to
+linear.
 
 ## Next
 

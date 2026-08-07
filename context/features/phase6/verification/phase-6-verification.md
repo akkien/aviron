@@ -4,11 +4,12 @@
 
 The real proof this phase exists to deliver: metrics, traces, and logs
 for a genuine end-to-end race, correlated with each other in Grafana, with
-a real alert reaching Telegram. Every other Phase 6 spec proves its own
-piece works in isolation (each has its own "Verification" section) — this
-spec is what proves the pieces work *together*, the same role `multi-
-instance-k8s-verification.md` played for Phase 5's individual manifests.
-Depends on every other Phase 6 spec already being deployed.
+real alerts — metric-based, log-based, and trace-based — reaching
+Telegram. Every other Phase 6 spec proves its own piece works in isolation
+(each has its own "Verification" section) — this spec is what proves the
+pieces work *together*, the same role `multi-instance-k8s-verification.md`
+played for Phase 5's individual manifests. Depends on every other Phase 6
+spec already being deployed.
 
 ## Requirements
 
@@ -21,10 +22,13 @@ real run actually shows).
 ## Verification
 
 1. **Everything's up**: `kubectl get pods -n aviron` shows every
-   component from all 9 preceding specs `Running`/`Ready` — `prometheus`,
+   component from all 11 preceding specs `Running`/`Ready` — `prometheus`,
    `otel-collector`, `tempo`, `elasticsearch`, `fluent-bit` (one per
    node), `kibana`, `grafana`, `alertmanager`, `telegram-relay`, plus the
    three application binaries and their existing infra.
+   `alerting/log-alert-rules.md` and `alerting/trace-alert-rules.md` add
+   no new pods — provisioning config on `grafana` and `tempo`/
+   `prometheus` respectively, not new components.
 2. **Generate a real race**: run `load/`'s existing `race-lifecycle.js`
    k6 scenario (or several concurrent races) against the in-cluster
    `Ingress`, enough players and duration to produce a meaningful volume
@@ -61,26 +65,46 @@ real run actually shows).
    `/alerts`, reaches Alertmanager, reaches `telegram-relay`, and a real
    message lands in the configured Telegram chat — the full chain, not
    any single hop in isolation.
-8. **HPA scale event, visible in context**: push load past 70% CPU on
-   `race-service`/`ws-gateway` (same load pattern `k8s-hpa.md`'s own
-   verification already used) and confirm Grafana's HPA panel
-   (`dashboards/grafana-deploy.md`) shows the replica count climbing
-   overlaid with the CPU metric that triggered it — the dashboard
-   actually explaining a scale event, not just displaying two unrelated
-   numbers.
-9. **Scale-down/rolling-update doesn't break the pipeline**: trigger a
-   scale-down or rolling update mid-load (same scenario `k8s-hpa.md`'s
-   and `graceful-shutdown.md`'s own verification already exercise for
-   in-progress races) and confirm the Collector/Fluent Bit/Prometheus
-   simply see a terminated source gracefully — no crash-loop, no stuck
-   scrape target, an incomplete trace for whatever was mid-flight but
-   nothing corrupted.
-10. **`go build ./...`/`go test ./... -race`** — expected to be
+8. **A log-based alert reaches Telegram, via the other alerting engine**:
+   trigger `alerting/log-alert-rules.md`'s `LogErrorRateHigh` for real —
+   scale `race-service` to 0 replicas and burst a room-less REST route
+   until `ws-gateway`'s `"wsgateway: no backends available"` ERROR logs
+   cross the threshold. Confirm: Grafana's Alerting UI shows the rule
+   transition to "Alerting", `telegram-relay` receives the webhook POST,
+   and a real message lands in Telegram — proving Grafana's own Unified
+   Alerting → `telegram-relay` path works end to end, separately from
+   Alertmanager's.
+9. **A trace-based alert reaches Telegram, via the metrics-generator
+   bridge**: trigger `alerting/trace-alert-rules.md`'s
+   `SpanErrorRateHigh` for real — briefly scale Postgres to 0 and burst
+   an endpoint that depends on it until the resulting 500s' span error
+   ratio crosses 10%. Confirm `traces_spanmetrics_calls_total` is really
+   flowing from Tempo's metrics-generator into Prometheus, the rule
+   fires in Prometheus's `/alerts`, reaches Alertmanager, reaches
+   `telegram-relay`, and a real message lands in Telegram — proving
+   traces can feed the same Alertmanager pipeline as metrics, not just
+   Prometheus-native signals.
+10. **HPA scale event, visible in context**: push load past 70% CPU on
+    `race-service`/`ws-gateway` (same load pattern `k8s-hpa.md`'s own
+    verification already used) and confirm Grafana's HPA panel
+    (`dashboards/grafana-deploy.md`) shows the replica count climbing
+    overlaid with the CPU metric that triggered it — the dashboard
+    actually explaining a scale event, not just displaying two unrelated
+    numbers.
+11. **Scale-down/rolling-update doesn't break the pipeline**: trigger a
+    scale-down or rolling update mid-load (same scenario `k8s-hpa.md`'s
+    and `graceful-shutdown.md`'s own verification already exercise for
+    in-progress races) and confirm the Collector/Fluent Bit/Prometheus
+    simply see a terminated source gracefully — no crash-loop, no stuck
+    scrape target, an incomplete trace for whatever was mid-flight but
+    nothing corrupted.
+12. **`go build ./...`/`go test ./... -race`** — expected to be
     non-trivial this time, unlike `k8s-hpa.md`'s own manifests-only spec:
     this phase adds real Go code (`tracing/instrumentation.md`, `logging/
     log-trace-correlation.md`, `metrics/metrics-parity.md`,
     `alerting/telegram-relay.md`'s new binary) — run the full suite, not
-    skip it as a formality.
+    skip it as a formality. `alerting/log-alert-rules.md`/`alerting/
+    trace-alert-rules.md` add no Go code of their own, just manifests.
 
 ## Notes
 

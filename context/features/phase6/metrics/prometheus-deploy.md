@@ -189,3 +189,7 @@ spec:
   `phase-6-plan.md`'s "Dependency order".
 - Alertmanager wiring (`alerting/alert-rules.md`) is a separate spec, not
   bundled here — this spec is scrape + storage only.
+- `alerting/trace-alert-rules.md` later adds `--web.enable-remote-
+  write-receiver` to this Deployment's `args` — the one push path into
+  an otherwise pull-only Prometheus, needed so Tempo's metrics-generator
+  can remote-write span-derived metrics here.

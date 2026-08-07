@@ -128,3 +128,8 @@ regression from anything this project already promises elsewhere.
 - Grafana's Tempo data source (`dashboards/grafana-deploy.md`) points at
   `tempo.aviron.svc.cluster.local:3200`, not the Collector — Grafana
   queries Tempo directly, never through the Collector.
+- `alerting/trace-alert-rules.md` later adds a `metrics_generator` block
+  to this spec's `tempo.yaml`, deriving RED metrics from spans and
+  remote-writing them into Prometheus so a Prometheus alert rule can fire
+  on trace-derived signals — not this spec's concern, flagged here since
+  it touches the `ConfigMap` this spec owns.
